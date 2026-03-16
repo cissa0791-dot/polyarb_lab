@@ -1,0 +1,13 @@
+clob_host: "https://clob.polymarket.com"
+gamma_host: "https://gamma-api.polymarket.com"
+min_edge_cents: 0.03
+max_notional_per_arb: 100.0
+vwap_depth_cap: 100.0
+scan_interval_sec: 2
+fee_buffer_cents: 0.01
+slippage_buffer_cents: 0.01
+stale_book_sec: 3
+sqlite_url: "sqlite:///data/processed/paper.db"
+starting_cash: 10000.0
+market_limit: 200
+log_level: "DEBUG"

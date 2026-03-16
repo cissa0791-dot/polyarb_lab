@@ -1,0 +1,21 @@
+single_market:
+  enabled: true
+
+cross_market:
+  - name: "strong_win_implies_win"
+    lhs:
+      market_slug: "candidate-x-win-by-5"
+      side: "YES"
+    rhs:
+      market_slug: "candidate-x-win"
+      side: "YES"
+    relation: "leq"
+
+  - name: "subset_example"
+    lhs:
+      market_slug: "team-a-win-by-10"
+      side: "YES"
+    rhs:
+      market_slug: "team-a-win"
+      side: "YES"
+    relation: "leq"
