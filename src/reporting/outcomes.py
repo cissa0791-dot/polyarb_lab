@@ -377,7 +377,7 @@ def build_outcome_records_from_corpus(records: Iterable[Any]) -> list[OutcomeEva
                 kind=str(getattr(record, "kind", "unknown")),
                 market_slugs=list(getattr(record, "market_slugs", []) or []),
                 run_id=_string_or_none(getattr(record, "run_id", None)),
-                legs=list(qualification.get("legs") or raw_candidate.get("legs") or []),
+                legs=list(qualification.get("legs") or raw_candidate.get("legs") or getattr(record, "legs", []) or []),
                 ts=getattr(record, "ts"),
                 ranking_score=_as_float(getattr(record, "ranking_score", None)),
                 gross_edge_cents=_as_float(getattr(record, "gross_edge_cents", None)),

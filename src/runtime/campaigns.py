@@ -178,6 +178,34 @@ CAMPAIGN_PRESETS: dict[str, ResearchCampaignPreset] = {
         experiment_label_prefix="diversification",
         metadata={"campaign_preset": "diversification_collection"},
     ),
+    "maker_rewarded_event_mm_v1": ResearchCampaignPreset(
+        preset_name="maker_rewarded_event_mm_v1",
+        description="Collect maker-MM evidence for the reward-eligible event cohort.",
+        purpose="Accumulate paper-execution evidence for the MAKER_REWARDED_EVENT_MM_V1 strategy family.",
+        notes=(
+            "Uses experiment-context pass-through for all maker-MM controls. "
+            "Does NOT use a parameter set override — maker-MM config is path-local "
+            "and must not contaminate shared arb opportunity filtering. "
+            "To extend the cohort, pass maker_mm_cohort via extra_context or update the class constant."
+        ),
+        target_strategy_families=["maker_rewarded_event_mm_v1"],
+        target_parameter_sets=["runtime_default"],
+        cycles=1,
+        market_limit=200,
+        run_cadence_note="manual-maker-mm-v1",
+        experiment_label_prefix="maker-mm-v1",
+        metadata={
+            "campaign_preset": "maker_rewarded_event_mm_v1",
+            "maker_mm_cohort": [
+                "next-prime-minister-of-hungary",
+                "netanyahu-out-before-2027",
+                "balance-of-power-2026-midterms",
+                "next-james-bond-actor-635",
+            ],
+            "maker_mm_min_edge": 0.005,
+            "maker_mm_g6_margin": 1.25,
+        },
+    ),
 }
 
 

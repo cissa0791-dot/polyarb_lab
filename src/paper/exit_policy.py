@@ -22,6 +22,19 @@ def evaluate_exit(mark: PositionMark, config: PaperConfig, force_reason: str | N
             ts=now,
         )
 
+    if config.edge_decay_bid_delta > 0 and (mark.mark_price - mark.avg_entry_price) >= config.edge_decay_bid_delta:
+        return ExitSignal(
+            position_id=mark.position_id,
+            candidate_id=mark.candidate_id,
+            symbol=mark.symbol,
+            market_slug=mark.market_slug,
+            reason_code="EDGE_DECAY",
+            expected_exit_price=mark.mark_price,
+            expected_unrealized_pnl_usd=mark.unrealized_pnl_usd,
+            age_sec=mark.age_sec,
+            ts=now,
+        )
+
     if config.take_profit_usd > 0 and mark.unrealized_pnl_usd >= config.take_profit_usd:
         return ExitSignal(
             position_id=mark.position_id,

@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 from unittest.mock import patch
 
-from src.ingest.gamma import fetch_markets
+from src.ingest.gamma import fetch_markets, fetch_markets_from_events
 
 
 class _FakeResponse:
@@ -77,6 +77,67 @@ class GammaPaginationTests(unittest.TestCase):
         with patch("src.ingest.gamma.httpx.get") as mocked_get:
             self.assertEqual(fetch_markets("https://gamma-api.polymarket.com", limit=0), [])
             mocked_get.assert_not_called()
+
+    def test_fetch_markets_from_events_flattens_and_deduplicates(self) -> None:
+        pages = {
+            0: [
+                {
+                    "id": "evt-1",
+                    "slug": "event-1",
+                    "title": "Event 1",
+                    "markets": [
+                        {"id": "m-1", "slug": "market-1"},
+                        {"id": "m-2", "slug": "market-2"},
+                    ],
+                },
+                {
+                    "id": "evt-2",
+                    "slug": "event-2",
+                    "title": "Event 2",
+                    "markets": [
+                        {"id": "m-2", "slug": "market-2-duplicate"},
+                        {"slug": "slug-only-market"},
+                    ],
+                },
+            ],
+            100: [],
+        }
+        offsets_seen: list[int] = []
+
+        def fake_get(url, params, timeout):
+            self.assertEqual(url, "https://gamma-api.polymarket.com/events")
+            offsets_seen.append(int(params["offset"]))
+            return _FakeResponse(pages.get(int(params["offset"]), []))
+
+        with patch("src.ingest.gamma.httpx.get", side_effect=fake_get):
+            markets = fetch_markets_from_events("https://gamma-api.polymarket.com", limit=10)
+
+        self.assertEqual(offsets_seen, [0])
+        self.assertEqual(
+            markets,
+            [
+                {
+                    "id": "m-1",
+                    "slug": "market-1",
+                    "eventSlug": "event-1",
+                    "eventTitle": "Event 1",
+                    "eventId": "evt-1",
+                },
+                {
+                    "id": "m-2",
+                    "slug": "market-2",
+                    "eventSlug": "event-1",
+                    "eventTitle": "Event 1",
+                    "eventId": "evt-1",
+                },
+                {
+                    "slug": "slug-only-market",
+                    "eventSlug": "event-2",
+                    "eventTitle": "Event 2",
+                    "eventId": "evt-2",
+                },
+            ],
+        )
 
 
 if __name__ == "__main__":

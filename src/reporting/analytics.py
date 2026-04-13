@@ -27,6 +27,8 @@ from src.reporting.models import (
     OfflineAnalyticsReport,
     OrderbookFailureRollup,
     OrderbookFunnelReport,
+    QualificationFunnelAnalytics,
+    QualificationGateRejectionStat,
     RankedOpportunityView,
     RejectionReasonStat,
     SessionAnalytics,
@@ -72,6 +74,73 @@ from src.reporting.campaigns import (
 DEFAULT_HORIZONS = (30, 60, 300, 900)
 
 
+def build_qualification_funnel_analytics(
+    funnel_rows: list[dict[str, Any]],
+    stored_candidate_ids: set[str],
+) -> QualificationFunnelAnalytics:
+    """Build aggregated qualification funnel analytics from persisted funnel report rows.
+
+    Args:
+        funnel_rows:  Rows loaded from the qualification_funnel_reports table
+                      (each row is the full payload_json dict).
+        stored_candidate_ids:  candidate_id values present in opportunity_candidates —
+                               i.e. candidates that survived sizing and were persisted.
+
+    Returns:
+        QualificationFunnelAnalytics with aggregate counts, per-gate rejection
+        leaderboard, and shortlist-to-stored correlation rate.
+    """
+    if not funnel_rows:
+        return QualificationFunnelAnalytics()
+
+    total_evaluated = sum(int(r.get("evaluated", 0)) for r in funnel_rows)
+    total_passed = sum(int(r.get("passed", 0)) for r in funnel_rows)
+    total_rejected = sum(int(r.get("rejected", 0)) for r in funnel_rows)
+
+    gate_counts: Counter[str] = Counter()
+    for row in funnel_rows:
+        gate_counts.update(row.get("rejection_counts", {}))
+
+    total_gate_rejections = sum(gate_counts.values())
+    gate_stats = sorted(
+        [
+            QualificationGateRejectionStat(
+                gate=gate,
+                count=count,
+                pct_of_rejections=round(count / max(total_gate_rejections, 1) * 100, 2),
+                pct_of_evaluated=round(count / max(total_evaluated, 1) * 100, 2),
+            )
+            for gate, count in gate_counts.items()
+        ],
+        key=lambda s: s.count,
+        reverse=True,
+    )
+
+    all_shortlist_entries: list[dict[str, Any]] = []
+    for row in funnel_rows:
+        all_shortlist_entries.extend(row.get("shortlist", []))
+
+    shortlist_entry_count = len(all_shortlist_entries)
+    matched = sum(
+        1 for entry in all_shortlist_entries
+        if entry.get("candidate_id") in stored_candidate_ids
+    )
+    shortlist_to_stored_rate: float | None = (
+        round(matched / shortlist_entry_count, 4) if shortlist_entry_count > 0 else None
+    )
+
+    return QualificationFunnelAnalytics(
+        total_runs=len(funnel_rows),
+        total_evaluated=total_evaluated,
+        total_passed=total_passed,
+        total_rejected=total_rejected,
+        pass_rate=round(total_passed / max(total_evaluated, 1), 4),
+        gate_rejection_stats=gate_stats,
+        shortlist_entry_count=shortlist_entry_count,
+        shortlist_to_candidate_stored_rate=shortlist_to_stored_rate,
+    )
+
+
 def resolve_sqlite_path(sqlite_url: str) -> Path:
     prefix = "sqlite:///"
     if sqlite_url.startswith(prefix):
@@ -95,6 +164,7 @@ class _LoadedAnalyticsInputs:
     execution_reports: list[dict[str, Any]]
     candidates: list[dict[str, Any]]
     risk_decisions: list[dict[str, Any]]
+    qualification_funnel_rows: list[dict[str, Any]]
 
 
 @dataclass(frozen=True)
@@ -247,6 +317,13 @@ class OfflineAnalyticsService:
             inputs.rejection_events,
         )
         top_ranked_opportunities = self._build_top_ranked_opportunities(inputs.candidates)
+        stored_candidate_ids = {
+            row["candidate_id"] for row in inputs.candidates if row.get("candidate_id")
+        }
+        qualification_funnel_analytics = build_qualification_funnel_analytics(
+            inputs.qualification_funnel_rows,
+            stored_candidate_ids,
+        )
 
         return OfflineAnalyticsReport(
             generated_ts=datetime.now(timezone.utc),
@@ -289,6 +366,7 @@ class OfflineAnalyticsService:
             market_rollups=market_rollups,
             strategy_family_rollups=strategy_family_rollups,
             top_ranked_opportunities=top_ranked_opportunities,
+            qualification_funnel_analytics=qualification_funnel_analytics,
             methodology=self._build_methodology(),
         )
 
@@ -303,6 +381,9 @@ class OfflineAnalyticsService:
             execution_reports=self.reader.load_rows("execution_reports"),
             candidates=self.reader.load_rows("opportunity_candidates"),
             risk_decisions=self.reader.load_rows("risk_decisions"),
+            qualification_funnel_rows=[
+                r["payload"] for r in self.reader.load_rows("qualification_funnel_reports") if "payload" in r
+            ],
         )
 
     def _build_outcome_analytics(self, inputs: _LoadedAnalyticsInputs) -> _OutcomeAnalyticsBundle:
@@ -608,6 +689,9 @@ class OfflineAnalyticsService:
             research_only_candidates_by_family = run.metadata.get("research_only_candidates_by_family", {})
             near_miss_by_family = run.metadata.get("near_miss_by_family", {})
             rejection_reason_counts_by_family = run.metadata.get("rejection_reason_counts_by_family", {})
+            qual_funnel = run.metadata.get("qualification_funnel", {})
+            qualified_shortlist_count = int(qual_funnel.get("qualified_shortlist_count", 0))
+            qualification_rejection_counts_by_gate = dict(qual_funnel.get("rejection_counts_by_gate", {}))
             realized_pnls = [trade.realized_pnl_usd for trade in run_trades]
             closed_positions_count = len(run_trades) if run_trades else (len(close_events) if close_events else run.closed_positions)
             trade_count = len(run_trades) if run_trades else closed_positions_count
@@ -643,6 +727,8 @@ class OfflineAnalyticsService:
                     research_only_candidates_by_family=research_only_candidates_by_family,
                     near_miss_by_family=near_miss_by_family,
                     rejection_reason_counts_by_family=rejection_reason_counts_by_family,
+                    qualified_shortlist_count=qualified_shortlist_count,
+                    qualification_rejection_counts_by_gate=qualification_rejection_counts_by_gate,
                 )
             )
         return sessions
@@ -666,6 +752,8 @@ class OfflineAnalyticsService:
             research_only_candidates_by_family: Counter[str] = Counter()
             near_miss_by_family: Counter[str] = Counter()
             rejection_reason_counts_by_family: dict[str, Counter[str]] = defaultdict(Counter)
+            qualified_shortlist_count = 0
+            qualification_rejection_counts_by_gate: Counter[str] = Counter()
             for session in sessions:
                 rejection_counts.update(session.rejection_reason_counts)
                 raw_candidates_by_family.update(session.raw_candidates_by_family)
@@ -673,6 +761,8 @@ class OfflineAnalyticsService:
                 research_only_candidates_by_family.update(session.research_only_candidates_by_family)
                 near_miss_by_family.update(session.near_miss_by_family)
                 _update_nested_counter(rejection_reason_counts_by_family, session.rejection_reason_counts_by_family)
+                qualified_shortlist_count += session.qualified_shortlist_count
+                qualification_rejection_counts_by_gate.update(session.qualification_rejection_counts_by_gate)
 
             daily.append(
                 DailyAnalytics(
@@ -704,6 +794,8 @@ class OfflineAnalyticsService:
                         family: dict(reason_counts)
                         for family, reason_counts in rejection_reason_counts_by_family.items()
                     },
+                    qualified_shortlist_count=qualified_shortlist_count,
+                    qualification_rejection_counts_by_gate=dict(qualification_rejection_counts_by_gate),
                 )
             )
         return daily

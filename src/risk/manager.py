@@ -31,7 +31,7 @@ class RiskManager:
             rules.check_order_size(candidate, self.risk_config, self.execution_config),
             rules.check_daily_loss(account, self.risk_config),
             rules.check_consecutive_losses(account, self.risk_config),
-            rules.check_open_positions(account, self.risk_config),
+            rules.check_open_positions(account, self.risk_config, candidate),
             rules.check_market_exposure(candidate, account, self.risk_config),
             rules.check_total_exposure(candidate, account, self.risk_config),
         ]
@@ -61,7 +61,11 @@ class RiskManager:
             status=RiskStatus.HALTED if halt else (RiskStatus.BLOCKED if failures else RiskStatus.APPROVED),
             approved_notional_usd=0.0 if failures else candidate.target_notional_usd,
             reason_codes=reason_codes,
-            human_review_required=self.execution_config.mode == "live" and self.risk_config.require_human_confirmation_for_live,
+            human_review_required=(
+                self.execution_config.live_enabled
+                and not self.execution_config.dry_run
+                and self.risk_config.require_human_confirmation_for_live
+            ),
             halt_trading=halt,
             metadata=metadata,
             ts=datetime.now(timezone.utc),

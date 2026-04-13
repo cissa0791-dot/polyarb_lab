@@ -1,0 +1,100 @@
+model_id: political_binary_constraint_paper_v1
+rules:
+  - relation_id: gop_nominee_mutex_vance_rubio
+    tier: A
+    relation_type: nominee_family_mutex
+    lhs_market:
+      market_slug: will-jd-vance-win-the-2028-republican-presidential-nomination
+      side: "YES"
+    rhs_market:
+      market_slug: will-marco-rubio-win-the-2028-republican-presidential-nomination
+      side: "YES"
+    preconditions:
+      election_cycle: "2028"
+      office: us_president
+      party: republican
+      jurisdiction: us
+      resolution_family: presidential_nomination
+      market_type: nominee_person
+    assertion: NOT (lhs_yes AND rhs_yes)
+    trade_enabled: true
+    notes: Same 2028 Republican presidential nomination family. Pairwise mutex under approved nominee-person rule.
+
+  - relation_id: gop_nominee_mutex_vance_desantis
+    tier: A
+    relation_type: nominee_family_mutex
+    lhs_market:
+      market_slug: will-jd-vance-win-the-2028-republican-presidential-nomination
+      side: "YES"
+    rhs_market:
+      market_slug: will-ron-desantis-win-the-2028-republican-presidential-nomination
+      side: "YES"
+    preconditions:
+      election_cycle: "2028"
+      office: us_president
+      party: republican
+      jurisdiction: us
+      resolution_family: presidential_nomination
+      market_type: nominee_person
+    assertion: NOT (lhs_yes AND rhs_yes)
+    trade_enabled: true
+    notes: Same 2028 Republican presidential nomination family. Pairwise mutex under approved nominee-person rule.
+
+  - relation_id: winner_mutex_vance_newsom_2028
+    tier: A
+    relation_type: winner_family_mutex
+    lhs_market:
+      market_slug: will-jd-vance-win-the-2028-us-presidential-election
+      side: "YES"
+    rhs_market:
+      market_slug: will-gavin-newsom-win-the-2028-us-presidential-election
+      side: "YES"
+    preconditions:
+      election_cycle: "2028"
+      office: us_president
+      jurisdiction: us
+      resolution_family: general_election_winner
+      market_type: winner_person
+    assertion: NOT (lhs_yes AND rhs_yes)
+    trade_enabled: true
+    notes: Same 2028 US presidential winner-person family. Only one named winner market can resolve YES.
+
+  - relation_id: gop_nominee_mutex_trump_vance
+    tier: A
+    relation_type: nominee_family_mutex
+    lhs_market:
+      market_slug: will-donald-trump-win-the-2028-republican-presidential-nomination
+      side: "YES"
+    rhs_market:
+      market_slug: will-jd-vance-win-the-2028-republican-presidential-nomination
+      side: "YES"
+    preconditions:
+      election_cycle: "2028"
+      office: us_president
+      party: republican
+      jurisdiction: us
+      resolution_family: presidential_nomination
+      market_type: nominee_person
+    assertion: NOT (lhs_yes AND rhs_yes)
+    trade_enabled: true
+    notes: Same 2028 Republican presidential nomination family. Trump and Vance nominee-person markets are mutually exclusive.
+
+  - relation_id: gop_nominee_mutex_trump_rubio
+    tier: A
+    relation_type: nominee_family_mutex
+    lhs_market:
+      market_slug: will-donald-trump-win-the-2028-republican-presidential-nomination
+      side: "YES"
+    rhs_market:
+      market_slug: will-marco-rubio-win-the-2028-republican-presidential-nomination
+      side: "YES"
+    preconditions:
+      election_cycle: "2028"
+      office: us_president
+      party: republican
+      jurisdiction: us
+      resolution_family: presidential_nomination
+      market_type: nominee_person
+    assertion: NOT (lhs_yes AND rhs_yes)
+    trade_enabled: true
+    notes: Same 2028 Republican presidential nomination family. Trump and Rubio nominee-person markets are mutually exclusive.

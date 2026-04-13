@@ -6,12 +6,18 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from src.domain.models import OpportunityCandidate
+from src.domain.models import OpportunityCandidate, RiskDecision
 
 
 class StrategyFamily(str, Enum):
     SINGLE_MARKET_MISPRICING = "single_market_mispricing"
+    SINGLE_MARKET_TOUCH_MISPRICING = "single_market_touch_mispricing"
     CROSS_MARKET_CONSTRAINT = "cross_market_constraint"
+    CROSS_MARKET_GROSS_CONSTRAINT = "cross_market_gross_constraint"
+    CROSS_MARKET_EXECUTION_GROSS_CONSTRAINT = "cross_market_execution_gross_constraint"
+    NEG_RISK_REBALANCING = "neg_risk_rebalancing"
+    MAKER_REWARDED_EVENT_MM_V1 = "maker_rewarded_event_mm_v1"
+    POLITICAL_BINARY_CONSTRAINT_PAPER = "political_binary_constraint_paper"
     REBALANCING = "rebalancing"
     EXTERNAL_BELIEF = "external_belief"
 
@@ -102,12 +108,90 @@ class RankedOpportunity(ExecutableCandidate):
     quality_score: float = 0.0
 
 
+class LiveTradableOpportunity(BaseModel):
+    """Explicit gate type: an ExecutableCandidate that has passed the risk
+    decision layer and is approved for live broker submission.
+
+    Signal pipeline:
+        raw_signal (RawCandidate)
+            → executable_opportunity (ExecutableCandidate)
+            → live_tradable_opportunity (LiveTradableOpportunity)   ← here
+            → OrderIntent (domain/models.py)
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    candidate: ExecutableCandidate
+    risk_decision: RiskDecision
+    approved_for_live: bool
+
+
+class QualificationPassReason:
+    """String constants naming each gate that explicitly passed on a qualified candidate.
+
+    Populated only for passed decisions — rejected decisions carry reason_codes instead.
+    Gate-by-gate visibility lets downstream code and audit reports explain *why* a
+    candidate was accepted, not just that it was.
+    """
+
+    EDGE_SUFFICIENT = "EDGE_SUFFICIENT"
+    DEPTH_SUFFICIENT = "DEPTH_SUFFICIENT"
+    NET_PROFIT_SUFFICIENT = "NET_PROFIT_SUFFICIENT"
+    PARTIAL_FILL_RISK_OK = "PARTIAL_FILL_RISK_OK"
+    NON_ATOMIC_RISK_OK = "NON_ATOMIC_RISK_OK"
+    ABSOLUTE_DEPTH_OK = "ABSOLUTE_DEPTH_OK"
+    SINGLE_LEG_CONCENTRATION_OK = "SINGLE_LEG_CONCENTRATION_OK"
+
+
 class QualificationDecision(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     raw_candidate: RawCandidate
     passed: bool
     reason_codes: list[str] = Field(default_factory=list)
+    pass_reason_codes: list[str] = Field(default_factory=list)
     executable_candidate: ExecutableCandidate | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
+    ts: datetime
+
+
+class QualificationShortlistEntry(BaseModel):
+    """Key metrics for a single candidate that passed all qualification gates.
+
+    Produced by QualificationAuditor.report() — one entry per passed decision.
+    Surfaces the numbers that justified passage so a scan log can answer:
+    "why did this candidate make the shortlist?"
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    candidate_id: str
+    strategy_family: str
+    market_slugs: list[str]
+    pass_reason_codes: list[str]
+    gross_edge_cents: float
+    net_edge_cents: float
+    expected_net_profit_usd: float
+    required_depth_usd: float
+    available_depth_usd: float
+    partial_fill_risk_score: float
+    non_atomic_execution_risk_score: float
+    ts: datetime
+
+
+class QualificationFunnelReport(BaseModel):
+    """Per-run qualification funnel summary produced by QualificationAuditor.
+
+    Captures the full pipeline from raw candidates evaluated → passed shortlist,
+    with per-gate rejection counts so it is clear which gates are filtering most.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    run_id: str
+    evaluated: int
+    passed: int
+    rejected: int
+    rejection_counts: dict[str, int] = Field(default_factory=dict)
+    shortlist: list[QualificationShortlistEntry] = Field(default_factory=list)
     ts: datetime

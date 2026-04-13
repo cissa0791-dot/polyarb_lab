@@ -7,7 +7,73 @@ scan_interval_sec: 2
 fee_buffer_cents: 0.01
 slippage_buffer_cents: 0.01
 stale_book_sec: 3
+discovery_refresh_interval_sec: 60
+backstop_full_rescan_interval_sec: 90
+backstop_refresh_market_budget: 48
+force_refresh_productive_families_every_n_cycles: 2
+hot_refresh_interval_sec: 2
+warm_refresh_interval_sec: 8
+cold_refresh_interval_sec: 30
+hot_market_count: 24
+warm_market_count: 64
+cold_market_count: 200
+near_miss_retry_interval_sec: 20
+neg_risk_family_due_refresh_interval_sec: 20
+neg_risk_family_backstop_every_n_cycles: 2
+neg_risk_family_backstop_budget: 8
+neg_risk_family_audit_mode_enabled: true
+neg_risk_family_audit_watchlist:
+  - "how-many-gold-cards-will-trump-sell-in-2026"
+  - "harvey-weinstein-prison-time"
+neg_risk_family_audit_budget: 2
+neg_risk_selector_refresh_budget: 2
+neg_risk_condition_monitor_mode_enabled: true
+neg_risk_condition_monitor_watchlist:
+  - "how-many-gold-cards-will-trump-sell-in-2026"
+  - "harvey-weinstein-prison-time"
+neg_risk_watchlist_reconciliation_event_limit: 500
+recompute_midpoint_delta_cents: 0.01
+recompute_spread_delta_cents: 0.01
+recompute_top_depth_delta_ratio: 0.25
+recompute_inventory_delta_shares: 10.0
+no_orderbook_negative_cache_ttl_sec: 300
+invalid_token_retry_interval_sec: 900
+enable_hot_tier_websocket: false
+hot_tier_websocket_poll_timeout_sec: 0.25
+hot_tier_websocket_stale_sec: 5
+discovery_use_simplified_markets: true
 sqlite_url: "sqlite:///data/processed/paper.db"
 starting_cash: 10000.0
 market_limit: 200
-log_level: "DEBUG"
+log_level: "INFO"
+max_open_positions: 200
+max_holding_sec: 300
+edge_decay_bid_delta: 0.001
+min_absolute_leg_depth_usd: 25000.0
+max_single_leg_bid: 0.50
+stop_loss_usd: 0.15
+# Basket-level dominance gate (experiment round 1).
+# Set basket_dominance_threshold to 0.0 to disable gate and restore prior behavior.
+basket_dominance_threshold: 0.40
+basket_drawdown_exit_threshold: 0.05
+basket_unrealized_pnl_floor: -0.10
+idle_hold_release_check_sec: 180
+idle_hold_release_max_repricing_events: 1
+idle_hold_release_max_abs_unrealized_pnl: 0.01
+idle_hold_release_max_drawdown: 0.01
+maker_quote_min_expected_net_edge_cents: 0.01
+maker_quote_max_fair_value_drift_cents: 0.03
+maker_quote_max_age_sec: 45
+maker_quote_inventory_soft_limit_shares: 100
+maker_quote_inventory_hard_limit_shares: 150
+maker_quote_inventory_skew_cents: 0.01
+
+maker_mm:
+  cohort:
+    - "next-prime-minister-of-hungary"
+    - "netanyahu-out-before-2027"
+    - "balance-of-power-2026-midterms"
+    - "next-james-bond-actor-635"
+  min_edge_cents: 0.005
+  g6_margin: 1.25
+  default_notional_usd: 100.0

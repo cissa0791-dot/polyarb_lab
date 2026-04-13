@@ -2,20 +2,56 @@ single_market:
   enabled: true
 
 cross_market:
-  - name: "strong_win_implies_win"
+  - name: "italy_world_cup_win_implies_qualify"
     lhs:
-      market_slug: "candidate-x-win-by-5"
+      market_slug: "will-italy-win-the-2026-fifa-world-cup-813"
       side: "YES"
     rhs:
-      market_slug: "candidate-x-win"
+      market_slug: "will-italy-qualify-for-the-2026-fifa-world-cup"
       side: "YES"
     relation: "leq"
 
-  - name: "subset_example"
+  - name: "gavin_newsom_election_implies_nomination"
     lhs:
-      market_slug: "team-a-win-by-10"
+      market_slug: "will-gavin-newsom-win-the-2028-us-presidential-election"
       side: "YES"
     rhs:
-      market_slug: "team-a-win"
+      market_slug: "will-gavin-newsom-win-the-2028-democratic-presidential-nomination-568"
+      side: "YES"
+    relation: "leq"
+
+  - name: "aoc_election_implies_nomination"
+    lhs:
+      market_slug: "will-alexandria-ocasio-cortez-win-the-2028-us-presidential-election"
+      side: "YES"
+    rhs:
+      market_slug: "will-alexandria-ocasio-cortez-win-the-2028-democratic-presidential-nomination-653"
+      side: "YES"
+    relation: "leq"
+
+  - name: "pete_buttigieg_election_implies_nomination"
+    lhs:
+      market_slug: "will-pete-buttigieg-win-the-2028-us-presidential-election"
+      side: "YES"
+    rhs:
+      market_slug: "will-pete-buttigieg-win-the-2028-democratic-presidential-nomination-687"
+      side: "YES"
+    relation: "leq"
+
+  - name: "josh_shapiro_election_implies_nomination"
+    lhs:
+      market_slug: "will-josh-shapiro-win-the-2028-us-presidential-election"
+      side: "YES"
+    rhs:
+      market_slug: "will-josh-shapiro-win-the-2028-democratic-presidential-nomination-977"
+      side: "YES"
+    relation: "leq"
+
+  - name: "wes_moore_election_implies_nomination"
+    lhs:
+      market_slug: "will-wes-moore-win-the-2028-us-presidential-election"
+      side: "YES"
+    rhs:
+      market_slug: "will-wes-moore-win-the-2028-democratic-presidential-nomination-714"
       side: "YES"
     relation: "leq"

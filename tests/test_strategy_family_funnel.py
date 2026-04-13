@@ -33,6 +33,9 @@ class StaticClob:
     def get_book(self, token_id: str) -> OrderBook:
         return self.books[token_id]
 
+    def prefetch_books(self, token_ids: list[str]) -> dict[str, OrderBook]:
+        return {tid: self.books[tid] for tid in token_ids if tid in self.books}
+
 
 class StrategyFamilyFunnelTests(unittest.TestCase):
     def test_single_market_family_funnel_is_populated_in_run_summary_metadata(self) -> None:

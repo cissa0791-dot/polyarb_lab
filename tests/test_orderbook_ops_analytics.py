@@ -39,6 +39,14 @@ class CountingStaticClob:
         self.calls.append(token_id)
         return self.books[token_id]
 
+    def prefetch_books(self, token_ids: list[str]) -> dict[str, OrderBook]:
+        result = {}
+        for tid in token_ids:
+            if tid in self.books:
+                self.calls.append(tid)
+                result[tid] = self.books[tid]
+        return result
+
 
 class OrderbookOperationalAnalyticsTests(unittest.TestCase):
     def test_orderbook_failure_rollups_and_funnel_reports_filter_to_post_fix_records(self) -> None:

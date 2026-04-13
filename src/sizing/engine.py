@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import Optional
 
 from src.config_runtime.models import OpportunityConfig, PaperConfig
-from src.domain.models import AccountSnapshot
+from src.domain.models import AccountSnapshot, RejectionReason
 from src.opportunity.models import RankedOpportunity
 
 
@@ -17,6 +18,12 @@ class SizingDecision:
     shares: float
     reason: str
     metadata: dict[str, float]
+    # viable=False means the sizing engine rejected the candidate outright.
+    # The runner's existing  `if sizing.notional_usd <= 1e-9`  guard catches
+    # this without any runner-side changes: a non-viable decision always has
+    # notional_usd=0.0 and shares=0.0.
+    viable: bool = True
+    rejection_reason: Optional[str] = None
 
 
 class SizingEngine:
@@ -44,6 +51,28 @@ class DepthCappedSizer(SizingEngine):
             shares = 0.0
         else:
             shares = round(candidate.required_shares * (sized_notional / candidate.target_notional_usd), 6)
+
+        # Post-sizing viability gate.  If the resulting position is smaller than
+        # the configured floor it cannot realistically execute at any useful size.
+        # Returning notional_usd=0.0 / shares=0.0 triggers the runner's existing
+        # `sizing.notional_usd <= 1e-9` guard, which discards the candidate and
+        # continues to the next market — no runner edits required.
+        min_sized = self.opportunity_config.min_sized_notional_usd
+        if min_sized > 0.0 and 0.0 < sized_notional < min_sized:
+            return SizingDecision(
+                notional_usd=0.0,
+                shares=0.0,
+                viable=False,
+                rejection_reason=RejectionReason.SIZED_NOTIONAL_TOO_SMALL.value,
+                reason="sized_notional_below_minimum",
+                metadata={
+                    "depth_cap": round(depth_cap, 6),
+                    "quality_multiplier": round(quality_multiplier, 6),
+                    "risk_multiplier": round(risk_multiplier, 6),
+                    "sized_notional_computed": sized_notional,
+                    "min_sized_notional_usd": min_sized,
+                },
+            )
 
         return SizingDecision(
             notional_usd=sized_notional,

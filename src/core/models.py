@@ -1,3 +1,6 @@
+# DEPRECATED — do not add new types here and do not add new imports from this
+# module.  The canonical shared model namespace is src/domain/models.py.
+# This file is retained only for backward compatibility with existing callers.
 from __future__ import annotations
 
 from datetime import datetime

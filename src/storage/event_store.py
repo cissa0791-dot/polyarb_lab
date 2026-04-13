@@ -4,7 +4,7 @@ import json
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import Column, DateTime, Float, Integer, MetaData, String, Table, Text, create_engine, select
+from sqlalchemy import Column, DateTime, Float, Integer, MetaData, String, Table, Text, and_, create_engine, func, or_, select, text
 from sqlalchemy.sql import insert
 
 
@@ -191,6 +191,19 @@ class ResearchStore:
             Column("payload_json", Text, nullable=False),
             Column("ts", DateTime, nullable=False),
         )
+        self.qualification_funnel_reports = Table(
+            "qualification_funnel_reports",
+            self.meta,
+            Column("id", Integer, primary_key=True),
+            Column("run_id", String(128), nullable=False),
+            Column("evaluated", Integer, nullable=False),
+            Column("passed", Integer, nullable=False),
+            Column("rejected", Integer, nullable=False),
+            Column("rejection_counts_json", Text, nullable=False),
+            Column("shortlist_json", Text, nullable=False),
+            Column("payload_json", Text, nullable=False),
+            Column("ts", DateTime, nullable=False),
+        )
 
         self.meta.create_all(self.engine)
 
@@ -364,6 +377,29 @@ class ResearchStore:
             payload_json=_payload(summary.model_dump(mode="json")),
         )
 
+    def save_qualification_funnel_report(self, report: Any) -> None:
+        self._execute(
+            self.qualification_funnel_reports,
+            run_id=report.run_id,
+            evaluated=report.evaluated,
+            passed=report.passed,
+            rejected=report.rejected,
+            rejection_counts_json=json.dumps(report.rejection_counts, ensure_ascii=False),
+            shortlist_json=json.dumps(
+                [e.model_dump(mode="json") for e in report.shortlist],
+                ensure_ascii=False,
+            ),
+            payload_json=_payload(report.model_dump(mode="json")),
+            ts=report.ts,
+        )
+
+    def load_qualification_funnel_reports(self) -> list[dict[str, Any]]:
+        with self.engine.begin() as connection:
+            rows = connection.execute(
+                select(self.qualification_funnel_reports.c.payload_json)
+            ).all()
+        return [json.loads(row[0]) for row in rows]
+
     def save_system_event(self, event: Any) -> None:
         self._execute(
             self.system_events,
@@ -375,10 +411,202 @@ class ResearchStore:
             ts=event.ts,
         )
 
+    def load_pending_live_orders(self) -> list[tuple[Any, str]]:
+        """Return (OrderIntent, live_order_id) for every live order whose last
+        recorded execution report is SUBMITTED or PARTIAL.
+
+        Used by the runner on startup to re-register unreconciled live orders
+        with FillReconciler so prior-session positions survive a process restart.
+
+        Algorithm:
+          1. Compute the highest row-id (= most recent INSERT) per intent_id in
+             execution_reports — this is the last known status written to the DB.
+          2. Inner-join to order_intents on intent_id, filtering mode == 'live'.
+          3. Filter where that latest report's status is 'submitted' or 'partial'.
+          4. Parse payload_json to reconstruct OrderIntent; extract live_order_id
+             from the report's metadata dict.  Rows without a valid live_order_id
+             (e.g. dry-run sentinel rows) are silently skipped.
+
+        Returns:
+            List of (OrderIntent, live_order_id) tuples.  May be empty.
+        """
+        # Subquery: latest report id per intent
+        latest = (
+            select(
+                self.execution_reports.c.intent_id,
+                func.max(self.execution_reports.c.id).label("max_id"),
+            )
+            .group_by(self.execution_reports.c.intent_id)
+            .subquery("latest_er")
+        )
+
+        stmt = (
+            select(
+                self.order_intents.c.payload_json.label("intent_json"),
+                self.execution_reports.c.payload_json.label("report_json"),
+            )
+            .select_from(self.order_intents)
+            .join(latest, self.order_intents.c.intent_id == latest.c.intent_id)
+            .join(
+                self.execution_reports,
+                and_(
+                    self.execution_reports.c.intent_id == self.order_intents.c.intent_id,
+                    self.execution_reports.c.id == latest.c.max_id,
+                ),
+            )
+            .where(
+                and_(
+                    self.order_intents.c.mode == "live",
+                    or_(
+                        self.execution_reports.c.status == "submitted",
+                        self.execution_reports.c.status == "partial",
+                    ),
+                )
+            )
+        )
+
+        from src.domain.models import OrderIntent as _OrderIntent  # local to avoid circular at module level
+
+        results: list[tuple[Any, str]] = []
+        with self.engine.begin() as conn:
+            for row in conn.execute(stmt):
+                intent_data = json.loads(row.intent_json)
+                report_data = json.loads(row.report_json)
+                live_order_id = report_data.get("metadata", {}).get("live_order_id")
+                if not live_order_id:
+                    continue  # dry-run or missing id — skip
+                intent = _OrderIntent.model_validate(intent_data)
+                results.append((intent, live_order_id))
+        return results
+
+    def load_open_live_positions(self) -> list[dict[str, Any]]:
+        """Return fill data for every live position opened but not yet closed.
+
+        Used by the runner on startup to reconstruct prior-session live positions
+        into the in-memory Ledger so that _manage_open_positions can see them and
+        evaluate exits.
+
+        Joins position_events → order_intents via the intent_id stored in the
+        position_opened payload to recover side and limit_price.  Falls back to
+        payload avg_fill_price when the join produces no match (e.g. positions
+        written by fill_validation_script).
+
+        Returns a list of dicts with keys:
+            position_id, candidate_id, symbol, market_slug, side,
+            filled_size, avg_fill_price, limit_price, ts
+        """
+        stmt = text("""
+            SELECT DISTINCT
+                pe.position_id,
+                pe.candidate_id,
+                pe.symbol,
+                pe.market_slug,
+                pe.ts,
+                CAST(json_extract(pe.payload_json, '$.filled_size')    AS REAL) AS filled_size,
+                CAST(json_extract(pe.payload_json, '$.avg_fill_price') AS REAL) AS avg_fill_price,
+                COALESCE(oi.side, 'BUY')                                         AS side,
+                COALESCE(
+                    oi.limit_price,
+                    CAST(json_extract(pe.payload_json, '$.avg_fill_price') AS REAL)
+                )                                                                 AS limit_price
+            FROM position_events pe
+            LEFT JOIN order_intents oi
+                ON oi.intent_id = json_extract(pe.payload_json, '$.intent_id')
+            WHERE pe.event_type = 'position_opened'
+              AND pe.position_id NOT IN (
+                SELECT position_id FROM position_events
+                WHERE event_type IN (
+                    'position_closed', 'position_expired', 'position_force_closed'
+                )
+              )
+            ORDER BY pe.ts
+        """)
+        with self.engine.connect() as conn:
+            rows = conn.execute(stmt).fetchall()
+        return [dict(r._mapping) for r in rows]
+
     def load_run_summaries(self) -> list[dict[str, Any]]:
         with self.engine.begin() as connection:
             rows = connection.execute(select(self.run_summaries.c.payload_json)).all()
         return [json.loads(row[0]) for row in rows]
+
+    def load_recent_productive_market_slugs(self, limit: int = 64) -> list[str]:
+        stmt = (
+            select(
+                self.trade_summaries.c.market_slug,
+                self.trade_summaries.c.closed_ts,
+            )
+            .where(self.trade_summaries.c.realized_pnl_usd > 0.0)
+            .order_by(self.trade_summaries.c.closed_ts.desc())
+            .limit(max(int(limit) * 4, int(limit)))
+        )
+        with self.engine.begin() as connection:
+            rows = connection.execute(stmt).all()
+        seen: set[str] = set()
+        ordered: list[str] = []
+        for market_slug, _closed_ts in rows:
+            slug = str(market_slug or "")
+            if not slug or slug in seen:
+                continue
+            seen.add(slug)
+            ordered.append(slug)
+            if len(ordered) >= limit:
+                break
+        return ordered
+
+    def load_recent_candidate_market_slugs(self, limit: int = 64) -> list[str]:
+        stmt = (
+            select(self.opportunity_candidates.c.metadata_json)
+            .order_by(self.opportunity_candidates.c.ts.desc())
+            .limit(max(int(limit) * 4, int(limit)))
+        )
+        with self.engine.begin() as connection:
+            rows = connection.execute(stmt).all()
+        seen: set[str] = set()
+        ordered: list[str] = []
+        for (payload_json,) in rows:
+            try:
+                payload = json.loads(payload_json)
+            except Exception:
+                continue
+            for market_slug in payload.get("market_slugs", []) or []:
+                slug = str(market_slug or "")
+                if not slug or slug in seen:
+                    continue
+                seen.add(slug)
+                ordered.append(slug)
+                if len(ordered) >= limit:
+                    return ordered
+        return ordered
+
+    def load_recent_rejection_market_slugs(self, reason_codes: list[str], limit: int = 64) -> list[str]:
+        if not reason_codes:
+            return []
+        stmt = (
+            select(self.rejection_events.c.payload_json)
+            .where(self.rejection_events.c.reason_code.in_(list(reason_codes)))
+            .order_by(self.rejection_events.c.ts.desc())
+            .limit(max(int(limit) * 6, int(limit)))
+        )
+        with self.engine.begin() as connection:
+            rows = connection.execute(stmt).all()
+        seen: set[str] = set()
+        ordered: list[str] = []
+        for (payload_json,) in rows:
+            try:
+                payload = json.loads(payload_json)
+            except Exception:
+                continue
+            metadata = payload.get("metadata") or {}
+            for market_slug in metadata.get("market_slugs", []) or []:
+                slug = str(market_slug or "")
+                if not slug or slug in seen:
+                    continue
+                seen.add(slug)
+                ordered.append(slug)
+                if len(ordered) >= limit:
+                    return ordered
+        return ordered
 
     def close(self) -> None:
         self.engine.dispose()

@@ -11,6 +11,37 @@ class MarketDataConfig(BaseModel):
     market_limit: int = 200
     scan_interval_sec: float = 2.0
     stale_book_sec: float = 3.0
+    discovery_refresh_interval_sec: float = 60.0
+    backstop_full_rescan_interval_sec: float = 90.0
+    backstop_refresh_market_budget: int = 48
+    force_refresh_productive_families_every_n_cycles: int = 2
+    hot_refresh_interval_sec: float = 2.0
+    warm_refresh_interval_sec: float = 8.0
+    cold_refresh_interval_sec: float = 30.0
+    hot_market_count: int = 24
+    warm_market_count: int = 64
+    cold_market_count: int = 200
+    near_miss_retry_interval_sec: float = 20.0
+    neg_risk_family_due_refresh_interval_sec: float = 20.0
+    neg_risk_family_backstop_every_n_cycles: int = 2
+    neg_risk_family_backstop_budget: int = 8
+    neg_risk_family_audit_mode_enabled: bool = False
+    neg_risk_family_audit_watchlist: list[str] = Field(default_factory=list)
+    neg_risk_family_audit_budget: int = 8
+    neg_risk_selector_refresh_budget: int = 12
+    neg_risk_condition_monitor_mode_enabled: bool = False
+    neg_risk_condition_monitor_watchlist: list[str] = Field(default_factory=list)
+    neg_risk_watchlist_reconciliation_event_limit: int = 500
+    recompute_midpoint_delta_cents: float = 0.01
+    recompute_spread_delta_cents: float = 0.01
+    recompute_top_depth_delta_ratio: float = 0.25
+    recompute_inventory_delta_shares: float = 10.0
+    no_orderbook_negative_cache_ttl_sec: float = 300.0
+    invalid_token_retry_interval_sec: float = 900.0
+    enable_hot_tier_websocket: bool = False
+    hot_tier_websocket_poll_timeout_sec: float = 0.25
+    hot_tier_websocket_stale_sec: float = 5.0
+    discovery_use_simplified_markets: bool = True
 
 
 class OpportunityConfig(BaseModel):
@@ -26,6 +57,18 @@ class OpportunityConfig(BaseModel):
     min_net_profit_usd: float = 0.50
     max_partial_fill_risk: float = 0.65
     max_non_atomic_risk: float = 0.60
+    # Absolute per-leg depth floor: each leg must have at least this many USD of
+    # liquidity available on the correct side of the book before a candidate is
+    # considered executable.  0.0 disables the check (backward-compatible default).
+    min_absolute_leg_depth_usd: float = 0.0
+    # Single-leg concentration ceiling: baskets where any individual leg's top-of-book
+    # bid exceeds this threshold are rejected.  Eliminates dominant-probability-outcome
+    # baskets where one leg absorbs an outsized share of notional.  1.0 disables (default).
+    max_single_leg_bid: float = 1.0
+    # Post-sizing viability floor: the notional produced by the SizingEngine must
+    # be at least this large or the candidate is rejected before reaching the paper
+    # broker.  0.0 disables the check (backward-compatible default).
+    min_sized_notional_usd: float = 0.0
 
 
 class PaperConfig(BaseModel):
@@ -39,6 +82,29 @@ class PaperConfig(BaseModel):
     stop_loss_usd: float = 1.0
     max_holding_sec: float = 300.0
     flatten_on_run_end: bool = False
+    inter_cycle_reset: bool = False
+    edge_decay_bid_delta: float = 0.0
+    # Basket-level dominance gate for EDGE_DECAY exits.
+    # 0.0 = gate disabled (all EDGE_DECAY exits proceed unchanged).
+    # > 0.0 = gate active: exit confirmed only if trigger IS dominant loss leg
+    #         OR dominant_loss_leg_share >= this threshold (Path A),
+    #         OR basket deterioration overrides via Path B thresholds.
+    basket_dominance_threshold: float = 0.0
+    # Path B override: confirm exit if basket has drawn down >= this many USD from peak.
+    # 0.0 = not used.
+    basket_drawdown_exit_threshold: float = 0.0
+    # Path B override: confirm exit if basket unrealized PnL <= this value (USD, negative).
+    # 0.0 = not used.
+    basket_unrealized_pnl_floor: float = 0.0
+    # Idle-hold early release for clearly inert baskets.
+    # 0.0 = disabled; > 0.0 = earliest basket age checkpoint for release eligibility.
+    idle_hold_release_check_sec: float = 0.0
+    # Maximum total basket repricing events allowed after entry for idle release.
+    idle_hold_release_max_repricing_events: int = 1
+    # Basket abs(unrealized PnL) must stay at or below this value (USD).
+    idle_hold_release_max_abs_unrealized_pnl: float = 0.01
+    # Basket peak-to-current drawdown must stay at or below this value (USD).
+    idle_hold_release_max_drawdown: float = 0.01
 
 
 class RiskConfig(BaseModel):
@@ -80,6 +146,33 @@ class ExecutionConfig(BaseModel):
     live_enabled: bool = False
     dry_run: bool = True
     max_live_order_usd: float = 25.0
+    maker_quote_min_expected_net_edge_cents: float = 0.01
+    maker_quote_max_fair_value_drift_cents: float = 0.03
+    maker_quote_max_age_sec: float = 45.0
+    maker_quote_inventory_soft_limit_shares: float = 100.0
+    maker_quote_inventory_hard_limit_shares: float = 150.0
+    maker_quote_inventory_skew_cents: float = 0.01
+
+
+class MakerMMConfig(BaseModel):
+    """Config for the MAKER_REWARDED_EVENT_MM_V1 strategy family.
+
+    These values serve as the config-level defaults for the maker-MM scan.
+    They are overridden at run-level by matching experiment-context keys
+    (maker_mm_cohort, maker_mm_min_edge, maker_mm_g6_margin), which allows
+    campaign presets and ad-hoc calls to override without touching this file.
+    """
+    model_config = ConfigDict(extra="ignore")
+
+    cohort: list[str] = Field(default_factory=lambda: [
+        "next-prime-minister-of-hungary",
+        "netanyahu-out-before-2027",
+        "balance-of-power-2026-midterms",
+        "next-james-bond-actor-635",
+    ])
+    min_edge_cents: float = 0.005        # G5: path-level edge threshold (maker-MM only)
+    g6_margin: float = 1.25             # G6: headroom factor over rewards_min_size
+    default_notional_usd: float = 100.0  # G6: base notional cap floor
 
 
 class RuntimeConfig(BaseModel):
@@ -92,3 +185,4 @@ class RuntimeConfig(BaseModel):
     monitoring: MonitoringConfig = Field(default_factory=MonitoringConfig)
     storage: StorageConfig = Field(default_factory=StorageConfig)
     execution: ExecutionConfig = Field(default_factory=ExecutionConfig)
+    maker_mm: MakerMMConfig = Field(default_factory=MakerMMConfig)

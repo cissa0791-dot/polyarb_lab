@@ -69,6 +69,10 @@ class RejectionReason(str, Enum):
     RISK_ENGINE_ERROR = "RISK_ENGINE_ERROR"
     EXECUTION_SIMULATION_FAILED = "EXECUTION_SIMULATION_FAILED"
     PAPER_ORDER_REJECTED = "PAPER_ORDER_REJECTED"
+    HUMAN_REVIEW_REQUIRED = "HUMAN_REVIEW_REQUIRED"
+    ABSOLUTE_DEPTH_BELOW_FLOOR = "ABSOLUTE_DEPTH_BELOW_FLOOR"
+    SIZED_NOTIONAL_TOO_SMALL = "SIZED_NOTIONAL_TOO_SMALL"
+    SINGLE_LEG_CONCENTRATION = "SINGLE_LEG_CONCENTRATION"
 
 
 class Severity(str, Enum):
@@ -190,6 +194,7 @@ class OrderIntent(BaseModel):
     max_slippage_cents: float = 0.0
     expires_at: datetime | None = None
     ts: datetime
+    metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 class ExecutionReport(BaseModel):

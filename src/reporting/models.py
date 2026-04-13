@@ -40,6 +40,8 @@ class SessionAnalytics(BaseModel):
     research_only_candidates_by_family: dict[str, int] = Field(default_factory=dict)
     near_miss_by_family: dict[str, int] = Field(default_factory=dict)
     rejection_reason_counts_by_family: dict[str, dict[str, int]] = Field(default_factory=dict)
+    qualified_shortlist_count: int = 0
+    qualification_rejection_counts_by_gate: dict[str, int] = Field(default_factory=dict)
 
 
 class DailyAnalytics(BaseModel):
@@ -70,6 +72,8 @@ class DailyAnalytics(BaseModel):
     research_only_candidates_by_family: dict[str, int] = Field(default_factory=dict)
     near_miss_by_family: dict[str, int] = Field(default_factory=dict)
     rejection_reason_counts_by_family: dict[str, dict[str, int]] = Field(default_factory=dict)
+    qualified_shortlist_count: int = 0
+    qualification_rejection_counts_by_gate: dict[str, int] = Field(default_factory=dict)
 
 
 class RejectionReasonStat(BaseModel):
@@ -691,6 +695,35 @@ class RankedOpportunityView(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
+class QualificationGateRejectionStat(BaseModel):
+    """Rejection count for one qualification gate across all runs in an analytics window."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    gate: str
+    count: int
+    pct_of_rejections: float
+    pct_of_evaluated: float
+
+
+class QualificationFunnelAnalytics(BaseModel):
+    """Aggregated qualification funnel statistics derived from persisted funnel reports.
+
+    Produced by build_qualification_funnel_analytics() and attached to OfflineAnalyticsReport.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    total_runs: int = 0
+    total_evaluated: int = 0
+    total_passed: int = 0
+    total_rejected: int = 0
+    pass_rate: float = 0.0
+    gate_rejection_stats: list[QualificationGateRejectionStat] = Field(default_factory=list)
+    shortlist_entry_count: int = 0
+    shortlist_to_candidate_stored_rate: float | None = None
+
+
 class OfflineAnalyticsReport(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
@@ -734,6 +767,7 @@ class OfflineAnalyticsReport(BaseModel):
     market_rollups: list[MarketRollup] = Field(default_factory=list)
     strategy_family_rollups: list[StrategyFamilyRollup] = Field(default_factory=list)
     top_ranked_opportunities: list[RankedOpportunityView] = Field(default_factory=list)
+    qualification_funnel_analytics: QualificationFunnelAnalytics | None = None
     methodology: dict[str, Any] = Field(default_factory=dict)
 
 

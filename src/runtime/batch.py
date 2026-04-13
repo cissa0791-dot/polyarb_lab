@@ -29,6 +29,9 @@ class BatchResearchRunner:
             raise ValueError("cycles must be positive")
 
         runner = self.runner_factory()
+        resolved_parameter_set_label = parameter_set_label or "runtime_default"
+        if hasattr(runner, "apply_runtime_parameter_set"):
+            runner.apply_runtime_parameter_set(resolved_parameter_set_label)
         if market_limit is not None:
             runner.config.market_data.market_limit = market_limit
 
@@ -40,7 +43,7 @@ class BatchResearchRunner:
             merged_context = {
                 "experiment_id": experiment_id,
                 "experiment_label": experiment_label or f"batch-{started_ts.strftime('%Y%m%d%H%M%S')}",
-                "parameter_set_label": parameter_set_label or "runtime_default",
+                "parameter_set_label": resolved_parameter_set_label,
                 "batch_cycle_index": index,
                 "batch_cycles_requested": cycles,
             }
@@ -50,8 +53,11 @@ class BatchResearchRunner:
                 experiment_context=merged_context
             )
             run_summaries.append(summary)
-            if sleep_sec > 0 and index < cycles - 1:
-                time.sleep(sleep_sec)
+            if index < cycles - 1:
+                if getattr(getattr(runner.config, "paper", None), "inter_cycle_reset", False):
+                    runner.reset_paper_state()
+                if sleep_sec > 0:
+                    time.sleep(sleep_sec)
 
         ended_ts = datetime.now(timezone.utc)
         aggregate = aggregate_run_summaries(
@@ -64,7 +70,7 @@ class BatchResearchRunner:
             {
                 "experiment_id": experiment_id,
                 "experiment_label": experiment_label or f"batch-{started_ts.strftime('%Y%m%d%H%M%S')}",
-                "parameter_set_label": parameter_set_label or "runtime_default",
+                "parameter_set_label": resolved_parameter_set_label,
                 "batch_cycles_requested": cycles,
                 "batch_cycles_completed": len(run_summaries),
                 **({key: value for key, value in (extra_context or {}).items() if value is not None}),
@@ -73,7 +79,7 @@ class BatchResearchRunner:
         return BatchExperimentSummary(
             experiment_id=experiment_id,
             experiment_label=experiment_label or f"batch-{started_ts.strftime('%Y%m%d%H%M%S')}",
-            parameter_set_label=parameter_set_label or "runtime_default",
+            parameter_set_label=resolved_parameter_set_label,
             campaign_id=str((extra_context or {}).get("campaign_id")) if (extra_context or {}).get("campaign_id") is not None else None,
             campaign_label=str((extra_context or {}).get("campaign_label")) if (extra_context or {}).get("campaign_label") is not None else None,
             started_ts=started_ts,

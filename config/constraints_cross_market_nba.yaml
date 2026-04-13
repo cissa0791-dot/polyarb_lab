@@ -1,0 +1,237 @@
+single_market:
+  enabled: true
+
+cross_market:
+  - name: "atlanta_hawks_finals_implies_east"
+    lhs:
+      market_slug: "will-the-atlanta-hawks-win-the-2026-nba-finals"
+      side: "YES"
+    rhs:
+      market_slug: "will-the-atlanta-hawks-win-the-nba-eastern-conference-finals"
+      side: "YES"
+    relation: "leq"
+
+  - name: "boston_celtics_finals_implies_east"
+    lhs:
+      market_slug: "will-the-boston-celtics-win-the-2026-nba-finals"
+      side: "YES"
+    rhs:
+      market_slug: "will-the-boston-celtics-win-the-nba-eastern-conference-finals"
+      side: "YES"
+    relation: "leq"
+
+  - name: "charlotte_hornets_finals_implies_east"
+    lhs:
+      market_slug: "will-the-charlotte-hornets-win-the-2026-nba-finals"
+      side: "YES"
+    rhs:
+      market_slug: "will-the-charlotte-hornets-win-the-nba-eastern-conference-finals"
+      side: "YES"
+    relation: "leq"
+
+  - name: "chicago_bulls_finals_implies_east"
+    lhs:
+      market_slug: "will-the-chicago-bulls-win-the-2026-nba-finals"
+      side: "YES"
+    rhs:
+      market_slug: "will-the-chicago-bulls-win-the-nba-eastern-conference-finals"
+      side: "YES"
+    relation: "leq"
+
+  - name: "cleveland_cavaliers_finals_implies_east"
+    lhs:
+      market_slug: "will-the-cleveland-cavaliers-win-the-2026-nba-finals"
+      side: "YES"
+    rhs:
+      market_slug: "will-the-cleveland-cavaliers-win-the-nba-eastern-conference-finals"
+      side: "YES"
+    relation: "leq"
+
+  - name: "dallas_mavericks_finals_implies_west"
+    lhs:
+      market_slug: "will-the-dallas-mavericks-win-the-2026-nba-finals"
+      side: "YES"
+    rhs:
+      market_slug: "will-the-dallas-mavericks-win-the-nba-western-conference-finals"
+      side: "YES"
+    relation: "leq"
+
+  - name: "denver_nuggets_finals_implies_west"
+    lhs:
+      market_slug: "will-the-denver-nuggets-win-the-2026-nba-finals"
+      side: "YES"
+    rhs:
+      market_slug: "will-the-denver-nuggets-win-the-nba-western-conference-finals"
+      side: "YES"
+    relation: "leq"
+
+  - name: "detroit_pistons_finals_implies_east"
+    lhs:
+      market_slug: "will-the-detroit-pistons-win-the-2026-nba-finals"
+      side: "YES"
+    rhs:
+      market_slug: "will-the-detroit-pistons-win-the-nba-eastern-conference-finals"
+      side: "YES"
+    relation: "leq"
+
+  - name: "golden_state_warriors_finals_implies_west"
+    lhs:
+      market_slug: "will-the-golden-state-warriors-win-the-2026-nba-finals"
+      side: "YES"
+    rhs:
+      market_slug: "will-the-golden-state-warriors-win-the-nba-western-conference-finals"
+      side: "YES"
+    relation: "leq"
+
+  - name: "houston_rockets_finals_implies_west"
+    lhs:
+      market_slug: "will-the-houston-rockets-win-the-2026-nba-finals"
+      side: "YES"
+    rhs:
+      market_slug: "will-the-houston-rockets-win-the-nba-western-conference-finals"
+      side: "YES"
+    relation: "leq"
+
+  - name: "los_angeles_clippers_finals_implies_west"
+    lhs:
+      market_slug: "will-the-los-angeles-clippers-win-the-2026-nba-finals"
+      side: "YES"
+    rhs:
+      market_slug: "will-the-los-angeles-clippers-win-the-nba-western-conference-finals"
+      side: "YES"
+    relation: "leq"
+
+  - name: "los_angeles_lakers_finals_implies_west"
+    lhs:
+      market_slug: "will-the-los-angeles-lakers-win-the-2026-nba-finals"
+      side: "YES"
+    rhs:
+      market_slug: "will-the-los-angeles-lakers-win-the-nba-western-conference-finals"
+      side: "YES"
+    relation: "leq"
+
+  - name: "memphis_grizzlies_finals_implies_west"
+    lhs:
+      market_slug: "will-the-memphis-grizzlies-win-the-2026-nba-finals"
+      side: "YES"
+    rhs:
+      market_slug: "will-the-memphis-grizzlies-win-the-nba-western-conference-finals"
+      side: "YES"
+    relation: "leq"
+
+  - name: "miami_heat_finals_implies_east"
+    lhs:
+      market_slug: "will-the-miami-heat-win-the-2026-nba-finals"
+      side: "YES"
+    rhs:
+      market_slug: "will-the-miami-heat-win-the-nba-eastern-conference-finals"
+      side: "YES"
+    relation: "leq"
+
+  - name: "milwaukee_bucks_finals_implies_east"
+    lhs:
+      market_slug: "will-the-milwaukee-bucks-win-the-2026-nba-finals"
+      side: "YES"
+    rhs:
+      market_slug: "will-the-milwaukee-bucks-win-the-nba-eastern-conference-finals"
+      side: "YES"
+    relation: "leq"
+
+  - name: "minnesota_timberwolves_finals_implies_west"
+    lhs:
+      market_slug: "will-the-minnesota-timberwolves-win-the-2026-nba-finals"
+      side: "YES"
+    rhs:
+      market_slug: "will-the-minnesota-timberwolves-win-the-nba-western-conference-finals"
+      side: "YES"
+    relation: "leq"
+
+  - name: "new_orleans_pelicans_finals_implies_west"
+    lhs:
+      market_slug: "will-the-new-orleans-pelicans-win-the-2026-nba-finals"
+      side: "YES"
+    rhs:
+      market_slug: "will-the-new-orleans-pelicans-win-the-nba-western-conference-finals"
+      side: "YES"
+    relation: "leq"
+
+  - name: "new_york_knicks_finals_implies_east"
+    lhs:
+      market_slug: "will-the-new-york-knicks-win-the-2026-nba-finals"
+      side: "YES"
+    rhs:
+      market_slug: "will-the-new-york-knicks-win-the-nba-eastern-conference-finals"
+      side: "YES"
+    relation: "leq"
+
+  - name: "oklahoma_city_thunder_finals_implies_west"
+    lhs:
+      market_slug: "will-the-oklahoma-city-thunder-win-the-2026-nba-finals"
+      side: "YES"
+    rhs:
+      market_slug: "will-the-oklahoma-city-thunder-win-the-nba-western-conference-finals"
+      side: "YES"
+    relation: "leq"
+
+  - name: "orlando_magic_finals_implies_east"
+    lhs:
+      market_slug: "will-the-orlando-magic-win-the-2026-nba-finals"
+      side: "YES"
+    rhs:
+      market_slug: "will-the-orlando-magic-win-the-nba-eastern-conference-finals"
+      side: "YES"
+    relation: "leq"
+
+  - name: "philadelphia_76ers_finals_implies_east"
+    lhs:
+      market_slug: "will-the-philadelphia-76ers-win-the-2026-nba-finals"
+      side: "YES"
+    rhs:
+      market_slug: "will-the-philadelphia-76ers-win-the-nba-eastern-conference-finals"
+      side: "YES"
+    relation: "leq"
+
+  - name: "phoenix_suns_finals_implies_west"
+    lhs:
+      market_slug: "will-the-phoenix-suns-win-the-2026-nba-finals"
+      side: "YES"
+    rhs:
+      market_slug: "will-the-phoenix-suns-win-the-nba-western-conference-finals"
+      side: "YES"
+    relation: "leq"
+
+  - name: "portland_trail_blazers_finals_implies_west"
+    lhs:
+      market_slug: "will-the-portland-trail-blazers-win-the-2026-nba-finals"
+      side: "YES"
+    rhs:
+      market_slug: "will-the-portland-trail-blazers-win-the-nba-western-conference-finals"
+      side: "YES"
+    relation: "leq"
+
+  - name: "san_antonio_spurs_finals_implies_west"
+    lhs:
+      market_slug: "will-the-san-antonio-spurs-win-the-2026-nba-finals"
+      side: "YES"
+    rhs:
+      market_slug: "will-the-san-antonio-spurs-win-the-nba-western-conference-finals"
+      side: "YES"
+    relation: "leq"
+
+  - name: "toronto_raptors_finals_implies_east"
+    lhs:
+      market_slug: "will-the-toronto-raptors-win-the-2026-nba-finals"
+      side: "YES"
+    rhs:
+      market_slug: "will-the-toronto-raptors-win-the-nba-eastern-conference-finals"
+      side: "YES"
+    relation: "leq"
+
+  - name: "utah_jazz_finals_implies_west"
+    lhs:
+      market_slug: "will-the-utah-jazz-win-the-2026-nba-finals"
+      side: "YES"
+    rhs:
+      market_slug: "will-the-utah-jazz-win-the-nba-western-conference-finals"
+      side: "YES"
+    relation: "leq"

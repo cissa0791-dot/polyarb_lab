@@ -37,6 +37,9 @@ class StaticClob:
     def get_book(self, token_id: str) -> OrderBook:
         return self.books[token_id]
 
+    def prefetch_books(self, token_ids: list[str]) -> dict[str, OrderBook]:
+        return {tid: self.books[tid] for tid in token_ids if tid in self.books}
+
 
 class OrderBookValidationTests(unittest.TestCase):
     def test_buy_validation_accepts_one_sided_book_if_asks_exist(self) -> None:

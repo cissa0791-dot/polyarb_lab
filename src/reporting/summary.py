@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections import Counter
 from collections import defaultdict
 from datetime import datetime
+from typing import Any
 
 from src.domain.models import RunSummary
 
@@ -39,6 +40,8 @@ class RunSummaryBuilder:
         self.research_only_family_counts: Counter[str] = Counter()
         self.near_miss_family_counts: Counter[str] = Counter()
         self.rejection_counts_by_family: dict[str, Counter[str]] = defaultdict(Counter)
+        self.candidate_filter_failure_stage_counts: Counter[str] = Counter()
+        self.candidate_filter_failure_stage_counts_by_family: dict[str, Counter[str]] = defaultdict(Counter)
         self.strategy_family_funnel_counts: dict[str, Counter[str]] = defaultdict(Counter)
         self.strategy_family_markets_considered: dict[str, set[str]] = defaultdict(set)
         self.strategy_family_markets_with_any_signal: dict[str, set[str]] = defaultdict(set)
@@ -46,6 +49,8 @@ class RunSummaryBuilder:
         self.books_structurally_valid = 0
         self.books_execution_feasible = 0
         self.books_skipped_due_to_recent_empty_asks = 0
+        self.qualified_shortlist_count = 0
+        self.qualification_rejection_counts_by_gate: Counter[str] = Counter()
         self.metadata: dict = {}
 
     def record_strategy_family_market_considered(self, strategy_family: str, market_slug: str | None) -> None:
@@ -69,6 +74,11 @@ class RunSummaryBuilder:
             self.strategy_family_funnel_counts[strategy_family]["books_structurally_valid"] += 1
         if execution_feasible:
             self.strategy_family_funnel_counts[strategy_family]["books_execution_feasible"] += 1
+
+    def record_qualification_funnel(self, report: Any) -> None:
+        """Incorporate a QualificationFunnelReport into the run's summary metadata."""
+        self.qualified_shortlist_count = report.passed
+        self.qualification_rejection_counts_by_gate.update(report.rejection_counts)
 
     def record_strategy_family_signal(self, strategy_family: str, market_slugs: list[str]) -> None:
         if not strategy_family:
@@ -111,6 +121,11 @@ class RunSummaryBuilder:
                     family: dict(reason_counts)
                     for family, reason_counts in self.rejection_counts_by_family.items()
                 },
+                "candidate_filter_failure_stage_counts": dict(self.candidate_filter_failure_stage_counts),
+                "candidate_filter_failure_stage_counts_by_family": {
+                    family: dict(stage_counts)
+                    for family, stage_counts in self.candidate_filter_failure_stage_counts_by_family.items()
+                },
                 "strategy_family_funnel": self._build_strategy_family_funnel_payload(),
                 "orderbook_funnel": {
                     "books_fetched": self.books_fetched,
@@ -119,6 +134,10 @@ class RunSummaryBuilder:
                     "raw_candidates_generated": int(sum(self.raw_candidate_family_counts.values())),
                     "qualified_candidates": self.candidates_generated,
                     "books_skipped_due_to_recent_empty_asks": self.books_skipped_due_to_recent_empty_asks,
+                },
+                "qualification_funnel": {
+                    "qualified_shortlist_count": self.qualified_shortlist_count,
+                    "rejection_counts_by_gate": dict(self.qualification_rejection_counts_by_gate),
                 },
             }
         )
@@ -174,6 +193,11 @@ def aggregate_run_summaries(run_id: str, started_ts: datetime, ended_ts: datetim
         builder.research_only_family_counts.update(summary.metadata.get("research_only_candidates_by_family", {}))
         builder.near_miss_family_counts.update(summary.metadata.get("near_miss_by_family", {}))
         _merge_nested_counts(builder.rejection_counts_by_family, summary.metadata.get("rejection_reason_counts_by_family", {}))
+        builder.candidate_filter_failure_stage_counts.update(summary.metadata.get("candidate_filter_failure_stage_counts", {}))
+        _merge_nested_counts(
+            builder.candidate_filter_failure_stage_counts_by_family,
+            summary.metadata.get("candidate_filter_failure_stage_counts_by_family", {}),
+        )
         for family, counts in summary.metadata.get("strategy_family_funnel", {}).items():
             family_counter = builder.strategy_family_funnel_counts[family]
             family_counter["markets_considered"] += int(counts.get("markets_considered", 0))
@@ -186,4 +210,7 @@ def aggregate_run_summaries(run_id: str, started_ts: datetime, ended_ts: datetim
         builder.books_structurally_valid += int(funnel.get("books_structurally_valid", 0))
         builder.books_execution_feasible += int(funnel.get("books_execution_feasible", 0))
         builder.books_skipped_due_to_recent_empty_asks += int(funnel.get("books_skipped_due_to_recent_empty_asks", 0))
+        qf = summary.metadata.get("qualification_funnel", {})
+        builder.qualified_shortlist_count += int(qf.get("qualified_shortlist_count", 0))
+        builder.qualification_rejection_counts_by_gate.update(qf.get("rejection_counts_by_gate", {}))
     return builder.build(ended_ts=ended_ts)

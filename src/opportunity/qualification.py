@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 
 from src.config_runtime.models import OpportunityConfig
 from src.domain.models import RejectionReason
-from src.opportunity.models import CandidateLeg, ExecutableCandidate, QualificationDecision, RankedOpportunity, RawCandidate
+from src.opportunity.models import CandidateLeg, ExecutableCandidate, QualificationDecision, QualificationPassReason, RankedOpportunity, RawCandidate
 
 
 def _clamp(value: float, lower: float = 0.0, upper: float = 1.0) -> float:
@@ -78,6 +78,31 @@ class VWAPCalculator:
 class DepthAnalyzer:
     def __init__(self, calculator: VWAPCalculator):
         self.calculator = calculator
+
+    def check_absolute_depth(
+        self,
+        legs: list[tuple[CandidateLeg, object]],
+        min_depth_usd: float,
+    ) -> tuple[bool, list[str]]:
+        """Return (all_pass, failing_token_ids).
+
+        Each leg must have at least *min_depth_usd* of dollar notional available
+        on the correct side of the book (asks for BUY, bids for SELL).  A leg
+        that fails contributes its token_id to the second element of the tuple.
+        """
+        if min_depth_usd <= 0.0:
+            return True, []
+        failing: list[str] = []
+        for leg, book in legs:
+            levels = self._levels_for_action(leg.action, book)
+            available_notional = sum(
+                float(level.price) * float(level.size)
+                for level in levels
+                if float(getattr(level, "price", 0)) > 0 and float(getattr(level, "size", 0)) > 0
+            )
+            if available_notional < min_depth_usd:
+                failing.append(leg.token_id)
+        return len(failing) == 0, failing
 
     def analyze(self, legs: list[tuple[CandidateLeg, object]]) -> dict[str, float]:
         if not legs:
@@ -190,8 +215,13 @@ class ExecutionFeasibilityEvaluator:
             if spread is not None and spread > self.config.max_spread_cents:
                 reasons.append(RejectionReason.SPREAD_TOO_WIDE.value)
 
-            levels = getattr(book, "asks" if leg.action.upper() == "BUY" else "bids", [])
-            fill = self.calculator.estimate_buy(levels, leg.required_shares, spread) if leg.action.upper() == "BUY" else self.calculator.estimate_sell(levels, leg.required_shares, spread)
+            is_maker = (leg.metadata or {}).get("maker_first", False)
+            if is_maker:
+                levels = getattr(book, "bids", [])
+                fill = self.calculator.estimate_sell(levels, leg.required_shares, spread)
+            else:
+                levels = getattr(book, "asks" if leg.action.upper() == "BUY" else "bids", [])
+                fill = self.calculator.estimate_buy(levels, leg.required_shares, spread) if leg.action.upper() == "BUY" else self.calculator.estimate_sell(levels, leg.required_shares, spread)
             leg_fills.append(fill)
             qualified_legs.append(
                 leg.model_copy(
@@ -206,6 +236,25 @@ class ExecutionFeasibilityEvaluator:
             )
             if not fill.is_complete:
                 reasons.append(RejectionReason.INSUFFICIENT_DEPTH.value)
+
+        # Absolute depth floor — checked once all legs have been paired.
+        # Must run before VWAP/edge arithmetic so that thin-book candidates
+        # are rejected with an explicit reason rather than producing misleading
+        # edge numbers computed against an effectively empty book.
+        if self.config.min_absolute_leg_depth_usd > 0.0:
+            abs_ok, failing_tokens = self.depth_analyzer.check_absolute_depth(
+                paired_legs, self.config.min_absolute_leg_depth_usd
+            )
+            if not abs_ok:
+                reasons.append(RejectionReason.ABSOLUTE_DEPTH_BELOW_FLOOR.value)
+
+        # Single-leg concentration ceiling — rejects baskets where one outcome leg
+        # dominates notional allocation.  Must run after all leg fills are computed
+        # so that best_price reflects the live book top-of-book bid.
+        if self.config.max_single_leg_bid < 1.0 and leg_fills:
+            max_leg_bid = max(fill.best_price or 0.0 for fill in leg_fills)
+            if max_leg_bid > self.config.max_single_leg_bid:
+                reasons.append(RejectionReason.SINGLE_LEG_CONCENTRATION.value)
 
         if len(leg_fills) != len(raw_candidate.legs):
             decision = QualificationDecision(
@@ -263,6 +312,27 @@ class ExecutionFeasibilityEvaluator:
                 ts=evaluation_ts,
             )
 
+        # Build explicit pass-gate codes so auditors can see *which* gates
+        # this candidate cleared, not just that it passed overall.
+        net_edge_cents = round(
+            expected_gross_edge_cents - self.config.fee_buffer_cents - self.config.slippage_buffer_cents, 6
+        )
+        pass_reasons: list[str] = []
+        if net_edge_cents >= self.config.min_edge_cents:
+            pass_reasons.append(QualificationPassReason.EDGE_SUFFICIENT)
+        if expected_net_profit >= self.config.min_net_profit_usd:
+            pass_reasons.append(QualificationPassReason.NET_PROFIT_SUFFICIENT)
+        if depth_metrics["available_depth_usd"] + 1e-9 >= depth_metrics["required_depth_usd"]:
+            pass_reasons.append(QualificationPassReason.DEPTH_SUFFICIENT)
+        if partial_fill_risk <= self.config.max_partial_fill_risk:
+            pass_reasons.append(QualificationPassReason.PARTIAL_FILL_RISK_OK)
+        if non_atomic_risk <= self.config.max_non_atomic_risk:
+            pass_reasons.append(QualificationPassReason.NON_ATOMIC_RISK_OK)
+        if self.config.min_absolute_leg_depth_usd > 0.0:
+            pass_reasons.append(QualificationPassReason.ABSOLUTE_DEPTH_OK)
+        if self.config.max_single_leg_bid < 1.0:
+            pass_reasons.append(QualificationPassReason.SINGLE_LEG_CONCENTRATION_OK)
+
         executable = ExecutableCandidate(
             strategy_id=raw_candidate.strategy_id,
             strategy_family=raw_candidate.strategy_family,
@@ -283,7 +353,7 @@ class ExecutionFeasibilityEvaluator:
             estimated_net_profit_usd=expected_net_profit,
             metadata={**raw_candidate.metadata, "detection_name": raw_candidate.detection_name},
             ts=raw_candidate.ts,
-            qualification_reason_codes=[],
+            qualification_reason_codes=pass_reasons,
             qualification_metadata=metadata,
             expected_gross_profit_usd=expected_gross_profit,
             expected_fee_usd=expected_fee_usd,
@@ -300,6 +370,7 @@ class ExecutionFeasibilityEvaluator:
         return QualificationDecision(
             raw_candidate=raw_candidate,
             passed=True,
+            pass_reason_codes=pass_reasons,
             executable_candidate=executable,
             metadata=metadata,
             ts=evaluation_ts,

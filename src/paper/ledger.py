@@ -58,7 +58,11 @@ class PaperPositionRecord:
     last_mark_price: float | None = None
     last_marked_value_usd: float = 0.0
     last_unrealized_pnl_usd: float = 0.0
+    peak_unrealized_pnl_usd: float = 0.0
+    first_adverse_ts: str | None = None
     last_mark_ts: str | None = None
+    repricing_event_count: int = 0
+    edge_decay_candidate_count: int = 0
 
     @property
     def remaining_shares(self) -> float:
@@ -236,11 +240,18 @@ class Ledger:
             return None
 
         mark_ts = ts or datetime.now(timezone.utc)
+        previous_mark_price = position.last_mark_price
         marked_value = position.remaining_shares * mark_price
         unrealized = marked_value - position.remaining_entry_cost_usd
+        if previous_mark_price is not None and abs(mark_price - previous_mark_price) > 1e-9:
+            position.repricing_event_count += 1
         position.last_mark_price = mark_price
         position.last_marked_value_usd = marked_value
         position.last_unrealized_pnl_usd = unrealized
+        if unrealized > position.peak_unrealized_pnl_usd:
+            position.peak_unrealized_pnl_usd = unrealized
+        if unrealized < 0 and position.first_adverse_ts is None:
+            position.first_adverse_ts = mark_ts.isoformat()
         position.last_mark_ts = mark_ts.isoformat()
 
         return PositionMark(

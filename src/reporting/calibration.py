@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections import Counter, defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
@@ -91,6 +91,7 @@ class QualificationCorpusRecord:
     original_reason_codes: list[str]
     ts: datetime
     metadata: dict[str, Any]
+    legs: list[dict[str, Any]] = field(default_factory=list)
 
 
 class ThresholdCalibrationService:
@@ -271,6 +272,7 @@ class ThresholdCalibrationService:
                     original_reason_codes=[],
                     ts=_parse_dt(row.get("ts") or payload.get("ts")),
                     metadata=metadata,
+                    legs=legs,
                 )
             )
         return records
@@ -342,6 +344,7 @@ class ThresholdCalibrationService:
                     original_reason_codes=sorted(code for code in entry["reason_codes"] if code),
                     ts=_parse_dt(payload.get("ts")),
                     metadata=metadata,
+                    legs=legs,
                 )
             )
         return records

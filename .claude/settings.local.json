@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(grep -r \"TODO\\\\|FIXME\\\\|XXX\\\\|HACK\\\\|BROKEN\" /d/Issac/polyarb_lab/src --include=*.py)",
+      "Bash(wc -l /d/Issac/polyarb_lab/src/**/*.py)",
+      "Bash(python -m pytest tests/ -x -q --tb=short)",
+      "Bash(python:*)"
+    ]
+  }
+}

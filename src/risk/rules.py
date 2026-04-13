@@ -81,12 +81,13 @@ def check_consecutive_losses(account: AccountSnapshot, risk: RiskConfig) -> Rule
     )
 
 
-def check_open_positions(account: AccountSnapshot, risk: RiskConfig) -> RuleResult:
-    passed = account.open_positions < risk.max_open_positions
+def check_open_positions(account: AccountSnapshot, risk: RiskConfig, candidate: OpportunityCandidate | None = None) -> RuleResult:
+    incoming = len(candidate.legs) if candidate is not None and candidate.legs else 0
+    passed = account.open_positions + incoming <= risk.max_open_positions
     return RuleResult(
         passed,
         RejectionReason.POSITION_LIMIT_EXCEEDED.value,
-        f"open_positions={account.open_positions} max={risk.max_open_positions}",
+        f"open_positions={account.open_positions}+{incoming} max={risk.max_open_positions}",
     )
 
 
