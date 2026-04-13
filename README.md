@@ -1,38 +1,40 @@
 # polyarb_lab
 
-A local PC research and paper-trading scaffold for Polymarket-style arbitrage detection.
+> Status: Research and infrastructure project for Polymarket market scanning, paper trading, and execution diagnostics.
+
+## Overview
+polyarb_lab is a local research repository for studying Polymarket-style market structure, order book conditions, candidate qualification, and execution constraints.
+
+The project is primarily used to test whether apparent paper opportunities remain executable after spread, depth, fees, queue competition, and runtime friction are taken into account.
 
 ## What it does
 - Reads active YES/NO markets from Gamma
 - Pulls order books from the Polymarket CLOB
-- Detects single-market under-1 opportunities in paper mode
-- Detects simple cross-market logical violations from `constraints.yaml`
-- Stores opportunities in SQLite
-- Does **not** place live orders
+- Detects paper candidates and cross-market logical violations
+- Stores outputs in SQLite
+- Supports research, diagnostics, and paper/live execution components depending on the active line
 
-## Why no live trading
-This project is intentionally limited to research, monitoring, and paper-trading. It is designed to help you test whether an apparent arbitrage survives order-book depth, slippage, and time.
+## Current scope
+This repository is an engineering and research workspace, not a claim of proven production profitability.
+
+Current work may include:
+- market discovery and filtering
+- order book and spread analysis
+- paper execution
+- live execution plumbing
+- diagnostics, reporting, and audit scripts
+
+## Why no default live trading
+Live trading should only be enabled when runtime evidence supports it.  
+Paper logic alone is not enough.  
+This repository is structured to separate:
+- paper edge
+- executable edge
+- operational blockers
 
 ## Setup
-```bash
-python -m venv .venv
-source .venv/bin/activate   # Windows PowerShell: .\.venv\Scripts\Activate.ps1
+```powershell
+py -3 -m venv .venv
+.\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
-python -m src.app
-```
-
-## Configure
-Edit `config/settings.yaml` and `config/constraints.yaml`.
-
-## Notes
-- Gamma payloads change. The normalizer is defensive, but you may still need to adapt field handling.
-- Cross-market detection is **detection only** in v1.
-- Historical replay is scaffolded but not implemented.
-- Architecture notes live in `docs/architecture.md`.
-
-## Next steps
-- Add markout measurement (5s / 30s / 5m)
-- Add Telegram/email alerts
-- Add richer multi-outcome normalization
-- Add backtest replay from saved books
-- Expand the new typed config, event store, and risk runner foundation
+py -3 -m src.app
