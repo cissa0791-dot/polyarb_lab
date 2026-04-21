@@ -94,6 +94,105 @@ def _import_sa():
 
 
 # ---------------------------------------------------------------------------
+# Dynamic market discovery
+# ---------------------------------------------------------------------------
+
+_LATEST_PROBE_PATH = Path("data/research/reward_aware_maker_probe/latest_probe.json")
+_PROBE_MAX_AGE_HOURS = 24.0   # treat probe as stale after this many hours
+_DEFAULT_FALLBACK_MAX_SPREAD_CENTS = 3.5
+_DEFAULT_FALLBACK_MIN_SIZE = 200.0
+
+
+def _load_dynamic_survivor_data(
+    min_daily_rate_usdc: float = 100.0,
+    max_markets: int = 10,
+) -> dict | None:
+    """
+    Load SURVIVOR_DATA from the latest universe-refresh probe file.
+
+    Returns a dict in the same schema as scoring_activation.SURVIVOR_DATA, or
+    None if the file is missing, stale, or contains no qualifying markets.
+
+    Parameters
+    ----------
+    min_daily_rate_usdc : float
+        Only include markets with reward_daily_rate_usdc >= this value.
+    max_markets : int
+        Cap on number of markets returned (sorted by daily rate descending).
+    """
+    if not _LATEST_PROBE_PATH.exists():
+        logger.info("dynamic_survivor: %s not found — using hardcoded fallback", _LATEST_PROBE_PATH)
+        return None
+
+    try:
+        with _LATEST_PROBE_PATH.open(encoding="utf-8") as fh:
+            probe = json.load(fh)
+    except Exception as exc:
+        logger.warning("dynamic_survivor: failed to read probe file: %s", exc)
+        return None
+
+    # Staleness check
+    ts_str = probe.get("probe_timestamp") or ""
+    if ts_str:
+        try:
+            probe_ts = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+            age_hours = (datetime.now(timezone.utc) - probe_ts).total_seconds() / 3600.0
+            if age_hours > _PROBE_MAX_AGE_HOURS:
+                logger.warning(
+                    "dynamic_survivor: probe is %.1fh old (max %sh) — using hardcoded fallback",
+                    age_hours, _PROBE_MAX_AGE_HOURS,
+                )
+                return None
+        except Exception:
+            pass
+
+    markets = probe.get("markets") or []
+    qualifying = [
+        m for m in markets
+        if m.get("condition_id")
+        and m.get("token_id")
+        and float(m.get("reward_daily_rate_usdc") or 0) >= min_daily_rate_usdc
+    ]
+
+    if not qualifying:
+        logger.info(
+            "dynamic_survivor: no markets with rate >= $%.0f/day in probe — using hardcoded fallback",
+            min_daily_rate_usdc,
+        )
+        return None
+
+    # Sort by daily rate descending, cap at max_markets
+    qualifying.sort(key=lambda m: float(m.get("reward_daily_rate_usdc") or 0), reverse=True)
+    qualifying = qualifying[:max_markets]
+
+    survivor_data: dict = {}
+    for m in qualifying:
+        slug = m["market_slug"]
+        max_spread = m.get("reward_max_spread_cents") or _DEFAULT_FALLBACK_MAX_SPREAD_CENTS
+        min_size = float(m.get("reward_min_size_shares") or _DEFAULT_FALLBACK_MIN_SIZE)
+        survivor_data[slug] = {
+            "condition_id":             m["condition_id"],
+            "token_id":                 m["token_id"],
+            "daily_rate_usdc":          float(m["reward_daily_rate_usdc"]),
+            "fallback_max_spread_cents": float(max_spread),
+            "fallback_min_size":        min_size,
+            "yes_price_ref":            float(m.get("midpoint") or 0.5),
+            "competitiveness_ref":      1.0,   # unknown from probe; live fetch will update
+        }
+
+    logger.info(
+        "dynamic_survivor: loaded %d markets from probe (rate >= $%.0f/day, probe_ts=%s)",
+        len(survivor_data), min_daily_rate_usdc, ts_str[:19],
+    )
+    for slug, data in survivor_data.items():
+        logger.info(
+            "  %s  rate=$%.0f/day  token_id=%s…",
+            slug[:50], data["daily_rate_usdc"], data["token_id"][:12],
+        )
+    return survivor_data
+
+
+# ---------------------------------------------------------------------------
 # Output
 # ---------------------------------------------------------------------------
 
@@ -266,6 +365,7 @@ def _run_cycle(
     creds: Any,
     args: argparse.Namespace,
     cycle_num: int,
+    survivor_data: dict | None = None,
     reduce_only: bool = False,
     close_buffer: bool = False,
     inventory_tier: str = "NORMAL",
@@ -281,7 +381,8 @@ def _run_cycle(
         PositionConfig, PositionState,
     )
 
-    data       = sa.SURVIVOR_DATA[slug]
+    _sd        = survivor_data if survivor_data is not None else sa.SURVIVOR_DATA
+    data       = _sd[slug]
     token_id   = data["token_id"]
     condition_id = data["condition_id"]
     host       = sa.CLOB_HOST
@@ -414,7 +515,7 @@ def _run_cycle(
     recon = _uar_reconcile(
         client=client,
         creds=creds,
-        survivor_data=sa.SURVIVOR_DATA,
+        survivor_data=_sd,
         token_id=token_id,
         runs_jsonl_path=_runs_path,
     )
@@ -1182,17 +1283,36 @@ def main() -> None:
     ms = importlib.import_module("research_lines.auto_maker_loop.modules.market_selector")
     pm = importlib.import_module("research_lines.auto_maker_loop.modules.position_manager")
 
+    # ── Dynamic market discovery ─────────────────────────────────────────────
+    # Try to load live reward-eligible markets from the universe-refresh probe.
+    # Falls back to the hardcoded SURVIVOR_DATA if probe is missing or stale.
+    _dynamic = _load_dynamic_survivor_data(min_daily_rate_usdc=100.0, max_markets=10)
+    if _dynamic:
+        SURVIVOR_DATA = _dynamic
+        _market_source = f"dynamic ({len(SURVIVOR_DATA)} markets from latest_probe.json)"
+    else:
+        SURVIVOR_DATA = sa.SURVIVOR_DATA
+        _market_source = f"hardcoded fallback ({len(SURVIVOR_DATA)} markets)"
+
     # Resolve target slug
     target_slug: Optional[str] = None
     if args.target:
         target_slug = sa.SLUG_ALIASES.get(args.target, args.target)
-        if target_slug not in sa.SURVIVOR_DATA:
-            print(f"ERROR: unknown target '{args.target}'. Valid: hungary, rubio, vance")
-            sys.exit(1)
+        if target_slug not in SURVIVOR_DATA:
+            # Allow exact slug match even if not in aliases
+            if args.target in SURVIVOR_DATA:
+                target_slug = args.target
+            else:
+                valid = list(sa.SLUG_ALIASES.keys()) + list(SURVIVOR_DATA.keys())
+                print(f"ERROR: unknown target '{args.target}'.")
+                print(f"  Valid aliases : {list(sa.SLUG_ALIASES.keys())}")
+                print(f"  Dynamic slugs : {list(SURVIVOR_DATA.keys())[:5]} …")
+                sys.exit(1)
 
     print("=" * 60)
     print("  AUTO MAKER LOOP")
     print(f"  mode        : {'LIVE' if args.live else 'DRY-RUN'}")
+    print(f"  markets     : {_market_source}")
     print(f"  target      : {args.target or 'auto-select'}")
     print(f"  cycles      : {args.cycles or 'infinite'}")
     print(f"  max_hold    : {args.max_hold_minutes:.0f} min")
@@ -1211,7 +1331,7 @@ def main() -> None:
     from research_lines.auto_maker_loop.modules.startup_state_sync import (
         sync as _startup_sync,
     )
-    _startup_sync(client, creds, sa.SURVIVOR_DATA)
+    _startup_sync(client, creds, SURVIVOR_DATA)
 
     # ── Background WS truth clients (market data only; non-blocking) ────────
     # Start once for the full loop session.  Logs all top-of-book and trade
@@ -1219,7 +1339,7 @@ def main() -> None:
     _mkt_ws = None
     try:
         from research_lines.auto_maker_loop.modules.market_ws_client import MarketWsClient as _MktWsClient
-        _all_token_ids = [v["token_id"] for v in sa.SURVIVOR_DATA.values()]
+        _all_token_ids = [v["token_id"] for v in SURVIVOR_DATA.values()]
         _mkt_ws = _MktWsClient(
             token_ids=_all_token_ids,
             log_path=Path("data/research/auto_maker_loop/market_ws_events.jsonl"),
@@ -1255,7 +1375,7 @@ def main() -> None:
         else:
             # Fetch live reward configs for ranking update
             live_cfgs: dict = {}
-            for s, d in sa.SURVIVOR_DATA.items():
+            for s, d in SURVIVOR_DATA.items():
                 try:
                     cfg = sa.fetch_reward_config(
                         host=sa.CLOB_HOST,
@@ -1268,7 +1388,7 @@ def main() -> None:
                 except Exception:
                     pass
 
-            ranked = ms.rank_all(sa.SURVIVOR_DATA, live_cfgs)
+            ranked = ms.rank_all(SURVIVOR_DATA, live_cfgs)
             print("  market ranking:")
             for row in ranked:
                 skip_note = " [SKIP]" if row["slug"] in skip_slugs else ""
@@ -1279,7 +1399,7 @@ def main() -> None:
                     f"comp={row['competitiveness']:.1f}{skip_note}"
                 )
 
-            slug = ms.pick_best(sa.SURVIVOR_DATA, live_cfgs, skip_slugs=skip_slugs)
+            slug = ms.pick_best(SURVIVOR_DATA, live_cfgs, skip_slugs=skip_slugs)
             if slug is None:
                 print("  all markets skipped — sleeping 60s then retrying")
                 skip_slugs.clear()   # reset skips and try again
@@ -1289,7 +1409,7 @@ def main() -> None:
         # ── Determine control flags for this cycle ───────────────────────
         inv_check = sa._check_sell_inventory(
             client,
-            sa.SURVIVOR_DATA[slug]["token_id"],
+            SURVIVOR_DATA[slug]["token_id"],
             required_shares=1.0,
         )
         current_inventory = inv_check.get("balance_shares", 0.0)
@@ -1297,7 +1417,7 @@ def main() -> None:
         cur_excess = max(0.0, current_inventory - base_inv)
 
         # Fetch current midpoint for reward_cover calculation
-        slug_data = sa.SURVIVOR_DATA[slug]
+        slug_data = SURVIVOR_DATA[slug]
         _mid_now, _ = sa.fetch_midpoint(
             client, slug_data["token_id"], slug_data["yes_price_ref"]
         )
@@ -1344,11 +1464,11 @@ def main() -> None:
             )
             _boot = run_bootstrap(
                 client=client,
-                token_id=sa.SURVIVOR_DATA[slug]["token_id"],
+                token_id=SURVIVOR_DATA[slug]["token_id"],
                 creds=creds,
                 required_shares=base_inv,
                 dry_run=False,
-                price_ref=sa.SURVIVOR_DATA[slug].get("yes_price_ref"),
+                price_ref=SURVIVOR_DATA[slug].get("yes_price_ref"),
             )
             print(f"  inventory bootstrap : {_boot['verdict']}"
                   f"  balance={_boot.get('balance_shares', 0.0):.1f}"
@@ -1365,7 +1485,7 @@ def main() -> None:
                 logger.error("heartbeat failed (live) — cancelling open orders and stopping")
                 _cancel_all_open_orders(
                     client,
-                    token_id=sa.SURVIVOR_DATA[slug]["token_id"],
+                    token_id=SURVIVOR_DATA[slug]["token_id"],
                     reason="heartbeat_failure",
                 )
                 break
@@ -1374,7 +1494,7 @@ def main() -> None:
             continue
 
         # ── Pre-placement reconciliation: clear stale orders ─────────────
-        _stale_token_id = sa.SURVIVOR_DATA[slug]["token_id"]
+        _stale_token_id = SURVIVOR_DATA[slug]["token_id"]
         _stale_count = _reconcile_open_orders(client, _stale_token_id)
         if _stale_count > 0:
             print(f"  [RECONCILE] cleared {_stale_count} stale order(s) before placement")
@@ -1383,6 +1503,7 @@ def main() -> None:
         try:
             result = _run_cycle(
                 sa, ms, pm, slug, client, creds, args, cycle_num,
+                survivor_data=SURVIVOR_DATA,
                 reduce_only=cycle_reduce_only,
                 close_buffer=cycle_close_buffer,
                 inventory_tier=cycle_tier,
@@ -1391,7 +1512,7 @@ def main() -> None:
             )
         except KeyboardInterrupt:
             print("\nInterrupted by user — cancelling open orders and exiting.")
-            _cancel_all_open_orders(client, token_id=sa.SURVIVOR_DATA[slug]["token_id"], reason="keyboard_interrupt")
+            _cancel_all_open_orders(client, token_id=SURVIVOR_DATA[slug]["token_id"], reason="keyboard_interrupt")
             break
         except Exception as exc:
             logger.exception("cycle %d failed: %s", cycle_num, exc)
@@ -1399,7 +1520,7 @@ def main() -> None:
                 logger.error("exception in live cycle — cancelling open orders (failsafe)")
                 _cancel_all_open_orders(
                     client,
-                    token_id=sa.SURVIVOR_DATA.get(slug, {}).get("token_id", ""),
+                    token_id=SURVIVOR_DATA.get(slug, {}).get("token_id", ""),
                     reason="exception_failsafe",
                 )
             result = {
@@ -1419,7 +1540,7 @@ def main() -> None:
             )
             _cancel_all_open_orders(
                 client,
-                token_id=sa.SURVIVOR_DATA.get(slug, {}).get("token_id", ""),
+                token_id=SURVIVOR_DATA.get(slug, {}).get("token_id", ""),
                 reason="kill_switch",
             )
             result["outcome_code"] = "infrastructure_failure"

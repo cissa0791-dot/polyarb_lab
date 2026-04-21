@@ -320,8 +320,13 @@ def _build_candidate(market: dict) -> dict:
     except Exception:
         pass
 
+    condition_id = market.get("conditionId") or ""
+    token_id = _get_yes_token_id(market) or ""
+
     return {
-        "market_slug":              market.get("slug") or market.get("conditionId") or "",
+        "market_slug":              market.get("slug") or condition_id or "",
+        "condition_id":             condition_id,
+        "token_id":                 token_id,
         "event_slug":               (market.get("events") or [{}])[0].get("slug", "") if isinstance(market.get("events"), list) else "",
         "question":                 market.get("question") or "",
         "category":                 market.get("category") or "",
