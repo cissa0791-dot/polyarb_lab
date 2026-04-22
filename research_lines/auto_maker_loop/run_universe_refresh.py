@@ -387,6 +387,11 @@ def _build_candidate(market: dict) -> dict:
     token_id = _get_yes_token_id(market) or ""
     yes_price_clob = market.get("_yes_price_clob")
     reward_end_date = market.get("_reward_end_date")
+    # Market resolution date (from Gamma endDate — when the question resolves)
+    market_end_date = market.get("endDate") or market.get("end_date") or ""
+    if market_end_date:
+        # Normalize to date-only (Gamma sometimes returns full ISO timestamp)
+        market_end_date = str(market_end_date)[:10]
 
     return {
         "market_slug":              market.get("slug") or condition_id or "",
@@ -397,6 +402,7 @@ def _build_candidate(market: dict) -> dict:
         "category":                 market.get("category") or "",
         "yes_price_clob":           yes_price_clob,
         "reward_end_date":          reward_end_date,
+        "market_end_date":          market_end_date,
         "midpoint":                 round(mid, 4) if mid else None,
         "best_bid":                 round(bid, 4) if bid else None,
         "best_ask":                 round(ask, 4) if ask else None,
@@ -515,20 +521,28 @@ def main() -> None:
                 (m.get("slug") or "")[:50], yp, _max_dist * 100,
             )
             continue
-        ed = m.get("_reward_end_date")
-        if ed and ed != "2500-12-31":
+        # Check both reward program end_date and market resolution endDate
+        _near_expiry = False
+        for _ed_field in ("_reward_end_date", "endDate", "end_date"):
+            ed = m.get(_ed_field)
+            if not ed or str(ed)[:10] in ("2500-12-31", ""):
+                continue
             try:
                 from datetime import date as _date
-                end = _date.fromisoformat(ed)
-                if (end - _today).days < _min_days:
+                end = _date.fromisoformat(str(ed)[:10])
+                days_left = (end - _today).days
+                if days_left < _min_days:
+                    _near_expiry = True
                     expiry_filtered += 1
                     logger.info(
-                        "expiry_filter: skipping %s  end_date=%s  (%d days to expiry)",
-                        (m.get("slug") or "")[:50], ed, (end - _today).days,
+                        "expiry_filter: skipping %s  %s=%s  (%d days left)",
+                        (m.get("slug") or "")[:50], _ed_field, str(ed)[:10], days_left,
                     )
-                    continue
+                    break
             except Exception:
                 pass
+        if _near_expiry:
+            continue
         safe_markets.append(m)
 
     print(f"  Safety filters: removed {price_filtered} price-unsafe + {expiry_filtered} near-expiry markets")

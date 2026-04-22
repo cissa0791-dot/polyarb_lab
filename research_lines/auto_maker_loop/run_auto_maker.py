@@ -56,9 +56,11 @@ import argparse
 import json
 import logging
 import os
+import signal
+import subprocess
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime, date, timezone
 from pathlib import Path
 from typing import Any, Optional
 
@@ -98,8 +100,28 @@ def _import_sa():
 # ---------------------------------------------------------------------------
 
 _LATEST_PROBE_PATH = Path("data/research/reward_aware_maker_probe/latest_probe.json")
-_PROBE_MAX_AGE_HOURS = 24.0   # treat probe as stale after this many hours
+_PROBE_MAX_AGE_HOURS = 24.0     # treat probe as stale after this many hours
+_PROBE_AUTO_REFRESH_HOURS = 12.0  # re-run universe_refresh every N hours during session
 _DEFAULT_FALLBACK_MAX_SPREAD_CENTS = 3.5
+
+
+def _auto_refresh_universe(min_rate: float = 100.0) -> bool:
+    """Run universe_refresh subprocess to regenerate latest_probe.json. Returns True on success."""
+    try:
+        result = subprocess.run(
+            [sys.executable, str(_FILE_DIR / "run_universe_refresh.py"), "--min-rate", str(min_rate)],
+            timeout=180,
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode == 0:
+            logger.info("auto_refresh: universe refresh completed successfully")
+            return True
+        logger.warning("auto_refresh: universe refresh failed (rc=%d): %s", result.returncode, result.stderr[:300])
+        return False
+    except Exception as exc:
+        logger.warning("auto_refresh: universe refresh exception: %s", exc)
+        return False
 _DEFAULT_FALLBACK_MIN_SIZE = 200.0
 
 
@@ -178,6 +200,8 @@ def _load_dynamic_survivor_data(
             "fallback_min_size":        min_size,
             "yes_price_ref":            float(m.get("yes_price_ref") or m.get("yes_price_clob") or m.get("midpoint") or 0.5),
             "competitiveness_ref":      1.0,   # unknown from probe; live fetch will update
+            "market_end_date":          m.get("market_end_date") or "",
+            "reward_end_date":          m.get("reward_end_date") or "",
         }
 
     logger.info(
@@ -1329,6 +1353,21 @@ def main() -> None:
     # Credentials (always needed — even dry-run fetches live data)
     creds, client = _setup_client(sa)
 
+    # ── Graceful shutdown: SIGTERM / SIGHUP ──────────────────────────────────
+    # Sets a flag so the loop exits cleanly after the current cycle completes,
+    # cancelling all open orders before stopping.
+    _shutdown: list[bool] = [False]
+
+    def _shutdown_handler(signum: int, frame: Any) -> None:
+        logger.warning("signal %d received — will shut down after this cycle", signum)
+        _shutdown[0] = True
+
+    signal.signal(signal.SIGTERM, _shutdown_handler)
+    try:
+        signal.signal(signal.SIGHUP, _shutdown_handler)   # POSIX only
+    except (AttributeError, OSError):
+        pass
+
     # ── Startup state sync — read-only diagnostic before first cycle ──────
     from research_lines.auto_maker_loop.modules.startup_state_sync import (
         sync as _startup_sync,
@@ -1355,12 +1394,33 @@ def main() -> None:
     last_bid_fill_ts: Optional[datetime] = None   # for fill delay logic
     _mid_history: dict  = {}   # slug → last known midpoint (volatility circuit breaker)
     _market_daily_loss: dict = {}  # slug → cumulative loss USD today (per-market loss limit)
+    _last_probe_refresh: datetime = datetime.now(timezone.utc)  # for auto-refresh tracking
 
     while True:
         cycle_num += 1
         if args.cycles and cycle_num > args.cycles:
             print(f"\nCompleted {args.cycles} cycles — exiting.")
             break
+
+        # ── Shutdown check (SIGTERM / SIGHUP) ────────────────────────────────
+        if _shutdown[0]:
+            print("\n  [SHUTDOWN] Signal received — cancelling open orders and exiting.")
+            _cancel_all_open_orders(client, reason="signal_shutdown")
+            break
+
+        # ── Auto-refresh probe every 12 hours ────────────────────────────────
+        _hours_since_refresh = (datetime.now(timezone.utc) - _last_probe_refresh).total_seconds() / 3600.0
+        if _hours_since_refresh >= _PROBE_AUTO_REFRESH_HOURS:
+            print(f"\n  [AUTO-REFRESH] Probe is {_hours_since_refresh:.1f}h old — refreshing universe...")
+            if _auto_refresh_universe(min_rate=100.0):
+                _fresh = _load_dynamic_survivor_data(min_daily_rate_usdc=100.0, max_markets=10)
+                if _fresh:
+                    SURVIVOR_DATA = _fresh
+                    skip_slugs.clear()   # markets may have changed
+                    print(f"  [AUTO-REFRESH] Loaded {len(SURVIVOR_DATA)} fresh markets — skip_slugs cleared")
+                else:
+                    logger.warning("auto_refresh: 0 qualifying markets — keeping current SURVIVOR_DATA")
+            _last_probe_refresh = datetime.now(timezone.utc)
 
         # ── Fill delay: pause BID placement after recent fill ─────────────
         if last_bid_fill_ts is not None:
@@ -1457,10 +1517,19 @@ def main() -> None:
         )
         cycle_reduce_only = cycle_tier != "NORMAL"
 
-        # Close buffer: check time to resolution if provided
+        # Close buffer: auto-detect from market_end_date; manual arg overrides
         cycle_close_buffer = False
-        if args.time_to_resolution_minutes is not None:
-            cycle_close_buffer = args.time_to_resolution_minutes < args.close_buffer_minutes
+        _ttl_min: Optional[float] = args.time_to_resolution_minutes
+        if _ttl_min is None:
+            _med = SURVIVOR_DATA[slug].get("market_end_date") or ""
+            if _med and _med not in ("2500-12-31", ""):
+                try:
+                    _days_left = (date.fromisoformat(_med) - date.today()).days
+                    _ttl_min = max(0.0, _days_left * 24 * 60)
+                except Exception:
+                    pass
+        if _ttl_min is not None:
+            cycle_close_buffer = _ttl_min < args.close_buffer_minutes
 
         print(f"  inventory           : {current_inventory:.0f} shares  "
               f"(base={base_inv:.0f}  excess={cur_excess:.0f})")
@@ -1469,7 +1538,8 @@ def main() -> None:
             print(f"  reward_cover_hours  : {rch:.1f}h  "
                   f"({'SELL NOW — exceeds 24h threshold' if rch > 24 else 'within 24h, acceptable'})")
         if cycle_close_buffer:
-            print(f"  [CLOSE-BUFFER] time_to_resolution={args.time_to_resolution_minutes:.0f}min")
+            _src = SURVIVOR_DATA[slug].get("market_end_date") or "manual"
+            print(f"  [CLOSE-BUFFER] ttl≈{_ttl_min:.0f}min  end_date={_src}")
 
         # ── Inventory bootstrap ──────────────────────────────────────────
         # Buy YES token shortfall before entering the cycle.
