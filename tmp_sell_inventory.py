@@ -17,15 +17,102 @@ sys.path.insert(0, ".")
 
 CLOB_HOST = "https://clob.polymarket.com"
 
+def _sell_all(args):
+    """
+    Scan every probe file for token_ids we've ever seen, check balance,
+    and sell any non-zero position. Used to clean up orphan positions
+    spread across multiple markets.
+    """
+    import glob, json
+    from research_lines.reward_aware_maker_probe.modules.scoring_activation import (
+        load_activation_credentials, build_clob_client,
+        _check_sell_inventory, fetch_midpoint, _place_order, _is_filled,
+    )
+
+    creds = load_activation_credentials()
+    if not creds:
+        print("ERROR: POLYMARKET_PRIVATE_KEY not set"); sys.exit(1)
+    print(f"sig_type : {creds.signature_type}")
+    print(f"funder   : {creds.funder or '(EOA mode)'}")
+
+    client = build_clob_client(creds, CLOB_HOST)
+
+    # Collect every (slug, token_id, yes_price_ref) from probe files
+    seen: dict = {}  # token_id → (slug, yes_price_ref)
+    for f in sorted(glob.glob("data/research/reward_aware_maker_probe/*.json")):
+        try:
+            with open(f) as fh:
+                data = json.load(fh)
+            for m in data.get("markets", []):
+                tok = m.get("token_id")
+                if tok and tok not in seen:
+                    seen[tok] = (m.get("slug", "?"), m.get("yes_price_ref"))
+        except Exception:
+            pass
+
+    print(f"\nScanning {len(seen)} unique token_ids from probe history …\n")
+
+    positions = []
+    for tok, (slug, price_ref) in seen.items():
+        try:
+            inv = _check_sell_inventory(client, tok, required_shares=1)
+            bal = inv.get("balance_shares", 0.0)
+            if bal > 0.5:
+                positions.append((slug, tok, bal, price_ref))
+                print(f"  FOUND  {slug[:45]:<45}  balance={bal:.1f}")
+        except Exception as e:
+            print(f"  skipped {slug[:30]}: {e}")
+
+    if not positions:
+        print("\nNo non-zero positions found. Clean!"); return
+
+    print(f"\n{len(positions)} market(s) have inventory. ", end="")
+    if args.dry_run:
+        print("DRY-RUN — would sell each one."); return
+    print("Selling each …\n")
+
+    for slug, tok, bal, price_ref in positions:
+        print(f"\n── Selling {bal:.1f} of {slug[:50]} ─────")
+        mid, src = fetch_midpoint(client, tok, price_ref)
+        if mid is None:
+            print(f"  SKIP: no midpoint for {slug[:40]} (price_ref={price_ref})")
+            continue
+        sell_price = round(max(0.01, mid - 0.01), 2)
+        print(f"  mid={mid:.4f} src={src} → sell_price={sell_price:.4f}")
+        order_id, err = _place_order(client, tok, sell_price, bal, "SELL")
+        if not order_id:
+            print(f"  FAILED: {err}"); continue
+        print(f"  SELL placed order_id={order_id[:20]}…")
+        deadline = time.monotonic() + 60
+        filled = False
+        while time.monotonic() < deadline:
+            time.sleep(5)
+            if _is_filled(client, order_id):
+                print(f"  FILLED ✓  ~${sell_price * bal:.2f}")
+                filled = True
+                break
+        if not filled:
+            print(f"  not yet filled — GTC remains on book")
+
+
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--slug", required=True)
+    ap.add_argument("--slug", default=None,
+                    help="Slug to sell (omit when using --all)")
+    ap.add_argument("--all", action="store_true",
+                    help="Scan every market in ALL probe files and sell any non-zero balance")
     ap.add_argument("--shares", type=float, default=None,
                     help="Shares to sell (default: all you have)")
     ap.add_argument("--sell-price", type=float, default=None,
                     help="Override sell price (e.g. 0.34). Use when midpoint unavailable.")
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
+
+    if not args.slug and not args.all:
+        ap.error("must pass --slug OR --all")
+
+    if args.all:
+        _sell_all(args); return
 
     # ── 1. Load creds ────────────────────────────────────────────────────────
     from research_lines.reward_aware_maker_probe.modules.scoring_activation import (
