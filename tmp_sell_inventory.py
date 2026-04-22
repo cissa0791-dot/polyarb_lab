@@ -22,6 +22,8 @@ def main():
     ap.add_argument("--slug", required=True)
     ap.add_argument("--shares", type=float, default=None,
                     help="Shares to sell (default: all you have)")
+    ap.add_argument("--sell-price", type=float, default=None,
+                    help="Override sell price (e.g. 0.34). Use when midpoint unavailable.")
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
 
@@ -76,14 +78,22 @@ def main():
     from research_lines.reward_aware_maker_probe.modules.scoring_activation import (
         fetch_midpoint,
     )
-    mid, src = fetch_midpoint(client, token_id, None)
+    price_ref = data.get("yes_price_ref") or data.get("yes_price_clob")
+    mid, src = fetch_midpoint(client, token_id, price_ref)
     if mid is None:
-        print("ERROR: could not fetch midpoint — cannot price SELL"); sys.exit(1)
+        print(f"ERROR: could not fetch midpoint (price_ref={price_ref}) — cannot price SELL")
+        print("Tip: set a manual price with  --sell-price 0.35")
+        sys.exit(1)
 
     # Sell at (mid - 0.01) — one tick below mid, aggressive enough to fill quickly
-    sell_price = round(max(0.01, mid - 0.01), 2)
-    print(f"midpoint   : {mid:.4f}  (src={src})")
-    print(f"sell_price : {sell_price:.4f}  (mid - 1 tick)")
+    if args.sell_price is not None:
+        sell_price = round(max(0.01, min(0.99, args.sell_price)), 2)
+        print(f"midpoint   : {mid:.4f}  (src={src})")
+        print(f"sell_price : {sell_price:.4f}  (manual override)")
+    else:
+        sell_price = round(max(0.01, mid - 0.01), 2)
+        print(f"midpoint   : {mid:.4f}  (src={src})")
+        print(f"sell_price : {sell_price:.4f}  (mid - 1 tick)")
     print(f"sell_size  : {sell_size:.1f} shares")
     print(f"est. value : ${sell_price * sell_size:.2f}")
 
