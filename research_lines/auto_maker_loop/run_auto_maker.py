@@ -319,6 +319,64 @@ def _cancel_all_open_orders(client: Any, token_id: str = "", reason: str = "shut
         )
 
 
+def _liquidate_inventory(
+    client: Any,
+    token_id: str,
+    min_size: float = 1.0,
+    poll_secs: int = 5,
+    timeout_secs: int = 90,
+) -> None:
+    """
+    Sell all remaining YES shares at shutdown.
+    Places a SELL limit order at mid - 1 tick (aggressive taker price).
+    Polls for fill up to timeout_secs, then leaves the GTC order on book.
+    Never raises.
+    """
+    if not token_id:
+        return
+    try:
+        import time as _time
+        sa = _import_sa()
+        inv = sa._check_sell_inventory(client, token_id, required_shares=min_size)
+        balance = inv.get("balance_shares", 0.0)
+        if balance < min_size:
+            logger.info("liquidate: nothing to sell (balance=%.2f)", balance)
+            return
+
+        mid, src = sa.fetch_midpoint(client, token_id, None)
+        if mid is None:
+            logger.warning("liquidate: midpoint unavailable — skipping auto-sell (check manually)")
+            return
+
+        sell_price = round(max(0.01, mid - 0.01), 2)
+        logger.info(
+            "liquidate: selling %.1f YES shares @ %.4f (mid=%.4f src=%s)",
+            balance, sell_price, mid, src,
+        )
+        print(f"\n  AUTO-SELL on shutdown: {balance:.1f} shares @ {sell_price:.4f}  …")
+
+        order_id, err = sa._place_order(client, token_id, sell_price, balance, "SELL")
+        if not order_id:
+            logger.error("liquidate: SELL order failed — %s  (sell manually)", err)
+            print(f"  AUTO-SELL FAILED: {err}  — sell {balance:.0f} shares manually on polymarket.com")
+            return
+
+        print(f"  SELL order placed  order_id={order_id[:20]}…  polling for fill…")
+        deadline = _time.monotonic() + timeout_secs
+        while _time.monotonic() < deadline:
+            _time.sleep(poll_secs)
+            if sa._is_filled(client, order_id):
+                print(f"  AUTO-SELL FILLED ✓  proceeds ≈ ${sell_price * balance:.2f}")
+                logger.info("liquidate: FILLED  order_id=%s", order_id[:20])
+                return
+        print(
+            f"  AUTO-SELL not filled within {timeout_secs}s — GTC order {order_id[:20]}… "
+            f"remains on book.  Check polymarket.com to confirm."
+        )
+    except Exception as exc:
+        logger.warning("liquidate: unexpected error — %s  (sell manually)", exc)
+
+
 def _earning_pct_to_cents_per_hour(pct: Optional[float], daily_rate_usdc: float) -> Optional[float]:
     """Convert earning_percentage to cents/hour for comparison with pnl_cents."""
     if pct is None:
@@ -1395,6 +1453,7 @@ def main() -> None:
     _mid_history: dict  = {}   # slug → last known midpoint (volatility circuit breaker)
     _market_daily_loss: dict = {}  # slug → cumulative loss USD today (per-market loss limit)
     _last_probe_refresh: datetime = datetime.now(timezone.utc)  # for auto-refresh tracking
+    _last_token_id: str = ""   # most recent active token_id — used by shutdown liquidation
 
     while True:
         cycle_num += 1
@@ -1404,8 +1463,10 @@ def main() -> None:
 
         # ── Shutdown check (SIGTERM / SIGHUP) ────────────────────────────────
         if _shutdown[0]:
-            print("\n  [SHUTDOWN] Signal received — cancelling open orders and exiting.")
+            print("\n  [SHUTDOWN] Signal received — cancelling open orders and liquidating inventory.")
             _cancel_all_open_orders(client, reason="signal_shutdown")
+            if args.live and _last_token_id:
+                _liquidate_inventory(client, _last_token_id)
             break
 
         # ── Auto-refresh probe every 12 hours ────────────────────────────────
@@ -1471,9 +1532,10 @@ def main() -> None:
                 continue
 
         # ── Determine control flags for this cycle ───────────────────────
+        _last_token_id = SURVIVOR_DATA[slug]["token_id"]   # track for shutdown liquidation
         inv_check = sa._check_sell_inventory(
             client,
-            SURVIVOR_DATA[slug]["token_id"],
+            _last_token_id,
             required_shares=1.0,
         )
         current_inventory = inv_check.get("balance_shares", 0.0)
@@ -1598,8 +1660,10 @@ def main() -> None:
                 reward_cover_hours=rch,
             )
         except KeyboardInterrupt:
-            print("\nInterrupted by user — cancelling open orders and exiting.")
-            _cancel_all_open_orders(client, token_id=SURVIVOR_DATA[slug]["token_id"], reason="keyboard_interrupt")
+            print("\nInterrupted by user — cancelling open orders and liquidating inventory.")
+            _cancel_all_open_orders(client, token_id=_last_token_id, reason="keyboard_interrupt")
+            if args.live and _last_token_id:
+                _liquidate_inventory(client, _last_token_id)
             break
         except Exception as exc:
             logger.exception("cycle %d failed: %s", cycle_num, exc)
