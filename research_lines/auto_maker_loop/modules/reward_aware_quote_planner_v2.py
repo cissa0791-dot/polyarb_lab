@@ -45,6 +45,7 @@ Public interface
 """
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -159,21 +160,37 @@ def _round_tick(price: float) -> float:
     return round(round(price / _TICK) * _TICK, 4)
 
 
+def _tick_ceil(price: float) -> float:
+    """Smallest tick >= price (ceiling to nearest 0.01)."""
+    return round(math.ceil(round(price / _TICK, 8)) * _TICK, 4)
+
+
+def _tick_floor(price: float) -> float:
+    """Largest tick <= price (floor to nearest 0.01)."""
+    return round(math.floor(round(price / _TICK, 8)) * _TICK, 4)
+
+
 def _clamp(price: float) -> float:
     return max(0.01, min(0.99, price))
 
 
 def _apply_zone_bid(bid: float, zone_bid: Optional[float], notes: list[str]) -> float:
     if zone_bid is not None and bid < zone_bid:
-        notes.append(f"bid clamped from {bid:.4f} to zone_bid={zone_bid:.4f}")
-        return _round_tick(zone_bid)
+        # Use ceiling so the result is always >= zone_bid.
+        # _round_tick() uses banker's rounding and can land below zone_bid
+        # (e.g. zone_bid=0.3435 → _round_tick→0.34 < zone_bid).
+        clamped = _tick_ceil(zone_bid)
+        notes.append(f"bid clamped from {bid:.4f} to {clamped:.4f} (zone_bid={zone_bid:.4f})")
+        return clamped
     return bid
 
 
 def _apply_zone_ask(ask: float, zone_ask: Optional[float], notes: list[str]) -> float:
     if zone_ask is not None and ask > zone_ask:
-        notes.append(f"ask clamped from {ask:.4f} to zone_ask={zone_ask:.4f}")
-        return _round_tick(zone_ask)
+        # Use floor so the result is always <= zone_ask.
+        clamped = _tick_floor(zone_ask)
+        notes.append(f"ask clamped from {ask:.4f} to {clamped:.4f} (zone_ask={zone_ask:.4f})")
+        return clamped
     return ask
 
 

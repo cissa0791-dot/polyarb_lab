@@ -895,10 +895,11 @@ def fetch_user_total(
         sorted_params = dict(sorted(base_params.items()))
         query_string  = _up.urlencode(sorted_params)
 
-        # ── HMAC helper ─────────────────────────────────────────────────────
-        def _build_headers(canonical_msg: str) -> dict:
+        # ── HMAC helper (path-only, no extra headers) ───────────────────────
+        # Mirrors _make_headers() which works for /rewards/user/markets.
+        def _build_headers_simple(sign_path: str) -> dict:
             ts = str(int(time.time() * 1000))
-            full_msg = ts + "GET" + canonical_msg
+            full_msg = ts + "GET" + sign_path
             try:
                 hmac_key = _b64.urlsafe_b64decode(creds.api_secret)
             except Exception:
@@ -906,57 +907,81 @@ def fetch_user_total(
             sig = _b64.b64encode(
                 _hmac_mod.new(hmac_key, full_msg.encode("utf-8"), _hashlib.sha256).digest()
             ).decode("utf-8")
-            h = {
+            return {
                 "CLOB-API-KEY":    creds.api_key,
                 "CLOB-SIGNATURE":  sig,
                 "CLOB-TIMESTAMP":  ts,
                 "CLOB-PASSPHRASE": creds.api_passphrase,
             }
+
+        # HMAC helper that adds CLOB-SIGNATURE-TYPE and POLY_ADDRESS
+        def _build_headers_full(sign_path: str) -> dict:
+            h = _build_headers_simple(sign_path)
             if sig_type is not None:
                 h["CLOB-SIGNATURE-TYPE"] = str(int(sig_type))
-            # POLY_ADDRESS: EOA that owns the API key — required by /rewards/user/total
             if eoa:
                 h["POLY_ADDRESS"] = eoa
-            return h, full_msg
+            return h
 
         # ── Diagnostic print (before any attempt) ───────────────────────────
         print(f"  [user_total_diag] api_key_prefix : {creds.api_key[:8]}...")
         print(f"  [user_total_diag] POLY_ADDRESS    : {eoa or '(not_resolved)'}")
         print(f"  [user_total_diag] sig_type        : {sig_type}")
         print(f"  [user_total_diag] maker_address   : {maker_addr or '(not_resolved)'}")
-        print(f"  [user_total_diag] funder==maker   : {getattr(creds,'funder',None) == maker_addr}")
         print(f"  [user_total_diag] base_url        : {url}")
         print(f"  [user_total_diag] query_string    : {query_string}")
-        print(f"  [user_total_diag] signing_A_path  : ts+GET+{path}")
-        print(f"  [user_total_diag] signing_B_full  : ts+GET+{path}?{query_string}")
 
         with httpx.Client() as hc:
-            # ── Attempt A: sign path only ────────────────────────────────────
-            headers_a, msg_a = _build_headers(path)
-            resp_a = hc.get(url, headers=headers_a, params=sorted_params, timeout=8)
+            # ── Attempt A: same simple headers as working /rewards/user/markets
+            # No extra CLOB-SIGNATURE-TYPE / POLY_ADDRESS headers, no query params.
+            headers_a = _build_headers_simple(path)
+            resp_a = hc.get(url, headers=headers_a, timeout=8)
             print(f"  [user_total_diag] attempt_A_url   : {resp_a.request.url}")
-            print(f"  [user_total_diag] attempt_A_status: {resp_a.status_code}")
+            print(f"  [user_total_diag] attempt_A_status: {resp_a.status_code}  (simple headers, no params)")
             if resp_a.status_code == 200:
                 raw   = resp_a.json()
                 total = _sum_user_total_response(raw)
-                print(f"  [user_total_diag] attempt_A       : SUCCESS signed={path!r}")
+                print(f"  [user_total_diag] attempt_A       : SUCCESS")
                 return total, str(raw)[:400]
 
-            # ── Attempt B: sign path + query string ──────────────────────────
-            headers_b, msg_b = _build_headers(f"{path}?{query_string}")
+            # ── Attempt B: simple headers + sorted query params ──────────────
+            headers_b = _build_headers_simple(path)
             resp_b = hc.get(url, headers=headers_b, params=sorted_params, timeout=8)
             print(f"  [user_total_diag] attempt_B_url   : {resp_b.request.url}")
-            print(f"  [user_total_diag] attempt_B_status: {resp_b.status_code}")
+            print(f"  [user_total_diag] attempt_B_status: {resp_b.status_code}  (simple headers, with params)")
             if resp_b.status_code == 200:
                 raw   = resp_b.json()
                 total = _sum_user_total_response(raw)
-                print(f"  [user_total_diag] attempt_B       : SUCCESS signed={path!r}+querystring")
+                print(f"  [user_total_diag] attempt_B       : SUCCESS")
+                return total, str(raw)[:400]
+
+            # ── Attempt C: full headers (SIGNATURE-TYPE + POLY_ADDRESS) + params
+            headers_c = _build_headers_full(path)
+            resp_c = hc.get(url, headers=headers_c, params=sorted_params, timeout=8)
+            print(f"  [user_total_diag] attempt_C_url   : {resp_c.request.url}")
+            print(f"  [user_total_diag] attempt_C_status: {resp_c.status_code}  (full headers, with params)")
+            if resp_c.status_code == 200:
+                raw   = resp_c.json()
+                total = _sum_user_total_response(raw)
+                print(f"  [user_total_diag] attempt_C       : SUCCESS")
+                return total, str(raw)[:400]
+
+            # ── Attempt D: sign path+querystring (original approach B) ────────
+            headers_d = _build_headers_full(f"{path}?{query_string}")
+            resp_d = hc.get(url, headers=headers_d, params=sorted_params, timeout=8)
+            print(f"  [user_total_diag] attempt_D_status: {resp_d.status_code}  (full headers, path+qs signing)")
+            if resp_d.status_code == 200:
+                raw   = resp_d.json()
+                total = _sum_user_total_response(raw)
+                print(f"  [user_total_diag] attempt_D       : SUCCESS")
                 return total, str(raw)[:400]
 
         return None, (
-            f"both_attempts_failed "
-            f"A={resp_a.status_code}:{resp_a.text[:120]} "
-            f"B={resp_b.status_code}:{resp_b.text[:120]}"
+            f"all_attempts_failed "
+            f"A={resp_a.status_code}:{resp_a.text[:80]} "
+            f"B={resp_b.status_code}:{resp_b.text[:80]} "
+            f"C={resp_c.status_code}:{resp_c.text[:80]} "
+            f"D={resp_d.status_code}:{resp_d.text[:80]}"
         )
     except Exception as exc:
         return None, f"{type(exc).__name__}: {exc}"
