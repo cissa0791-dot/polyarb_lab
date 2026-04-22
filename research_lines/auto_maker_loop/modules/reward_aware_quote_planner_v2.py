@@ -109,6 +109,9 @@ def plan(params: PlannerParams) -> PlannerResult:
         )
 
     if posture == "ASYMMETRIC_ASK_LEAN":
+        # Reduce BID size to 60% to discourage inventory accumulation in asymmetric posture
+        bid_size = round(bid_size * 0.6)
+        notes.append(f"bid_size reduced to 60% for ASYMMETRIC_ASK_LEAN: {bid_size:.0f}")
         # ASK: one tick above midpoint (aggressive, high fill probability)
         ask = _clamp(_round_tick(mid + _TICK))
         # BID: pushed to outer edge of reward zone (lower fill probability)

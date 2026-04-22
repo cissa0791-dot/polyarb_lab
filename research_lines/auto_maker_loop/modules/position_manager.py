@@ -79,13 +79,13 @@ class PositionConfig:
         reduce_only              : if True, skip BID — only work SELL side (set by outer loop)
         close_buffer             : if True, no new BIDs allowed (set by outer loop)
     """
-    poll_interval_sec: int          = 60      # seconds between fill checks
-    max_hold_minutes: float         = 240.0   # hard backstop: forced exit after this many minutes
-    chase_after_minutes: float      = 60.0    # lower ASK after this many minutes unfilled
-    max_chases: int                 = 3       # max ASK re-quotes downward
+    poll_interval_sec: int          = 30      # seconds between fill checks
+    max_hold_minutes: float         = 90.0   # hard backstop: forced exit after this many minutes
+    chase_after_minutes: float      = 45.0    # lower ASK after this many minutes unfilled
+    max_chases: int                 = 2       # max ASK re-quotes downward
     chase_tick: float               = 0.01    # lower ASK by this amount per chase
     stop_loss_cents: float          = 3.0     # exit if mid drops this far below entry
-    drift_threshold_cents: float    = 1.5     # re-quote if mid drifts this far from bid in QUOTING
+    drift_threshold_cents: float    = 2.0     # re-quote if mid drifts this far from bid in QUOTING
     ask_cancel_distance_cents: float = 2.0    # cancel ASK if mid rises this far above it in BID_FILLED
     consecutive_fail_limit: int     = 2       # kill switch after this many consecutive failures
     reduce_only: bool               = False   # outer loop: True = SELL-only (inventory cap hit)

@@ -1224,20 +1224,20 @@ def _parse_args() -> argparse.Namespace:
                    help="Lock to one market: hungary | rubio | vance (default: auto-select)")
     p.add_argument("--cycles",  type=int, default=0,
                    help="Number of cycles to run (0 = infinite, default 0)")
-    p.add_argument("--cycle-sleep",        type=int,   default=300,
-                   help="Seconds between cycles (default 300)")
-    p.add_argument("--poll-interval-sec",  type=int,   default=60,
-                   help="Seconds between fill checks inside position manager (default 60)")
-    p.add_argument("--max-hold-minutes",   type=float, default=240.0,
-                   help="TIME_LIMIT exit after this many minutes holding YES (default 240)")
-    p.add_argument("--chase-after-minutes", type=float, default=60.0,
-                   help="Start lowering ASK after this many minutes unfilled (default 60)")
-    p.add_argument("--max-chases",         type=int,   default=3,
-                   help="Max number of ASK re-quotes downward (default 3)")
+    p.add_argument("--cycle-sleep",        type=int,   default=30,
+                   help="Seconds between cycles (default 30 — minimise reward gaps)")
+    p.add_argument("--poll-interval-sec",  type=int,   default=30,
+                   help="Seconds between fill checks inside position manager (default 30)")
+    p.add_argument("--max-hold-minutes",   type=float, default=90.0,
+                   help="TIME_LIMIT exit after this many minutes holding YES (default 90)")
+    p.add_argument("--chase-after-minutes", type=float, default=45.0,
+                   help="Start lowering ASK after this many minutes unfilled (default 45)")
+    p.add_argument("--max-chases",         type=int,   default=2,
+                   help="Max number of ASK re-quotes downward (default 2)")
     p.add_argument("--stop-loss-cents",       type=float, default=3.0,
                    help="STOP_LOSS if midpoint drops this many cents below entry (default 3.0)")
-    p.add_argument("--drift-threshold-cents", type=float, default=1.5,
-                   help="Re-quote if midpoint drifts this many cents from our bid in QUOTING (default 1.5)")
+    p.add_argument("--drift-threshold-cents", type=float, default=2.0,
+                   help="Re-quote if midpoint drifts this many cents from our bid in QUOTING (default 2.0)")
     p.add_argument("--ask-cancel-distance-cents", type=float, default=2.0,
                    help="Cancel hanging ASK if midpoint rises this many cents above it (default 2.0)")
     p.add_argument("--base-inventory-shares",  type=float, default=200.0,
@@ -1264,6 +1264,8 @@ def _parse_args() -> argparse.Namespace:
                    help="Hard-set BID price after planner (canary testing only, e.g. 0.62)")
     p.add_argument("--ask-price-override", type=float, default=None,
                    help="Hard-set ASK price after planner (canary testing only, e.g. 0.64)")
+    p.add_argument("--market-daily-loss-limit-usd", type=float, default=5.0,
+                   help="Skip market rest of session if cumulative realized loss exceeds this USD (default 5.0)")
     p.add_argument("--verbose", action="store_true", help="DEBUG-level logging")
     return p.parse_args()
 
@@ -1351,6 +1353,8 @@ def main() -> None:
     cycle_num        = 0
     skip_slugs: set  = set()
     last_bid_fill_ts: Optional[datetime] = None   # for fill delay logic
+    _mid_history: dict  = {}   # slug → last known midpoint (volatility circuit breaker)
+    _market_daily_loss: dict = {}  # slug → cumulative loss USD today (per-market loss limit)
 
     while True:
         cycle_num += 1
@@ -1421,6 +1425,19 @@ def main() -> None:
         _mid_now, _ = sa.fetch_midpoint(
             client, slug_data["token_id"], slug_data["yes_price_ref"]
         )
+        # ── Volatility circuit breaker ───────────────────────────────────
+        # Track midpoint history to detect sudden price movements.
+        # If mid moved > 3¢ in the last 2 cycles, skip placement this cycle.
+        _prev_mid = _mid_history.get(slug)
+        _mid_history[slug] = _mid_now
+        if _mid_now and _prev_mid and abs(_mid_now - _prev_mid) * 100 > 3.0:
+            print(
+                f"  [VOLATILITY BREAKER] mid moved {abs(_mid_now - _prev_mid)*100:.2f}¢ "
+                f"({_prev_mid:.4f} → {_mid_now:.4f}) — skipping cycle"
+            )
+            time.sleep(30)
+            continue
+
         # Reward cover: use midpoint as proxy for avg_entry_price
         # (conservative — assumes entry was at current mid; actual loss may differ)
         _daily_rate = slug_data["daily_rate_usdc"]
@@ -1559,6 +1576,20 @@ def main() -> None:
         result["outcome_code"] = classify_outcome(result)
         _append_run(result)
         print_cycle_summary(result)
+
+        # ── Per-market daily loss limit ──────────────────────────────────
+        _pnl_cents = result.get("pnl_cents", 0.0) or 0.0
+        _pos_size  = result.get("size", 0.0) or 0.0
+        _cycle_pnl_usd = (_pnl_cents / 100.0) * _pos_size
+        if _cycle_pnl_usd < 0:
+            _market_daily_loss[slug] = _market_daily_loss.get(slug, 0.0) + abs(_cycle_pnl_usd)
+            _loss_limit = args.market_daily_loss_limit_usd
+            print(f"\n  [DAILY LOSS] {slug[:40]}: ${_market_daily_loss[slug]:.2f} cumulative loss this session")
+            if _market_daily_loss[slug] >= _loss_limit:
+                print(f"  [DAILY LOSS LIMIT] ${_loss_limit:.2f} limit reached — "
+                      f"skipping {slug[:40]} for rest of session")
+                if not target_slug:
+                    skip_slugs.add(slug)
 
         # Print rolling study summary every 3 cycles or on final cycle
         all_records = load_runs(RUNS_JSONL)
