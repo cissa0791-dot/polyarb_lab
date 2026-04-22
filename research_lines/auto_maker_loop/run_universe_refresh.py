@@ -15,6 +15,10 @@ Filters applied (in order):
   5. Minimum liquidity: liquidityNum >= MIN_LIQUIDITY_USD
   6. CLOB live book verification: fetch YES token book, confirm bid > 0.01 and ask < 0.99
      (Gamma prices are cached/stale — CLOB is ground truth)
+  7. YES price proximity: abs(yes_price_clob - 0.5) <= max_price_distance  (default 0.20)
+     Prevents posting at mispriced levels vs the true consensus price
+  8. Time to expiry: reward end_date >= today + min_days_to_expiry  (default 7 days)
+     Avoids markets with imminent resolution where adverse selection spikes
 
 Output:
   data/research/reward_aware_maker_probe/universe_refresh_<timestamp>.json
@@ -69,6 +73,10 @@ DEAD_BID_THRESHOLD = 0.01
 DEAD_ASK_THRESHOLD = 0.99
 
 CLOB_VERIFY_WORKERS = 10   # parallel CLOB book fetches
+
+# Safety filters (applied after CLOB reward-config enrichment)
+MAX_PRICE_DISTANCE = 0.20   # skip if abs(yes_price - 0.5) > this
+MIN_DAYS_TO_EXPIRY = 7      # skip if reward end_date < today + this
 
 OUTPUT_DIR = Path("data/research/reward_aware_maker_probe")
 SEP = "─" * 72
@@ -293,6 +301,61 @@ def _verify_clob_batch(
 
 
 # ---------------------------------------------------------------------------
+# CLOB reward-config enrichment (yes_price + end_date)
+# ---------------------------------------------------------------------------
+
+def _fetch_reward_config_single(condition_id: str, client: httpx.Client) -> dict:
+    """
+    Fetch CLOB reward config for one market.
+    Returns dict with yes_price_clob (float|None) and reward_end_date (str|None).
+    """
+    try:
+        resp = client.get(
+            f"{CLOB_HOST}/rewards/markets/{condition_id}",
+            timeout=8,
+        )
+        if resp.status_code != 200:
+            return {"yes_price_clob": None, "reward_end_date": None}
+        data = (resp.json().get("data") or [{}])[0]
+        yes_price = next(
+            (t["price"] for t in (data.get("tokens") or []) if t.get("outcome") == "Yes"),
+            None,
+        )
+        end_date = None
+        for rc in (data.get("rewards_config") or []):
+            ed = rc.get("end_date")
+            if ed and ed != "2500-12-31":  # ignore pseudo-infinite dates
+                end_date = ed
+                break
+        return {"yes_price_clob": yes_price, "reward_end_date": end_date}
+    except Exception:
+        return {"yes_price_clob": None, "reward_end_date": None}
+
+
+def _enrich_reward_configs(
+    markets: list[dict],
+    workers: int = CLOB_VERIFY_WORKERS,
+) -> list[dict]:
+    """
+    Fetch CLOB reward config for all markets in parallel and store
+    yes_price_clob + reward_end_date on each market dict.
+    """
+    def _enrich(market: dict) -> dict:
+        cid = market.get("conditionId") or ""
+        if not cid:
+            return market
+        with httpx.Client() as c:
+            result = _fetch_reward_config_single(cid, c)
+        market["_yes_price_clob"] = result["yes_price_clob"]
+        market["_reward_end_date"] = result["reward_end_date"]
+        return market
+
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        enriched = list(pool.map(_enrich, markets))
+    return enriched
+
+
+# ---------------------------------------------------------------------------
 # Build candidate record
 # ---------------------------------------------------------------------------
 
@@ -322,6 +385,8 @@ def _build_candidate(market: dict) -> dict:
 
     condition_id = market.get("conditionId") or ""
     token_id = _get_yes_token_id(market) or ""
+    yes_price_clob = market.get("_yes_price_clob")
+    reward_end_date = market.get("_reward_end_date")
 
     return {
         "market_slug":              market.get("slug") or condition_id or "",
@@ -330,6 +395,8 @@ def _build_candidate(market: dict) -> dict:
         "event_slug":               (market.get("events") or [{}])[0].get("slug", "") if isinstance(market.get("events"), list) else "",
         "question":                 market.get("question") or "",
         "category":                 market.get("category") or "",
+        "yes_price_clob":           yes_price_clob,
+        "reward_end_date":          reward_end_date,
         "midpoint":                 round(mid, 4) if mid else None,
         "best_bid":                 round(bid, 4) if bid else None,
         "best_ask":                 round(ask, 4) if ask else None,
@@ -344,6 +411,8 @@ def _build_candidate(market: dict) -> dict:
         "price_source":             "clob" if market.get("_clob_bid") else "gamma",
         # Compatibility with viability screen (reward_adjusted_raw_ev placeholder)
         "reward_adjusted_raw_ev":   round(rate, 4),
+        # yes_price_ref: use ground-truth CLOB price when available, else fall back to midpoint
+        "yes_price_ref":            yes_price_clob if yes_price_clob is not None else (round(mid, 4) if mid else 0.5),
         "reward_config_summary": {
             "daily_rate_usdc":    round(rate, 4),
             "min_size_shares":    min_size,
@@ -367,6 +436,10 @@ def main() -> None:
                         help="Minimum midpoint for contested (default: 0.15)")
     parser.add_argument("--max-mid", type=float, default=MAX_MID,
                         help="Maximum midpoint for contested (default: 0.85)")
+    parser.add_argument("--max-price-distance-cents", type=float, default=MAX_PRICE_DISTANCE * 100,
+                        help="Skip markets where YES price is more than this many cents from 50¢ (default: 20)")
+    parser.add_argument("--min-days-to-expiry", type=int, default=MIN_DAYS_TO_EXPIRY,
+                        help="Skip markets with reward end_date within this many days (default: 7)")
     parser.add_argument("--dry-run", action="store_true",
                         help="Fetch and filter but do not overwrite latest_probe.json")
     args = parser.parse_args()
@@ -422,7 +495,47 @@ def main() -> None:
     empty_books = sum(1 for m in contested if m.get("_clob_empty_book"))
     print(f"  CLOB-verified: {len(contested)} total | {live_orders} with live orders | {empty_books} empty (uncontested)")
 
-    # Step 4: Build candidate records
+    # Step 4: CLOB reward-config enrichment (yes_price + end_date)
+    print(f"\n  Step 4: Fetching CLOB reward configs for YES price + expiry ({CLOB_VERIFY_WORKERS} workers)...")
+    contested = _enrich_reward_configs(contested, workers=CLOB_VERIFY_WORKERS)
+
+    # Step 5: Safety filters
+    _max_dist = args.max_price_distance_cents / 100.0
+    _min_days = args.min_days_to_expiry
+    _today = datetime.now(timezone.utc).date()
+    price_filtered = 0
+    expiry_filtered = 0
+    safe_markets: list[dict] = []
+    for m in contested:
+        yp = m.get("_yes_price_clob")
+        if yp is not None and abs(yp - 0.5) > _max_dist:
+            price_filtered += 1
+            logger.info(
+                "price_filter: skipping %s  yes_price=%.4f  (>%.0f¢ from 50¢)",
+                (m.get("slug") or "")[:50], yp, _max_dist * 100,
+            )
+            continue
+        ed = m.get("_reward_end_date")
+        if ed and ed != "2500-12-31":
+            try:
+                from datetime import date as _date
+                end = _date.fromisoformat(ed)
+                if (end - _today).days < _min_days:
+                    expiry_filtered += 1
+                    logger.info(
+                        "expiry_filter: skipping %s  end_date=%s  (%d days to expiry)",
+                        (m.get("slug") or "")[:50], ed, (end - _today).days,
+                    )
+                    continue
+            except Exception:
+                pass
+        safe_markets.append(m)
+
+    print(f"  Safety filters: removed {price_filtered} price-unsafe + {expiry_filtered} near-expiry markets")
+    print(f"  Safe survivors: {len(safe_markets)}")
+    contested = safe_markets
+
+    # Step 6: Build candidate records
     candidates = [_build_candidate(m) for m in contested]
     candidates.sort(key=lambda x: x["reward_daily_rate_usdc"], reverse=True)
 

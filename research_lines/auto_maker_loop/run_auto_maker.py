@@ -176,7 +176,7 @@ def _load_dynamic_survivor_data(
             "daily_rate_usdc":          float(m["reward_daily_rate_usdc"]),
             "fallback_max_spread_cents": float(max_spread),
             "fallback_min_size":        min_size,
-            "yes_price_ref":            float(m.get("midpoint") or 0.5),
+            "yes_price_ref":            float(m.get("yes_price_ref") or m.get("yes_price_clob") or m.get("midpoint") or 0.5),
             "competitiveness_ref":      1.0,   # unknown from probe; live fetch will update
         }
 

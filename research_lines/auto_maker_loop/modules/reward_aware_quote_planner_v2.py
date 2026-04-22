@@ -132,6 +132,11 @@ def plan(params: PlannerParams) -> PlannerResult:
     # BILATERAL (default)
     bid = _clamp(_round_tick(mid - half))
     ask = _clamp(_round_tick(mid + half))
+    # Tick rounding can push spread above max_spread (e.g. half=2.25¢ rounds to 5¢ not 4.5¢).
+    # Tighten ask inward by one tick until spread fits within the qualifying limit.
+    while (ask - bid) * 100 > params.max_spread_cents + 0.001 and ask > bid + _TICK:
+        ask = _round_tick(ask - _TICK)
+        notes.append(f"ask tightened 1 tick to keep spread ≤ {params.max_spread_cents:.1f}¢")
     ask = _apply_zone_ask(ask, params.reward_zone_ask, notes)
     bid = _apply_zone_bid(bid, params.reward_zone_bid, notes)
     if bid_size < params.min_size:
