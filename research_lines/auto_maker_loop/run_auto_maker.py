@@ -56,9 +56,11 @@ import argparse
 import json
 import logging
 import os
+import signal
+import subprocess
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime, date, timezone
 from pathlib import Path
 from typing import Any, Optional
 
@@ -91,6 +93,127 @@ def _import_sa():
     return importlib.import_module(
         "research_lines.reward_aware_maker_probe.modules.scoring_activation"
     )
+
+
+# ---------------------------------------------------------------------------
+# Dynamic market discovery
+# ---------------------------------------------------------------------------
+
+_LATEST_PROBE_PATH = Path("data/research/reward_aware_maker_probe/latest_probe.json")
+_PROBE_MAX_AGE_HOURS = 24.0     # treat probe as stale after this many hours
+_PROBE_AUTO_REFRESH_HOURS = 12.0  # re-run universe_refresh every N hours during session
+_DEFAULT_FALLBACK_MAX_SPREAD_CENTS = 3.5
+
+
+def _auto_refresh_universe(min_rate: float = 100.0) -> bool:
+    """Run universe_refresh subprocess to regenerate latest_probe.json. Returns True on success."""
+    try:
+        result = subprocess.run(
+            [sys.executable, str(_FILE_DIR / "run_universe_refresh.py"), "--min-rate", str(min_rate)],
+            timeout=180,
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode == 0:
+            logger.info("auto_refresh: universe refresh completed successfully")
+            return True
+        logger.warning("auto_refresh: universe refresh failed (rc=%d): %s", result.returncode, result.stderr[:300])
+        return False
+    except Exception as exc:
+        logger.warning("auto_refresh: universe refresh exception: %s", exc)
+        return False
+_DEFAULT_FALLBACK_MIN_SIZE = 200.0
+
+
+def _load_dynamic_survivor_data(
+    min_daily_rate_usdc: float = 100.0,
+    max_markets: int = 10,
+) -> dict | None:
+    """
+    Load SURVIVOR_DATA from the latest universe-refresh probe file.
+
+    Returns a dict in the same schema as scoring_activation.SURVIVOR_DATA, or
+    None if the file is missing, stale, or contains no qualifying markets.
+
+    Parameters
+    ----------
+    min_daily_rate_usdc : float
+        Only include markets with reward_daily_rate_usdc >= this value.
+    max_markets : int
+        Cap on number of markets returned (sorted by daily rate descending).
+    """
+    if not _LATEST_PROBE_PATH.exists():
+        logger.info("dynamic_survivor: %s not found — using hardcoded fallback", _LATEST_PROBE_PATH)
+        return None
+
+    try:
+        with _LATEST_PROBE_PATH.open(encoding="utf-8") as fh:
+            probe = json.load(fh)
+    except Exception as exc:
+        logger.warning("dynamic_survivor: failed to read probe file: %s", exc)
+        return None
+
+    # Staleness check
+    ts_str = probe.get("probe_timestamp") or ""
+    if ts_str:
+        try:
+            probe_ts = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+            age_hours = (datetime.now(timezone.utc) - probe_ts).total_seconds() / 3600.0
+            if age_hours > _PROBE_MAX_AGE_HOURS:
+                logger.warning(
+                    "dynamic_survivor: probe is %.1fh old (max %sh) — using hardcoded fallback",
+                    age_hours, _PROBE_MAX_AGE_HOURS,
+                )
+                return None
+        except Exception:
+            pass
+
+    markets = probe.get("markets") or []
+    qualifying = [
+        m for m in markets
+        if m.get("condition_id")
+        and m.get("token_id")
+        and float(m.get("reward_daily_rate_usdc") or 0) >= min_daily_rate_usdc
+    ]
+
+    if not qualifying:
+        logger.info(
+            "dynamic_survivor: no markets with rate >= $%.0f/day in probe — using hardcoded fallback",
+            min_daily_rate_usdc,
+        )
+        return None
+
+    # Sort by daily rate descending, cap at max_markets
+    qualifying.sort(key=lambda m: float(m.get("reward_daily_rate_usdc") or 0), reverse=True)
+    qualifying = qualifying[:max_markets]
+
+    survivor_data: dict = {}
+    for m in qualifying:
+        slug = m["market_slug"]
+        max_spread = m.get("reward_max_spread_cents") or _DEFAULT_FALLBACK_MAX_SPREAD_CENTS
+        min_size = float(m.get("reward_min_size_shares") or _DEFAULT_FALLBACK_MIN_SIZE)
+        survivor_data[slug] = {
+            "condition_id":             m["condition_id"],
+            "token_id":                 m["token_id"],
+            "daily_rate_usdc":          float(m["reward_daily_rate_usdc"]),
+            "fallback_max_spread_cents": float(max_spread),
+            "fallback_min_size":        min_size,
+            "yes_price_ref":            float(m.get("yes_price_ref") or m.get("yes_price_clob") or m.get("midpoint") or 0.5),
+            "competitiveness_ref":      1.0,   # unknown from probe; live fetch will update
+            "market_end_date":          m.get("market_end_date") or "",
+            "reward_end_date":          m.get("reward_end_date") or "",
+        }
+
+    logger.info(
+        "dynamic_survivor: loaded %d markets from probe (rate >= $%.0f/day, probe_ts=%s)",
+        len(survivor_data), min_daily_rate_usdc, ts_str[:19],
+    )
+    for slug, data in survivor_data.items():
+        logger.info(
+            "  %s  rate=$%.0f/day  token_id=%s…",
+            slug[:50], data["daily_rate_usdc"], data["token_id"][:12],
+        )
+    return survivor_data
 
 
 # ---------------------------------------------------------------------------
@@ -196,6 +319,64 @@ def _cancel_all_open_orders(client: Any, token_id: str = "", reason: str = "shut
         )
 
 
+def _liquidate_inventory(
+    client: Any,
+    token_id: str,
+    min_size: float = 1.0,
+    poll_secs: int = 5,
+    timeout_secs: int = 90,
+) -> None:
+    """
+    Sell all remaining YES shares at shutdown.
+    Places a SELL limit order at mid - 1 tick (aggressive taker price).
+    Polls for fill up to timeout_secs, then leaves the GTC order on book.
+    Never raises.
+    """
+    if not token_id:
+        return
+    try:
+        import time as _time
+        sa = _import_sa()
+        inv = sa._check_sell_inventory(client, token_id, required_shares=min_size)
+        balance = inv.get("balance_shares", 0.0)
+        if balance < min_size:
+            logger.info("liquidate: nothing to sell (balance=%.2f)", balance)
+            return
+
+        mid, src = sa.fetch_midpoint(client, token_id, None)
+        if mid is None:
+            logger.warning("liquidate: midpoint unavailable — skipping auto-sell (check manually)")
+            return
+
+        sell_price = round(max(0.01, mid - 0.01), 2)
+        logger.info(
+            "liquidate: selling %.1f YES shares @ %.4f (mid=%.4f src=%s)",
+            balance, sell_price, mid, src,
+        )
+        print(f"\n  AUTO-SELL on shutdown: {balance:.1f} shares @ {sell_price:.4f}  …")
+
+        order_id, err = sa._place_order(client, token_id, sell_price, balance, "SELL")
+        if not order_id:
+            logger.error("liquidate: SELL order failed — %s  (sell manually)", err)
+            print(f"  AUTO-SELL FAILED: {err}  — sell {balance:.0f} shares manually on polymarket.com")
+            return
+
+        print(f"  SELL order placed  order_id={order_id[:20]}…  polling for fill…")
+        deadline = _time.monotonic() + timeout_secs
+        while _time.monotonic() < deadline:
+            _time.sleep(poll_secs)
+            if sa._is_filled(client, order_id):
+                print(f"  AUTO-SELL FILLED ✓  proceeds ≈ ${sell_price * balance:.2f}")
+                logger.info("liquidate: FILLED  order_id=%s", order_id[:20])
+                return
+        print(
+            f"  AUTO-SELL not filled within {timeout_secs}s — GTC order {order_id[:20]}… "
+            f"remains on book.  Check polymarket.com to confirm."
+        )
+    except Exception as exc:
+        logger.warning("liquidate: unexpected error — %s  (sell manually)", exc)
+
+
 def _earning_pct_to_cents_per_hour(pct: Optional[float], daily_rate_usdc: float) -> Optional[float]:
     """Convert earning_percentage to cents/hour for comparison with pnl_cents."""
     if pct is None:
@@ -266,6 +447,7 @@ def _run_cycle(
     creds: Any,
     args: argparse.Namespace,
     cycle_num: int,
+    survivor_data: dict | None = None,
     reduce_only: bool = False,
     close_buffer: bool = False,
     inventory_tier: str = "NORMAL",
@@ -281,7 +463,8 @@ def _run_cycle(
         PositionConfig, PositionState,
     )
 
-    data       = sa.SURVIVOR_DATA[slug]
+    _sd        = survivor_data if survivor_data is not None else sa.SURVIVOR_DATA
+    data       = _sd[slug]
     token_id   = data["token_id"]
     condition_id = data["condition_id"]
     host       = sa.CLOB_HOST
@@ -414,7 +597,7 @@ def _run_cycle(
     recon = _uar_reconcile(
         client=client,
         creds=creds,
-        survivor_data=sa.SURVIVOR_DATA,
+        survivor_data=_sd,
         token_id=token_id,
         runs_jsonl_path=_runs_path,
     )
@@ -1123,20 +1306,20 @@ def _parse_args() -> argparse.Namespace:
                    help="Lock to one market: hungary | rubio | vance (default: auto-select)")
     p.add_argument("--cycles",  type=int, default=0,
                    help="Number of cycles to run (0 = infinite, default 0)")
-    p.add_argument("--cycle-sleep",        type=int,   default=300,
-                   help="Seconds between cycles (default 300)")
-    p.add_argument("--poll-interval-sec",  type=int,   default=60,
-                   help="Seconds between fill checks inside position manager (default 60)")
-    p.add_argument("--max-hold-minutes",   type=float, default=240.0,
-                   help="TIME_LIMIT exit after this many minutes holding YES (default 240)")
-    p.add_argument("--chase-after-minutes", type=float, default=60.0,
-                   help="Start lowering ASK after this many minutes unfilled (default 60)")
-    p.add_argument("--max-chases",         type=int,   default=3,
-                   help="Max number of ASK re-quotes downward (default 3)")
+    p.add_argument("--cycle-sleep",        type=int,   default=30,
+                   help="Seconds between cycles (default 30 — minimise reward gaps)")
+    p.add_argument("--poll-interval-sec",  type=int,   default=30,
+                   help="Seconds between fill checks inside position manager (default 30)")
+    p.add_argument("--max-hold-minutes",   type=float, default=90.0,
+                   help="TIME_LIMIT exit after this many minutes holding YES (default 90)")
+    p.add_argument("--chase-after-minutes", type=float, default=45.0,
+                   help="Start lowering ASK after this many minutes unfilled (default 45)")
+    p.add_argument("--max-chases",         type=int,   default=2,
+                   help="Max number of ASK re-quotes downward (default 2)")
     p.add_argument("--stop-loss-cents",       type=float, default=3.0,
                    help="STOP_LOSS if midpoint drops this many cents below entry (default 3.0)")
-    p.add_argument("--drift-threshold-cents", type=float, default=1.5,
-                   help="Re-quote if midpoint drifts this many cents from our bid in QUOTING (default 1.5)")
+    p.add_argument("--drift-threshold-cents", type=float, default=2.0,
+                   help="Re-quote if midpoint drifts this many cents from our bid in QUOTING (default 2.0)")
     p.add_argument("--ask-cancel-distance-cents", type=float, default=2.0,
                    help="Cancel hanging ASK if midpoint rises this many cents above it (default 2.0)")
     p.add_argument("--base-inventory-shares",  type=float, default=200.0,
@@ -1163,6 +1346,8 @@ def _parse_args() -> argparse.Namespace:
                    help="Hard-set BID price after planner (canary testing only, e.g. 0.62)")
     p.add_argument("--ask-price-override", type=float, default=None,
                    help="Hard-set ASK price after planner (canary testing only, e.g. 0.64)")
+    p.add_argument("--market-daily-loss-limit-usd", type=float, default=5.0,
+                   help="Skip market rest of session if cumulative realized loss exceeds this USD (default 5.0)")
     p.add_argument("--verbose", action="store_true", help="DEBUG-level logging")
     return p.parse_args()
 
@@ -1182,17 +1367,36 @@ def main() -> None:
     ms = importlib.import_module("research_lines.auto_maker_loop.modules.market_selector")
     pm = importlib.import_module("research_lines.auto_maker_loop.modules.position_manager")
 
+    # ── Dynamic market discovery ─────────────────────────────────────────────
+    # Try to load live reward-eligible markets from the universe-refresh probe.
+    # Falls back to the hardcoded SURVIVOR_DATA if probe is missing or stale.
+    _dynamic = _load_dynamic_survivor_data(min_daily_rate_usdc=100.0, max_markets=10)
+    if _dynamic:
+        SURVIVOR_DATA = _dynamic
+        _market_source = f"dynamic ({len(SURVIVOR_DATA)} markets from latest_probe.json)"
+    else:
+        SURVIVOR_DATA = sa.SURVIVOR_DATA
+        _market_source = f"hardcoded fallback ({len(SURVIVOR_DATA)} markets)"
+
     # Resolve target slug
     target_slug: Optional[str] = None
     if args.target:
         target_slug = sa.SLUG_ALIASES.get(args.target, args.target)
-        if target_slug not in sa.SURVIVOR_DATA:
-            print(f"ERROR: unknown target '{args.target}'. Valid: hungary, rubio, vance")
-            sys.exit(1)
+        if target_slug not in SURVIVOR_DATA:
+            # Allow exact slug match even if not in aliases
+            if args.target in SURVIVOR_DATA:
+                target_slug = args.target
+            else:
+                valid = list(sa.SLUG_ALIASES.keys()) + list(SURVIVOR_DATA.keys())
+                print(f"ERROR: unknown target '{args.target}'.")
+                print(f"  Valid aliases : {list(sa.SLUG_ALIASES.keys())}")
+                print(f"  Dynamic slugs : {list(SURVIVOR_DATA.keys())[:5]} …")
+                sys.exit(1)
 
     print("=" * 60)
     print("  AUTO MAKER LOOP")
     print(f"  mode        : {'LIVE' if args.live else 'DRY-RUN'}")
+    print(f"  markets     : {_market_source}")
     print(f"  target      : {args.target or 'auto-select'}")
     print(f"  cycles      : {args.cycles or 'infinite'}")
     print(f"  max_hold    : {args.max_hold_minutes:.0f} min")
@@ -1207,11 +1411,26 @@ def main() -> None:
     # Credentials (always needed — even dry-run fetches live data)
     creds, client = _setup_client(sa)
 
+    # ── Graceful shutdown: SIGTERM / SIGHUP ──────────────────────────────────
+    # Sets a flag so the loop exits cleanly after the current cycle completes,
+    # cancelling all open orders before stopping.
+    _shutdown: list[bool] = [False]
+
+    def _shutdown_handler(signum: int, frame: Any) -> None:
+        logger.warning("signal %d received — will shut down after this cycle", signum)
+        _shutdown[0] = True
+
+    signal.signal(signal.SIGTERM, _shutdown_handler)
+    try:
+        signal.signal(signal.SIGHUP, _shutdown_handler)   # POSIX only
+    except (AttributeError, OSError):
+        pass
+
     # ── Startup state sync — read-only diagnostic before first cycle ──────
     from research_lines.auto_maker_loop.modules.startup_state_sync import (
         sync as _startup_sync,
     )
-    _startup_sync(client, creds, sa.SURVIVOR_DATA)
+    _startup_sync(client, creds, SURVIVOR_DATA)
 
     # ── Background WS truth clients (market data only; non-blocking) ────────
     # Start once for the full loop session.  Logs all top-of-book and trade
@@ -1219,7 +1438,7 @@ def main() -> None:
     _mkt_ws = None
     try:
         from research_lines.auto_maker_loop.modules.market_ws_client import MarketWsClient as _MktWsClient
-        _all_token_ids = [v["token_id"] for v in sa.SURVIVOR_DATA.values()]
+        _all_token_ids = [v["token_id"] for v in SURVIVOR_DATA.values()]
         _mkt_ws = _MktWsClient(
             token_ids=_all_token_ids,
             log_path=Path("data/research/auto_maker_loop/market_ws_events.jsonl"),
@@ -1231,12 +1450,38 @@ def main() -> None:
     cycle_num        = 0
     skip_slugs: set  = set()
     last_bid_fill_ts: Optional[datetime] = None   # for fill delay logic
+    _mid_history: dict  = {}   # slug → last known midpoint (volatility circuit breaker)
+    _market_daily_loss: dict = {}  # slug → cumulative loss USD today (per-market loss limit)
+    _last_probe_refresh: datetime = datetime.now(timezone.utc)  # for auto-refresh tracking
+    _last_token_id: str = ""   # most recent active token_id — used by shutdown liquidation
 
     while True:
         cycle_num += 1
         if args.cycles and cycle_num > args.cycles:
             print(f"\nCompleted {args.cycles} cycles — exiting.")
             break
+
+        # ── Shutdown check (SIGTERM / SIGHUP) ────────────────────────────────
+        if _shutdown[0]:
+            print("\n  [SHUTDOWN] Signal received — cancelling open orders and liquidating inventory.")
+            _cancel_all_open_orders(client, reason="signal_shutdown")
+            if args.live and _last_token_id:
+                _liquidate_inventory(client, _last_token_id)
+            break
+
+        # ── Auto-refresh probe every 12 hours ────────────────────────────────
+        _hours_since_refresh = (datetime.now(timezone.utc) - _last_probe_refresh).total_seconds() / 3600.0
+        if _hours_since_refresh >= _PROBE_AUTO_REFRESH_HOURS:
+            print(f"\n  [AUTO-REFRESH] Probe is {_hours_since_refresh:.1f}h old — refreshing universe...")
+            if _auto_refresh_universe(min_rate=100.0):
+                _fresh = _load_dynamic_survivor_data(min_daily_rate_usdc=100.0, max_markets=10)
+                if _fresh:
+                    SURVIVOR_DATA = _fresh
+                    skip_slugs.clear()   # markets may have changed
+                    print(f"  [AUTO-REFRESH] Loaded {len(SURVIVOR_DATA)} fresh markets — skip_slugs cleared")
+                else:
+                    logger.warning("auto_refresh: 0 qualifying markets — keeping current SURVIVOR_DATA")
+            _last_probe_refresh = datetime.now(timezone.utc)
 
         # ── Fill delay: pause BID placement after recent fill ─────────────
         if last_bid_fill_ts is not None:
@@ -1255,7 +1500,7 @@ def main() -> None:
         else:
             # Fetch live reward configs for ranking update
             live_cfgs: dict = {}
-            for s, d in sa.SURVIVOR_DATA.items():
+            for s, d in SURVIVOR_DATA.items():
                 try:
                     cfg = sa.fetch_reward_config(
                         host=sa.CLOB_HOST,
@@ -1268,7 +1513,7 @@ def main() -> None:
                 except Exception:
                     pass
 
-            ranked = ms.rank_all(sa.SURVIVOR_DATA, live_cfgs)
+            ranked = ms.rank_all(SURVIVOR_DATA, live_cfgs)
             print("  market ranking:")
             for row in ranked:
                 skip_note = " [SKIP]" if row["slug"] in skip_slugs else ""
@@ -1279,7 +1524,7 @@ def main() -> None:
                     f"comp={row['competitiveness']:.1f}{skip_note}"
                 )
 
-            slug = ms.pick_best(sa.SURVIVOR_DATA, live_cfgs, skip_slugs=skip_slugs)
+            slug = ms.pick_best(SURVIVOR_DATA, live_cfgs, skip_slugs=skip_slugs)
             if slug is None:
                 print("  all markets skipped — sleeping 60s then retrying")
                 skip_slugs.clear()   # reset skips and try again
@@ -1287,20 +1532,50 @@ def main() -> None:
                 continue
 
         # ── Determine control flags for this cycle ───────────────────────
+        _new_token_id = SURVIVOR_DATA[slug]["token_id"]
+
+        # If market switched, sell the previous market's inventory first to
+        # avoid accumulating orphan positions across multiple markets.
+        if args.live and _last_token_id and _last_token_id != _new_token_id:
+            print(f"\n  [MARKET SWITCH] Liquidating previous market inventory before switching…")
+            _liquidate_inventory(client, _last_token_id)
+
+        _last_token_id = _new_token_id
+
         inv_check = sa._check_sell_inventory(
             client,
-            sa.SURVIVOR_DATA[slug]["token_id"],
+            _last_token_id,
             required_shares=1.0,
         )
         current_inventory = inv_check.get("balance_shares", 0.0)
-        base_inv  = args.base_inventory_shares
+
+        # base_inv must be at least the market's min_size so quotes qualify for rewards.
+        # --base-inventory-shares below min_size buys inventory that can never earn rewards.
+        _market_min_size = float(SURVIVOR_DATA[slug].get("fallback_min_size") or args.base_inventory_shares)
+        base_inv = max(args.base_inventory_shares, _market_min_size)
+        if base_inv > args.base_inventory_shares:
+            print(f"  base_inv raised to market min_size={base_inv:.0f} (--base-inventory-shares={args.base_inventory_shares})")
+
         cur_excess = max(0.0, current_inventory - base_inv)
 
         # Fetch current midpoint for reward_cover calculation
-        slug_data = sa.SURVIVOR_DATA[slug]
+        slug_data = SURVIVOR_DATA[slug]
         _mid_now, _ = sa.fetch_midpoint(
             client, slug_data["token_id"], slug_data["yes_price_ref"]
         )
+        # ── Volatility circuit breaker ───────────────────────────────────
+        # Track midpoint history to detect sudden price movements.
+        # If mid moved > 3¢ in the last 2 cycles, skip placement this cycle.
+        _prev_mid = _mid_history.get(slug)
+        _mid_history[slug] = _mid_now
+        if _mid_now and _prev_mid and abs(_mid_now - _prev_mid) * 100 > 3.0:
+            print(
+                f"  [VOLATILITY BREAKER] mid moved {abs(_mid_now - _prev_mid)*100:.2f}¢ "
+                f"({_prev_mid:.4f} → {_mid_now:.4f}) — skipping cycle"
+            )
+            time.sleep(30)
+            continue
+
         # Reward cover: use midpoint as proxy for avg_entry_price
         # (conservative — assumes entry was at current mid; actual loss may differ)
         _daily_rate = slug_data["daily_rate_usdc"]
@@ -1320,10 +1595,19 @@ def main() -> None:
         )
         cycle_reduce_only = cycle_tier != "NORMAL"
 
-        # Close buffer: check time to resolution if provided
+        # Close buffer: auto-detect from market_end_date; manual arg overrides
         cycle_close_buffer = False
-        if args.time_to_resolution_minutes is not None:
-            cycle_close_buffer = args.time_to_resolution_minutes < args.close_buffer_minutes
+        _ttl_min: Optional[float] = args.time_to_resolution_minutes
+        if _ttl_min is None:
+            _med = SURVIVOR_DATA[slug].get("market_end_date") or ""
+            if _med and _med not in ("2500-12-31", ""):
+                try:
+                    _days_left = (date.fromisoformat(_med) - date.today()).days
+                    _ttl_min = max(0.0, _days_left * 24 * 60)
+                except Exception:
+                    pass
+        if _ttl_min is not None:
+            cycle_close_buffer = _ttl_min < args.close_buffer_minutes
 
         print(f"  inventory           : {current_inventory:.0f} shares  "
               f"(base={base_inv:.0f}  excess={cur_excess:.0f})")
@@ -1332,7 +1616,8 @@ def main() -> None:
             print(f"  reward_cover_hours  : {rch:.1f}h  "
                   f"({'SELL NOW — exceeds 24h threshold' if rch > 24 else 'within 24h, acceptable'})")
         if cycle_close_buffer:
-            print(f"  [CLOSE-BUFFER] time_to_resolution={args.time_to_resolution_minutes:.0f}min")
+            _src = SURVIVOR_DATA[slug].get("market_end_date") or "manual"
+            print(f"  [CLOSE-BUFFER] ttl≈{_ttl_min:.0f}min  end_date={_src}")
 
         # ── Inventory bootstrap ──────────────────────────────────────────
         # Buy YES token shortfall before entering the cycle.
@@ -1344,11 +1629,11 @@ def main() -> None:
             )
             _boot = run_bootstrap(
                 client=client,
-                token_id=sa.SURVIVOR_DATA[slug]["token_id"],
+                token_id=SURVIVOR_DATA[slug]["token_id"],
                 creds=creds,
                 required_shares=base_inv,
                 dry_run=False,
-                price_ref=sa.SURVIVOR_DATA[slug].get("yes_price_ref"),
+                price_ref=SURVIVOR_DATA[slug].get("yes_price_ref"),
             )
             print(f"  inventory bootstrap : {_boot['verdict']}"
                   f"  balance={_boot.get('balance_shares', 0.0):.1f}"
@@ -1365,7 +1650,7 @@ def main() -> None:
                 logger.error("heartbeat failed (live) — cancelling open orders and stopping")
                 _cancel_all_open_orders(
                     client,
-                    token_id=sa.SURVIVOR_DATA[slug]["token_id"],
+                    token_id=SURVIVOR_DATA[slug]["token_id"],
                     reason="heartbeat_failure",
                 )
                 break
@@ -1374,7 +1659,7 @@ def main() -> None:
             continue
 
         # ── Pre-placement reconciliation: clear stale orders ─────────────
-        _stale_token_id = sa.SURVIVOR_DATA[slug]["token_id"]
+        _stale_token_id = SURVIVOR_DATA[slug]["token_id"]
         _stale_count = _reconcile_open_orders(client, _stale_token_id)
         if _stale_count > 0:
             print(f"  [RECONCILE] cleared {_stale_count} stale order(s) before placement")
@@ -1383,6 +1668,7 @@ def main() -> None:
         try:
             result = _run_cycle(
                 sa, ms, pm, slug, client, creds, args, cycle_num,
+                survivor_data=SURVIVOR_DATA,
                 reduce_only=cycle_reduce_only,
                 close_buffer=cycle_close_buffer,
                 inventory_tier=cycle_tier,
@@ -1390,8 +1676,10 @@ def main() -> None:
                 reward_cover_hours=rch,
             )
         except KeyboardInterrupt:
-            print("\nInterrupted by user — cancelling open orders and exiting.")
-            _cancel_all_open_orders(client, token_id=sa.SURVIVOR_DATA[slug]["token_id"], reason="keyboard_interrupt")
+            print("\nInterrupted by user — cancelling open orders and liquidating inventory.")
+            _cancel_all_open_orders(client, token_id=_last_token_id, reason="keyboard_interrupt")
+            if args.live and _last_token_id:
+                _liquidate_inventory(client, _last_token_id)
             break
         except Exception as exc:
             logger.exception("cycle %d failed: %s", cycle_num, exc)
@@ -1399,7 +1687,7 @@ def main() -> None:
                 logger.error("exception in live cycle — cancelling open orders (failsafe)")
                 _cancel_all_open_orders(
                     client,
-                    token_id=sa.SURVIVOR_DATA.get(slug, {}).get("token_id", ""),
+                    token_id=SURVIVOR_DATA.get(slug, {}).get("token_id", ""),
                     reason="exception_failsafe",
                 )
             result = {
@@ -1419,7 +1707,7 @@ def main() -> None:
             )
             _cancel_all_open_orders(
                 client,
-                token_id=sa.SURVIVOR_DATA.get(slug, {}).get("token_id", ""),
+                token_id=SURVIVOR_DATA.get(slug, {}).get("token_id", ""),
                 reason="kill_switch",
             )
             result["outcome_code"] = "infrastructure_failure"
@@ -1438,6 +1726,20 @@ def main() -> None:
         result["outcome_code"] = classify_outcome(result)
         _append_run(result)
         print_cycle_summary(result)
+
+        # ── Per-market daily loss limit ──────────────────────────────────
+        _pnl_cents = result.get("pnl_cents", 0.0) or 0.0
+        _pos_size  = result.get("size", 0.0) or 0.0
+        _cycle_pnl_usd = (_pnl_cents / 100.0) * _pos_size
+        if _cycle_pnl_usd < 0:
+            _market_daily_loss[slug] = _market_daily_loss.get(slug, 0.0) + abs(_cycle_pnl_usd)
+            _loss_limit = args.market_daily_loss_limit_usd
+            print(f"\n  [DAILY LOSS] {slug[:40]}: ${_market_daily_loss[slug]:.2f} cumulative loss this session")
+            if _market_daily_loss[slug] >= _loss_limit:
+                print(f"  [DAILY LOSS LIMIT] ${_loss_limit:.2f} limit reached — "
+                      f"skipping {slug[:40]} for rest of session")
+                if not target_slug:
+                    skip_slugs.add(slug)
 
         # Print rolling study summary every 3 cycles or on final cycle
         all_records = load_runs(RUNS_JSONL)
