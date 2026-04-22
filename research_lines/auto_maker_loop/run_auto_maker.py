@@ -1532,14 +1532,30 @@ def main() -> None:
                 continue
 
         # ── Determine control flags for this cycle ───────────────────────
-        _last_token_id = SURVIVOR_DATA[slug]["token_id"]   # track for shutdown liquidation
+        _new_token_id = SURVIVOR_DATA[slug]["token_id"]
+
+        # If market switched, sell the previous market's inventory first to
+        # avoid accumulating orphan positions across multiple markets.
+        if args.live and _last_token_id and _last_token_id != _new_token_id:
+            print(f"\n  [MARKET SWITCH] Liquidating previous market inventory before switching…")
+            _liquidate_inventory(client, _last_token_id)
+
+        _last_token_id = _new_token_id
+
         inv_check = sa._check_sell_inventory(
             client,
             _last_token_id,
             required_shares=1.0,
         )
         current_inventory = inv_check.get("balance_shares", 0.0)
-        base_inv  = args.base_inventory_shares
+
+        # base_inv must be at least the market's min_size so quotes qualify for rewards.
+        # --base-inventory-shares below min_size buys inventory that can never earn rewards.
+        _market_min_size = float(SURVIVOR_DATA[slug].get("fallback_min_size") or args.base_inventory_shares)
+        base_inv = max(args.base_inventory_shares, _market_min_size)
+        if base_inv > args.base_inventory_shares:
+            print(f"  base_inv raised to market min_size={base_inv:.0f} (--base-inventory-shares={args.base_inventory_shares})")
+
         cur_excess = max(0.0, current_inventory - base_inv)
 
         # Fetch current midpoint for reward_cover calculation
