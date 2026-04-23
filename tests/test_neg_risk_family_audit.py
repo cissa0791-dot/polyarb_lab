@@ -170,7 +170,7 @@ def test_negative_cached_dead_token_still_surfaces_in_family_audit() -> None:
     event_group = _event_group("family-negative-cache", ["dead-leg", "live-leg"])
     runner.clob._negative_cache["dead-leg-yes"] = {
         "reason": "no_orderbook",
-        "expires_at": now + timedelta(days=1),
+        "expires_at": datetime.now(timezone.utc) + timedelta(days=1),
     }
     books_by_token = {
         "live-leg-yes": _book(0.25, 0.26, ts=now),
@@ -503,7 +503,7 @@ def test_negative_cached_dead_leg_is_classified_as_side_effect() -> None:
     now = datetime(2026, 3, 23, 10, 0, 0, tzinfo=timezone.utc)
     runner.clob._negative_cache["dead-leg-yes"] = {
         "reason": "no_orderbook",
-        "expires_at": now + timedelta(days=1),
+        "expires_at": datetime.now(timezone.utc) + timedelta(days=1),
     }
     event_group = _event_group("family-parity-negative-cache", ["dead-leg", "live-leg", "hedge-leg"])
     fast_books = {

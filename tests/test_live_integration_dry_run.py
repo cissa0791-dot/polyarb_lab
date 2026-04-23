@@ -266,14 +266,14 @@ class TestHaltOnDataErrorsInLiveMode(unittest.TestCase):
     def test_raises_in_live_mode_when_flag_true(self) -> None:
         runner = _live_runner(_FakeClobClient())
         runner.config.risk.halt_on_data_errors = True
-        with patch("src.runtime.runner.fetch_markets", side_effect=ConnectionError("down")):
+        with patch("src.runtime.runner.fetch_events", side_effect=ConnectionError("down")):
             with self.assertRaises(ConnectionError):
                 runner.run_once()
 
     def test_returns_summary_in_live_mode_when_flag_false(self) -> None:
         runner = _live_runner(_FakeClobClient())
         runner.config.risk.halt_on_data_errors = False
-        with patch("src.runtime.runner.fetch_markets", side_effect=ConnectionError("down")):
+        with patch("src.runtime.runner.fetch_events", side_effect=ConnectionError("down")):
             result = runner.run_once()
         self.assertIsInstance(result, RunSummary)
         self.assertGreaterEqual(result.system_errors, 1)
@@ -300,14 +300,16 @@ class TestPaperModeUnchanged(unittest.TestCase):
 
     def test_run_once_completes_with_live_disabled_and_empty_markets(self) -> None:
         runner = _runner_with_mock_store()
-        with patch("src.runtime.runner.fetch_markets", return_value=[]):
+        with patch("src.runtime.runner.fetch_events", return_value=[]), \
+             patch("src.runtime.runner.fetch_markets_from_events", return_value=[]):
             result = runner.run_once()
         self.assertIsInstance(result, RunSummary)
         self.assertEqual(result.markets_scanned, 0)
 
     def test_run_once_completes_with_live_enabled_and_empty_markets(self) -> None:
         runner = _live_runner(_FakeClobClient())
-        with patch("src.runtime.runner.fetch_markets", return_value=[]):
+        with patch("src.runtime.runner.fetch_events", return_value=[]), \
+             patch("src.runtime.runner.fetch_markets_from_events", return_value=[]):
             result = runner.run_once()
         self.assertIsInstance(result, RunSummary)
         self.assertEqual(result.markets_scanned, 0)
@@ -315,7 +317,8 @@ class TestPaperModeUnchanged(unittest.TestCase):
     def test_no_clob_call_on_empty_market_list_live_mode(self) -> None:
         fake_clob = _FakeClobClient()
         runner = _live_runner(fake_clob, client_dry_run=False)
-        with patch("src.runtime.runner.fetch_markets", return_value=[]):
+        with patch("src.runtime.runner.fetch_events", return_value=[]), \
+             patch("src.runtime.runner.fetch_markets_from_events", return_value=[]):
             runner.run_once()
         self.assertEqual(fake_clob.calls, [])
 

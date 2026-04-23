@@ -41,6 +41,9 @@ class CrossMarketExecutionPathTests(unittest.TestCase):
                 campaign_target_strategy_families=["cross_market_execution_gross_constraint"],
                 parameter_set_label="execution_tinybuffer_probe",
             )
+            # Disable depth/concentration guards so thin test books can reach execution path.
+            runner.config.opportunity.min_absolute_leg_depth_usd = 0.0
+            runner.config.opportunity.max_single_leg_bid = 1.0
             runner.store = Mock()
             runner.opportunity_store = Mock()
             runner._current_run_id = "test-cross-market-run"

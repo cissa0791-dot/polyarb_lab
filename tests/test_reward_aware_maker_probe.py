@@ -178,12 +178,12 @@ def test_fee_disabled_filtering():
 
 
 def test_fee_disabled_excluded_from_discovery():
-    """Gamma page with only fee-disabled markets → no markets discovered."""
-    event = _gamma_event_with_market(_gamma_market_dict(fees_enabled=False))
+    """CLOB market with fees_enabled=False → no markets discovered."""
+    mkt = _gamma_market_dict(fees_enabled=False)
 
     with patch(
-        "research_lines.reward_aware_maker_probe.modules.discovery._fetch_all_events",
-        return_value=[event],
+        "research_lines.reward_aware_maker_probe.modules.discovery._fetch_all_clob_rewards_markets",
+        return_value=[mkt],
     ):
         markets = discover_fee_enabled_rewarded_markets()
     assert markets == []
@@ -206,15 +206,22 @@ def test_no_reward_filtering():
 
 
 def test_no_reward_excluded_from_discovery():
-    """Gamma page with fee-enabled but zero-reward market → no markets discovered."""
-    event = _gamma_event_with_market(_gamma_market_dict(fees_enabled=True, daily_rate=0.0))
+    """Zero-reward market is discovered but EV model classifies it as REJECTED_NO_REWARD."""
+    mkt = _gamma_market_dict(fees_enabled=True, daily_rate=0.0)
 
     with patch(
-        "research_lines.reward_aware_maker_probe.modules.discovery._fetch_all_events",
-        return_value=[event],
+        "research_lines.reward_aware_maker_probe.modules.discovery._fetch_all_clob_rewards_markets",
+        return_value=[mkt],
+    ), patch(
+        "research_lines.reward_aware_maker_probe.modules.discovery._fetch_clob_book",
+        return_value=(0.45, 0.55),
     ):
         markets = discover_fee_enabled_rewarded_markets()
-    assert markets == []
+
+    # Discovery no longer gates on reward rate; EV model handles that classification.
+    assert len(markets) == 1
+    result = evaluate_market_ev(markets[0])
+    assert result.economics_class == ECON_REJECTED_NO_REWARD
 
 
 # ---------------------------------------------------------------------------
@@ -313,17 +320,18 @@ def test_rejection_no_reward():
 
 
 def test_rejection_spread_too_wide():
-    """Current spread > rewardsMaxSpread (price-space) → REJECTED_SPREAD_TOO_WIDE."""
+    """Current spread > rewardsMaxSpread → quotes at max spread instead of rejecting."""
     # spread = 0.55 - 0.45 = 0.10 price
-    # max_spread_cents = 5.0 → 0.05 price → 0.10 > 0.05 → rejected
+    # max_spread_cents = 5.0 → 0.05 price → market is wide, quote at 0.05
     mkt = _make_raw_market(
         best_bid=0.45,
         best_ask=0.55,
         rewards_max_spread_cents=5.0,  # 0.05 price limit
     )
     result = evaluate_market_ev(mkt)
-    assert result.economics_class == ECON_REJECTED_SPREAD_TOO_WIDE
-    assert RC_SPREAD_EXCEEDS_REWARD_MAX in result.rejection_reason_codes
+    # Wide markets are now handled by quoting inside the spread; not rejected.
+    assert result.economics_class != ECON_REJECTED_SPREAD_TOO_WIDE
+    assert round(result.quoted_spread, 6) == round(5.0 / 100.0, 6)
 
 
 def test_rejection_net_negative_ev():

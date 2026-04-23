@@ -43,6 +43,7 @@ from __future__ import annotations
 import json
 import logging
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 from sqlalchemy import Column, DateTime, Float, Integer, MetaData, String, Table, Text, create_engine, select
@@ -65,6 +66,8 @@ class Both98PlateauTracker:
     PLATEAU_EXEC_MAX     = 0   # executable_rounds <= this (must be zero)
 
     def __init__(self, db_url: str) -> None:
+        if db_url.startswith("sqlite:///") and ":memory:" not in db_url:
+            Path(db_url[len("sqlite:///"):]).parent.mkdir(parents=True, exist_ok=True)
         self.engine = create_engine(db_url, future=True)
         meta = MetaData()
 

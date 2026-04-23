@@ -82,7 +82,7 @@ def check_consecutive_losses(account: AccountSnapshot, risk: RiskConfig) -> Rule
 
 
 def check_open_positions(account: AccountSnapshot, risk: RiskConfig, candidate: OpportunityCandidate | None = None) -> RuleResult:
-    incoming = len(candidate.legs) if candidate is not None and candidate.legs else 0
+    incoming = len(candidate.market_slugs) if candidate is not None and candidate.market_slugs else 0
     passed = account.open_positions + incoming <= risk.max_open_positions
     return RuleResult(
         passed,

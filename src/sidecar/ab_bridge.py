@@ -31,6 +31,7 @@ from __future__ import annotations
 import json
 import logging
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 from sqlalchemy import Column, DateTime, Float, Integer, MetaData, String, Table, Text, create_engine
@@ -122,6 +123,8 @@ class ABSidecar:
 
     def __init__(self, track_a_sqlite_url: str) -> None:
         db_url = _sidecar_db_url(track_a_sqlite_url)
+        if db_url.startswith("sqlite:///") and ":memory:" not in db_url:
+            Path(db_url[len("sqlite:///"):]).parent.mkdir(parents=True, exist_ok=True)
         self.engine = create_engine(db_url, future=True)
         meta = MetaData()
 

@@ -47,6 +47,32 @@ class CountingStaticClob:
                 result[tid] = self.books[tid]
         return result
 
+    def reset_request_stats(self) -> None:
+        pass
+
+    def request_stats_snapshot(self) -> dict:
+        return {"books_fetched": 0, "negative_cache_hits": 0, "negative_cache_expired_rechecks": 0}
+
+    def fetch_simplified_markets(self, *, limit: int = 1000) -> list:
+        return []
+
+    def fetch_books_batch(self, token_ids: list, chunk_size: int = 100) -> dict:
+        result = {}
+        for tid in token_ids:
+            if tid in self.books:
+                self.calls.append(tid)
+                result[tid] = self.books[tid]
+        return result
+
+    def fetch_midpoints_batch(self, token_ids: list) -> dict:
+        return {}
+
+    def fetch_spreads_batch(self, token_ids: list) -> dict:
+        return {}
+
+    def fetch_prices_batch(self, token_ids: list, side: str = "BUY") -> dict:
+        return {}
+
 
 class OrderbookOperationalAnalyticsTests(unittest.TestCase):
     def test_orderbook_failure_rollups_and_funnel_reports_filter_to_post_fix_records(self) -> None:
@@ -236,7 +262,8 @@ class OrderbookOperationalAnalyticsTests(unittest.TestCase):
                     }
                 ]
 
-                with patch("src.runtime.runner.fetch_markets", return_value=markets):
+                with patch("src.runtime.runner.fetch_events", return_value=[]), \
+                     patch("src.runtime.runner.fetch_markets_from_events", return_value=markets):
                     first = runner.run_once()
                     second = runner.run_once()
                     third = runner.run_once()

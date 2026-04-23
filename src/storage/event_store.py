@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 from sqlalchemy import Column, DateTime, Float, Integer, MetaData, String, Table, Text, and_, create_engine, func, or_, select, text
@@ -18,6 +19,8 @@ def _payload(value: Any) -> str:
 
 class ResearchStore:
     def __init__(self, sqlite_url: str):
+        if sqlite_url.startswith("sqlite:///") and ":memory:" not in sqlite_url:
+            Path(sqlite_url[len("sqlite:///"):]).parent.mkdir(parents=True, exist_ok=True)
         self.engine = create_engine(sqlite_url, future=True)
         self.meta = MetaData()
 

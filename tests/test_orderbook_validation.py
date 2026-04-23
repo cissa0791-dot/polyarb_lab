@@ -40,6 +40,27 @@ class StaticClob:
     def prefetch_books(self, token_ids: list[str]) -> dict[str, OrderBook]:
         return {tid: self.books[tid] for tid in token_ids if tid in self.books}
 
+    def reset_request_stats(self) -> None:
+        pass
+
+    def request_stats_snapshot(self) -> dict:
+        return {"books_fetched": 0, "negative_cache_hits": 0, "negative_cache_expired_rechecks": 0}
+
+    def fetch_simplified_markets(self, *, limit: int = 1000) -> list:
+        return []
+
+    def fetch_books_batch(self, token_ids: list, chunk_size: int = 100) -> dict:
+        return {tid: self.books[tid] for tid in token_ids if tid in self.books}
+
+    def fetch_midpoints_batch(self, token_ids: list) -> dict:
+        return {}
+
+    def fetch_spreads_batch(self, token_ids: list) -> dict:
+        return {}
+
+    def fetch_prices_batch(self, token_ids: list, side: str = "BUY") -> dict:
+        return {}
+
 
 class OrderBookValidationTests(unittest.TestCase):
     def test_buy_validation_accepts_one_sided_book_if_asks_exist(self) -> None:
@@ -214,7 +235,8 @@ class OrderBookValidationTests(unittest.TestCase):
                     }
                 ]
 
-                with patch("src.runtime.runner.fetch_markets", return_value=markets):
+                with patch("src.runtime.runner.fetch_events", return_value=[]), \
+                     patch("src.runtime.runner.fetch_markets_from_events", return_value=markets):
                     summary = runner.run_once()
 
                 self.assertEqual(summary.rejection_reason_counts["EMPTY_ASKS"], 1)
