@@ -1556,6 +1556,11 @@ class ResearchRunner:
                 len(evaluated_productive_events) / max(len(productive_event_slugs), 1),
                 6,
             )
+        if self._active_single_market_strategies() and self._current_summary is not None:
+            for pair in pairs:
+                if (self._should_skip_market_leg(pair.market_slug, "YES", "BUY")
+                        or self._should_skip_market_leg(pair.market_slug, "NO", "BUY")):
+                    self._current_summary.books_skipped_due_to_recent_empty_asks += 1
         single_market_pairs = [
             pair
             for pair in pairs
@@ -1653,8 +1658,6 @@ class ResearchRunner:
             yes_skip_key = (pair.market_slug, "YES", "BUY")
             no_skip_key = (pair.market_slug, "NO", "BUY")
             if self._should_skip_market_leg(*yes_skip_key) or self._should_skip_market_leg(*no_skip_key):
-                if self._current_summary is not None:
-                    self._current_summary.books_skipped_due_to_recent_empty_asks += 1
                 self.logger.info(
                     "skipping market due to repeated empty asks",
                     extra={
