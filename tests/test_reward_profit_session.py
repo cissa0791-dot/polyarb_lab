@@ -33,6 +33,7 @@ class _CountingOrderManager(RewardOrderManager):
         super().__init__(live=False)
         self.inventory_calls = 0
         self.quote_calls = 0
+        self.cancel_calls: list[str | None] = []
 
     def build_inventory(self, market, candidate):
         self.inventory_calls += 1
@@ -41,6 +42,10 @@ class _CountingOrderManager(RewardOrderManager):
     def ensure_quote_orders(self, market, candidate):
         self.quote_calls += 1
         return market.bid_order_id or "dry-bid-1", market.ask_order_id or "dry-ask-1"
+
+    def cancel_order(self, order_id):
+        self.cancel_calls.append(order_id)
+        return True
 
 
 def _candidate(
@@ -1104,6 +1109,39 @@ class RewardProfitSessionEngineTests(unittest.TestCase):
             self.assertAlmostEqual(pnl["summary"]["total_entry_spread_cost_usdc"], 5.0, places=6)
             self.assertIn("cooldown_until_ts", pnl["markets"][0])
             self.assertAlmostEqual(pnl["markets"][0]["total_entry_spread_cost_usdc"], 5.0, places=6)
+
+    def test_live_run_cancels_open_orders_on_finish(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manager = _CountingOrderManager()
+            config = RewardProfitConfig(
+                out_dir=tmpdir,
+                state_path=str(Path(tmpdir) / "s.json"),
+                pnl_path=str(Path(tmpdir) / "p.json"),
+                max_entry_cost_usdc=10.0,
+                max_entry_cost_pct=1.0,
+                max_break_even_hours=100.0,
+                entry_mode="maker_first",
+                live=True,
+                cancel_open_orders_on_finish=True,
+            )
+            engine = RewardProfitSessionEngine(
+                config,
+                reward_client_factory=lambda dry_run: None,
+                order_manager=manager,
+                registry_provider=lambda cfg: {"events": []},
+            )
+            state = engine.run_cycle(
+                scanned_candidates=[_candidate(market_slug="m1", spread_capture_hour=1.0)],
+                cycle_ts=datetime(2026, 4, 24, tzinfo=timezone.utc),
+            )
+
+            self.assertEqual(state.markets["m1"].bid_order_id, "dry-bid-1")
+            engine._cancel_open_orders_on_finish(state)
+
+            self.assertIn("dry-bid-1", manager.cancel_calls)
+            self.assertIsNone(state.markets["m1"].bid_order_id)
+            self.assertEqual(state.markets["m1"].status, RewardMarketStatus.PAUSED.value)
+            self.assertEqual(state.markets["m1"].last_exit_reason, "RUN_FINISHED_CANCEL_OPEN_ORDERS")
 
 
 if __name__ == "__main__":

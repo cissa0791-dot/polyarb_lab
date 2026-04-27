@@ -126,6 +126,7 @@ class RewardProfitConfig:
     live: bool = False
     verbose: bool = False
     show_progress: bool = False
+    cancel_open_orders_on_finish: bool = True
 
 
 @dataclass
@@ -685,14 +686,20 @@ class RewardProfitSessionEngine:
         state = self._load_state()
         total_cycles = max(1, self.config.cycles)
         started_monotonic = time.monotonic()
-        for cycle_number in range(1, total_cycles + 1):
-            state = self.run_cycle(state)
-            if self.config.show_progress:
-                self._print_progress(cycle_number, total_cycles, started_monotonic, state)
-            if state.halted:
-                break
-            if self.config.interval_sec > 0 and self.config.cycles > 1:
-                time.sleep(self.config.interval_sec)
+        try:
+            for cycle_number in range(1, total_cycles + 1):
+                state = self.run_cycle(state)
+                if self.config.show_progress:
+                    self._print_progress(cycle_number, total_cycles, started_monotonic, state)
+                if state.halted:
+                    break
+                if self.config.interval_sec > 0 and self.config.cycles > 1:
+                    time.sleep(self.config.interval_sec)
+        except KeyboardInterrupt:
+            state.halted = True
+            state.halt_reason = "INTERRUPTED"
+        if self.config.live and self.config.cancel_open_orders_on_finish:
+            self._cancel_open_orders_on_finish(state)
         pnl_report = self._build_pnl_report(state)
         self._write_reports(state, pnl_report)
         return state, pnl_report
@@ -1201,6 +1208,19 @@ class RewardProfitSessionEngine:
         if market_state.entry_midpoint is None and market_state.inventory_shares > 0.0:
             market_state.entry_midpoint = candidate.midpoint
             market_state.max_midpoint_seen = candidate.midpoint
+
+    def _cancel_open_orders_on_finish(self, state: RewardProfitSessionState) -> None:
+        for market_state in state.markets.values():
+            had_open_order = bool(market_state.bid_order_id or market_state.ask_order_id)
+            if not had_open_order:
+                continue
+            self.order_manager.cancel_order(market_state.bid_order_id)
+            self.order_manager.cancel_order(market_state.ask_order_id)
+            market_state.bid_order_id = None
+            market_state.ask_order_id = None
+            market_state.last_exit_reason = "RUN_FINISHED_CANCEL_OPEN_ORDERS"
+            if market_state.inventory_shares <= 0.0:
+                market_state.status = RewardMarketStatus.PAUSED.value
 
     def _pause_market(
         self,
