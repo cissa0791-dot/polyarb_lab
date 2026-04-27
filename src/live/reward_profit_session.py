@@ -254,6 +254,8 @@ class RewardOrderManager:
                 limit_price=candidate.quote_bid,
             )
             bid_report = self.broker.submit_limit_order(bid_intent)
+            if bid_report.metadata.get("error"):
+                print(f"[BROKER] bid REJECTED for {candidate.market_slug}: {bid_report.metadata['error']}", flush=True)
             bid_order_id = str(bid_report.metadata.get("live_order_id") or "")
 
         if not ask_order_id and market.inventory_shares > 0.0:
