@@ -18,6 +18,7 @@ from urllib.request import Request, urlopen
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from py_clob_client.client import ClobClient
+from py_clob_client.clob_types import ApiCreds
 
 from src.live.auth import CredentialError, load_live_credentials
 
@@ -87,6 +88,11 @@ def main() -> int:
         host=CLOB_HOST,
         chain_id=creds.chain_id,
         key=creds.private_key,
+        creds=ApiCreds(
+            api_key=creds.api_key,
+            api_secret=creds.api_secret,
+            api_passphrase=creds.api_passphrase,
+        ),
         signature_type=signature_type,
         funder=funder,
     )
@@ -106,13 +112,23 @@ def main() -> int:
         return 4
 
     print(f"Derived API key:    {_mask(derived.api_key)}")
-    if derived.api_key == creds.api_key:
-        print("API key pairing:    OK")
-        return 0
+    if derived.api_key != creds.api_key:
+        print("API key pairing:    FAIL")
+        print("Fix: use the API key/secret/passphrase created by this same private key wallet.")
+        return 5
 
-    print("API key pairing:    FAIL")
-    print("Fix: use the API key/secret/passphrase created by this same private key wallet.")
-    return 5
+    print("API key pairing:    OK")
+
+    try:
+        keys = configured_client.get_api_keys()
+    except Exception as exc:
+        print(f"Level-2 auth:       FAIL ({exc})")
+        print("Fix: test POLYMARKET_SIGNATURE_TYPE=0, 1, and 2 with the same funder, then use the one where Level-2 auth is OK.")
+        return 6
+
+    key_count = len(keys) if isinstance(keys, list) else "OK"
+    print(f"Level-2 auth:       OK ({key_count})")
+    return 0
 
 
 if __name__ == "__main__":
