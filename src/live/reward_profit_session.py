@@ -1478,7 +1478,14 @@ def _default_reward_client_factory(dry_run: bool) -> RewardClient | None:
 def _default_order_manager(live: bool) -> RewardOrderManager:
     if not live:
         return RewardOrderManager(live=False)
+    import os
     creds = load_live_credentials()
-    write_client = LiveWriteClient.from_credentials(creds, host="https://clob.polymarket.com", dry_run=False)
+    raw_sig = os.environ.get("POLYMARKET_SIGNATURE_TYPE")
+    signature_type = int(raw_sig) if raw_sig is not None else None
+    funder = os.environ.get("POLYMARKET_FUNDER") or None
+    write_client = LiveWriteClient.from_credentials(
+        creds, host="https://clob.polymarket.com", dry_run=False,
+        signature_type=signature_type, funder=funder,
+    )
     broker = LiveBroker(write_client)
     return RewardOrderManager(live=True, write_client=write_client, broker=broker)
