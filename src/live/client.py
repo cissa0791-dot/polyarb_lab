@@ -188,6 +188,17 @@ class LiveWriteClient:
         if self.dry_run:
             return _DRY_RUN_RESULT
 
+        if tick_size is None:
+            try:
+                tick_size = self._client.get_tick_size(token_id)
+            except Exception:
+                tick_size = None
+        if not neg_risk:
+            try:
+                neg_risk = bool(self._client.get_neg_risk(token_id))
+            except Exception:
+                neg_risk = False
+
         order_args = OrderArgs(
             token_id=token_id,
             price=price,
