@@ -199,6 +199,7 @@ class RewardProfitSessionState:
     last_scanned_candidate_count: int = 0
     last_eligible_candidate_count: int = 0
     last_filter_reasons: dict[str, int] = field(default_factory=dict)
+    last_selection_reasons: dict[str, int] = field(default_factory=dict)
     actual_reward_baseline_usdc: float = 0.0
     actual_reward_latest_usdc: float = 0.0
     reward_epoch_id: str | None = None
@@ -354,7 +355,26 @@ class RewardProfitSelector:
         max_markets: int,
         max_markets_per_event: int,
     ) -> list[RewardProfitCandidate]:
+        selected, _selection_reasons = self.select_with_reasons(
+            candidates,
+            capital_limit_usdc=capital_limit_usdc,
+            per_market_cap_usdc=per_market_cap_usdc,
+            max_markets=max_markets,
+            max_markets_per_event=max_markets_per_event,
+        )
+        return selected
+
+    def select_with_reasons(
+        self,
+        candidates: list[RewardProfitCandidate],
+        *,
+        capital_limit_usdc: float,
+        per_market_cap_usdc: float,
+        max_markets: int,
+        max_markets_per_event: int,
+    ) -> tuple[list[RewardProfitCandidate], dict[str, int]]:
         selected: list[RewardProfitCandidate] = []
+        selection_reasons: dict[str, int] = {}
         total_capital = 0.0
         event_counts: dict[str, int] = {}
 
@@ -371,17 +391,23 @@ class RewardProfitSelector:
         )
         for candidate in ordered:
             if len(selected) >= max_markets:
-                break
+                selection_reasons["SELECT_MAX_MARKETS"] = selection_reasons.get("SELECT_MAX_MARKETS", 0) + 1
+                continue
             if candidate.capital_basis_usdc > per_market_cap_usdc:
+                selection_reasons["SELECT_PER_MARKET_CAP"] = selection_reasons.get("SELECT_PER_MARKET_CAP", 0) + 1
                 continue
             if total_capital + candidate.capital_basis_usdc > capital_limit_usdc + 1e-9:
+                selection_reasons["SELECT_CAPITAL_LIMIT"] = selection_reasons.get("SELECT_CAPITAL_LIMIT", 0) + 1
                 continue
             if event_counts.get(candidate.event_slug, 0) >= max_markets_per_event:
+                selection_reasons["SELECT_EVENT_LIMIT"] = selection_reasons.get("SELECT_EVENT_LIMIT", 0) + 1
                 continue
             selected.append(candidate)
             total_capital += candidate.capital_basis_usdc
             event_counts[candidate.event_slug] = event_counts.get(candidate.event_slug, 0) + 1
-        return selected
+        if selected:
+            selection_reasons["SELECTED"] = len(selected)
+        return selected, selection_reasons
 
     def _build_candidate(self, *, event_slug: str, event_title: str | None, market: dict[str, Any]) -> RewardProfitCandidate | None:
         if not bool(market.get("enable_orderbook")):
@@ -659,6 +685,11 @@ class RewardProfitSessionEngine:
         remaining_cycles = max(0, total_cycles - cycle_number)
         remaining_sec = (remaining_cycles * self.config.interval_sec) + (remaining_cycles * avg_cycle_sec)
         summary = self._build_pnl_report(state)["summary"]
+        selection_reasons = dict(state.last_selection_reasons)
+        selection_note = ""
+        if not state.selected_market_slugs and selection_reasons:
+            top_reason, top_count = max(selection_reasons.items(), key=lambda item: item[1])
+            selection_note = f" | select_block {top_reason}:{top_count}"
         print(
             "Progress: "
             f"{cycle_number}/{total_cycles} "
@@ -673,7 +704,8 @@ class RewardProfitSessionEngine:
             f"mtm ${summary['inventory_mtm_pnl_usdc']:.4f} | "
             f"cost ${summary['cost_proxy_usdc']:.4f} | "
             f"modeled_net ${summary['net_after_reward_and_cost_usdc']:.4f} | "
-            f"verified_net ${summary['verified_net_after_reward_and_cost_usdc']:.4f}",
+            f"verified_net ${summary['verified_net_after_reward_and_cost_usdc']:.4f}"
+            f"{selection_note}",
             flush=True,
         )
 
@@ -788,13 +820,14 @@ class RewardProfitSessionEngine:
         state.last_scanned_candidate_count = len(scanned_candidates)
         state.last_eligible_candidate_count = len(eligible_candidates)
         state.last_filter_reasons = filter_reasons
-        selected = self.selector.select(
+        selected, selection_reasons = self.selector.select_with_reasons(
             eligible_candidates,
             capital_limit_usdc=self.config.capital_limit_usdc,
             per_market_cap_usdc=self.config.per_market_cap_usdc,
             max_markets=self.config.max_markets,
             max_markets_per_event=self.config.max_markets_per_event,
         )
+        state.last_selection_reasons = selection_reasons
         selected_by_slug = {item.market_slug: item for item in selected}
         state.selected_market_slugs = [item.market_slug for item in selected]
 
@@ -1338,6 +1371,7 @@ class RewardProfitSessionEngine:
             last_scanned_candidate_count=int(payload.get("last_scanned_candidate_count") or 0),
             last_eligible_candidate_count=int(payload.get("last_eligible_candidate_count") or 0),
             last_filter_reasons=dict(payload.get("last_filter_reasons") or {}),
+            last_selection_reasons=dict(payload.get("last_selection_reasons") or {}),
             actual_reward_baseline_usdc=float(payload.get("actual_reward_baseline_usdc") or 0.0),
             actual_reward_latest_usdc=float(payload.get("actual_reward_latest_usdc") or 0.0),
             reward_epoch_id=payload.get("reward_epoch_id"),
@@ -1407,6 +1441,7 @@ class RewardProfitSessionEngine:
                 "last_scanned_candidate_count": state.last_scanned_candidate_count,
                 "last_eligible_candidate_count": state.last_eligible_candidate_count,
                 "last_filter_reasons": dict(state.last_filter_reasons),
+                "last_selection_reasons": dict(state.last_selection_reasons),
                 "capital_limit_usdc": round(state.capital_limit_usdc, 6),
                 "capital_in_use_usdc": round(total_capital, 6),
                 "active_quote_market_count": active_quote_count,
