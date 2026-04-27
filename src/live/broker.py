@@ -65,6 +65,8 @@ class LiveBroker:
                 side=intent.side,
                 price=float(intent.limit_price or 0.0),
                 size=intent.size,
+                neg_risk=bool(intent.metadata.get("neg_risk", False)),
+                tick_size=intent.metadata.get("tick_size") or None,
             )
         except LiveClientError as exc:
             return ExecutionReport(

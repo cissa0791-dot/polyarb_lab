@@ -55,6 +55,8 @@ def _candidate(
     drawdown_hour: float = 0.05,
     spread_capture_hour: float = 0.0,
     volume_num: float = 10000.0,
+    neg_risk: bool = False,
+    tick_size: str | None = None,
 ) -> RewardProfitCandidate:
     midpoint = (best_bid + best_ask) / 2.0
     return RewardProfitCandidate(
@@ -73,6 +75,8 @@ def _candidate(
         reward_daily_rate=24.0,
         rewards_max_spread_cents=3.5,
         volume_num=volume_num,
+        neg_risk=neg_risk,
+        tick_size=tick_size,
         expected_reward_per_hour_lower=reward_hour,
         expected_drawdown_cost_per_hour=drawdown_hour,
         reward_minus_drawdown_per_hour=round(reward_hour - drawdown_hour, 6),

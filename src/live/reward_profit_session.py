@@ -51,6 +51,8 @@ class RewardProfitCandidate:
     reward_daily_rate: float
     rewards_max_spread_cents: float
     volume_num: float
+    neg_risk: bool
+    tick_size: str | None
     expected_reward_per_hour_lower: float
     expected_drawdown_cost_per_hour: float
     reward_minus_drawdown_per_hour: float
@@ -227,6 +229,8 @@ class RewardOrderManager:
             side="BUY",
             size=candidate.quote_size,
             limit_price=candidate.best_ask,
+            neg_risk=candidate.neg_risk,
+            tick_size=candidate.tick_size,
         )
         report = self.broker.submit_limit_order(intent)
         if report.status.value == "rejected":
@@ -253,6 +257,8 @@ class RewardOrderManager:
                 side="BUY",
                 size=candidate.quote_size,
                 limit_price=candidate.quote_bid,
+                neg_risk=candidate.neg_risk,
+                tick_size=candidate.tick_size,
             )
             bid_report = self.broker.submit_limit_order(bid_intent)
             if bid_report.metadata.get("error"):
@@ -267,6 +273,8 @@ class RewardOrderManager:
                 side="SELL",
                 size=min(candidate.quote_size, market.inventory_shares),
                 limit_price=candidate.quote_ask,
+                neg_risk=candidate.neg_risk,
+                tick_size=candidate.tick_size,
             )
             ask_report = self.broker.submit_limit_order(ask_intent)
             ask_order_id = str(ask_report.metadata.get("live_order_id") or "")
@@ -288,7 +296,17 @@ class RewardOrderManager:
         return self.write_client.get_order_status(order_id)
 
 
-def _make_order_intent(*, candidate_id: str, market_slug: str, token_id: str, side: str, size: float, limit_price: float):
+def _make_order_intent(
+    *,
+    candidate_id: str,
+    market_slug: str,
+    token_id: str,
+    side: str,
+    size: float,
+    limit_price: float,
+    neg_risk: bool = False,
+    tick_size: str | None = None,
+):
     from src.domain.models import OrderIntent, OrderMode, OrderType
 
     return OrderIntent(
@@ -304,6 +322,10 @@ def _make_order_intent(*, candidate_id: str, market_slug: str, token_id: str, si
         limit_price=round(limit_price, 6),
         max_notional_usd=round(size * limit_price, 6),
         ts=_utc_now(),
+        metadata={
+            "neg_risk": bool(neg_risk),
+            "tick_size": tick_size,
+        },
     )
 
 
@@ -425,6 +447,9 @@ class RewardProfitSelector:
             quote_size = float(market.get("rewards_min_size") or 0.0)
             reward_daily_rate = sum(float(row.get("rewardsDailyRate") or 0.0) for row in list(market.get("clob_rewards") or []))
             rewards_max_spread_cents = float(market.get("rewards_max_spread") or 0.0)
+            neg_risk = bool(market.get("neg_risk"))
+            raw_tick_size = market.get("minimum_tick_size") or market.get("tick_size")
+            tick_size = str(raw_tick_size) if raw_tick_size not in (None, "") else None
         except Exception:
             return None
 
@@ -605,6 +630,8 @@ class RewardProfitSelector:
             reward_daily_rate=round(reward_daily_rate, 6),
             rewards_max_spread_cents=rewards_max_spread_cents,
             volume_num=round(volume_num, 6),
+            neg_risk=neg_risk,
+            tick_size=tick_size,
             expected_reward_per_hour_lower=expected_reward_per_hour_lower,
             expected_drawdown_cost_per_hour=expected_drawdown_cost_per_hour,
             reward_minus_drawdown_per_hour=reward_minus_drawdown_per_hour,

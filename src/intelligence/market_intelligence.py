@@ -87,6 +87,8 @@ def build_event_market_registry(events: list[dict[str, Any]], markets: list[dict
                     "liquidity_num": market.get("liquidityNum"),
                     "neg_risk": bool(market.get("negRisk")),
                     "neg_risk_other": bool(market.get("negRiskOther")),
+                    "minimum_tick_size": market.get("minimumTickSize") or market.get("minimum_tick_size"),
+                    "order_min_size": market.get("orderMinSize") or market.get("order_min_size"),
                     "group_item_title": market.get("groupItemTitle"),
                     "fees_enabled": bool(market.get("feesEnabled")),
                     "rewards_min_size": market.get("rewardsMinSize"),
