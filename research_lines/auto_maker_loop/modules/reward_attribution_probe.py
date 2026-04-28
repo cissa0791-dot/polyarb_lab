@@ -824,10 +824,6 @@ def _make_headers_for(creds: Any, path: str) -> dict[str, str]:
         "CLOB-TIMESTAMP":  ts,
         "CLOB-PASSPHRASE": creds.api_passphrase,
     }
-    # Include signature_type if the creds object exposes it
-    sig_type = getattr(creds, "signature_type", None)
-    if sig_type is not None:
-        headers["CLOB-SIGNATURE-TYPE"] = str(int(sig_type))
     return headers
 
 
@@ -843,121 +839,24 @@ def fetch_user_total(
     """
     Fetch GET /rewards/user/total.
 
-    Tries two HMAC signing strategies in sequence and prints a full diagnostic
-    for each attempt so the auth shape can be compared against the working
-    /rewards/user/markets path.
-
-    Attempt A — path-only signing (same pattern as /rewards/user/markets):
-        msg = ts + "GET" + "/rewards/user/total"
-
-    Attempt B — path+querystring signing (fallback if A returns 401):
-        msg = ts + "GET" + "/rewards/user/total?date=...&maker_address=...&signature_type=..."
-        Query params are sorted alphabetically for deterministic canonical form.
-
-    Returns (total_usd, raw_dump_str) from the first successful attempt,
-    or (None, combined_error_detail) if both fail.
+    Uses base-path HMAC auth only. Query params and extra identity headers are
+    intentionally omitted because this endpoint follows the same proven shape
+    as /rewards/user/markets.
 
     Zero-safe: key-presence checks only; 0.0 stays 0.0, never coerced to None.
     """
     try:
         import httpx
-        import base64 as _b64
-        import hashlib as _hashlib
-        import hmac as _hmac_mod
-        import urllib.parse as _up
 
         path     = _PATH_USER_TOTAL
         url      = f"{host.rstrip('/')}{path}"
-        date_str = date or datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        sig_type = getattr(creds, "signature_type", 0)
-
-        # ── Resolve POLY_ADDRESS (EOA — always the signing key owner) ────────
-        # POLY_ADDRESS must be the EOA derived from private_key regardless of
-        # sig_type.  The server validates POLY_API_KEY against POLY_ADDRESS.
-        # This is what create_level_2_headers() in py_clob_client always does.
-        eoa: Optional[str] = None
-        try:
-            from eth_account import Account as _Account
-            pk = creds.private_key
-            if not pk.startswith("0x"):
-                pk = "0x" + pk
-            eoa = _Account.from_key(pk).address
-        except Exception:
-            pass  # non-fatal; header will be absent if derivation fails
-
-        # ── Resolve maker_address (funder/proxy for sig_type=2, EOA for 0) ─
-        maker_addr: Optional[str] = getattr(creds, "funder", None) or eoa
-
-        # Base query params (sorted so canonical string is deterministic)
-        base_params: dict = {"date": date_str, "signature_type": str(int(sig_type))}
-        if maker_addr:
-            base_params["maker_address"] = maker_addr
-        sorted_params = dict(sorted(base_params.items()))
-        query_string  = _up.urlencode(sorted_params)
-
-        # ── HMAC helper ─────────────────────────────────────────────────────
-        def _build_headers(canonical_msg: str) -> dict:
-            ts = str(int(time.time() * 1000))
-            full_msg = ts + "GET" + canonical_msg
-            try:
-                hmac_key = _b64.urlsafe_b64decode(creds.api_secret)
-            except Exception:
-                hmac_key = creds.api_secret.encode("utf-8")
-            sig = _b64.b64encode(
-                _hmac_mod.new(hmac_key, full_msg.encode("utf-8"), _hashlib.sha256).digest()
-            ).decode("utf-8")
-            h = {
-                "CLOB-API-KEY":    creds.api_key,
-                "CLOB-SIGNATURE":  sig,
-                "CLOB-TIMESTAMP":  ts,
-                "CLOB-PASSPHRASE": creds.api_passphrase,
-            }
-            if sig_type is not None:
-                h["CLOB-SIGNATURE-TYPE"] = str(int(sig_type))
-            # POLY_ADDRESS: EOA that owns the API key — required by /rewards/user/total
-            if eoa:
-                h["POLY_ADDRESS"] = eoa
-            return h, full_msg
-
-        # ── Diagnostic print (before any attempt) ───────────────────────────
-        print(f"  [user_total_diag] api_key_prefix : {creds.api_key[:8]}...")
-        print(f"  [user_total_diag] POLY_ADDRESS    : {eoa or '(not_resolved)'}")
-        print(f"  [user_total_diag] sig_type        : {sig_type}")
-        print(f"  [user_total_diag] maker_address   : {maker_addr or '(not_resolved)'}")
-        print(f"  [user_total_diag] funder==maker   : {getattr(creds,'funder',None) == maker_addr}")
-        print(f"  [user_total_diag] base_url        : {url}")
-        print(f"  [user_total_diag] query_string    : {query_string}")
-        print(f"  [user_total_diag] signing_A_path  : ts+GET+{path}")
-        print(f"  [user_total_diag] signing_B_full  : ts+GET+{path}?{query_string}")
 
         with httpx.Client() as hc:
-            # ── Attempt A: sign path only ────────────────────────────────────
-            headers_a, msg_a = _build_headers(path)
-            resp_a = hc.get(url, headers=headers_a, params=sorted_params, timeout=8)
-            print(f"  [user_total_diag] attempt_A_url   : {resp_a.request.url}")
-            print(f"  [user_total_diag] attempt_A_status: {resp_a.status_code}")
-            if resp_a.status_code == 200:
-                raw   = resp_a.json()
-                total = _sum_user_total_response(raw)
-                print(f"  [user_total_diag] attempt_A       : SUCCESS signed={path!r}")
-                return total, str(raw)[:400]
-
-            # ── Attempt B: sign path + query string ──────────────────────────
-            headers_b, msg_b = _build_headers(f"{path}?{query_string}")
-            resp_b = hc.get(url, headers=headers_b, params=sorted_params, timeout=8)
-            print(f"  [user_total_diag] attempt_B_url   : {resp_b.request.url}")
-            print(f"  [user_total_diag] attempt_B_status: {resp_b.status_code}")
-            if resp_b.status_code == 200:
-                raw   = resp_b.json()
-                total = _sum_user_total_response(raw)
-                print(f"  [user_total_diag] attempt_B       : SUCCESS signed={path!r}+querystring")
-                return total, str(raw)[:400]
-
-        return None, (
-            f"both_attempts_failed "
-            f"A={resp_a.status_code}:{resp_a.text[:120]} "
-            f"B={resp_b.status_code}:{resp_b.text[:120]}"
-        )
+            resp = hc.get(url, headers=_make_headers_for(creds, path), timeout=8)
+            if resp.status_code != 200:
+                return None, f"HTTP_{resp.status_code}:{resp.text[:120]}"
+            raw = resp.json()
+            return _sum_user_total_response(raw), str(raw)[:400]
     except Exception as exc:
         return None, f"{type(exc).__name__}: {exc}"
 

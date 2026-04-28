@@ -36,7 +36,13 @@ from dataclasses import dataclass
 from typing import Any
 
 from py_clob_client.client import ClobClient
-from py_clob_client.clob_types import OrderArgs, PartialCreateOrderOptions
+from py_clob_client.clob_types import (
+    AssetType,
+    BalanceAllowanceParams,
+    OpenOrderParams,
+    OrderArgs,
+    PartialCreateOrderOptions,
+)
 
 from src.live.auth import LiveCredentials, build_authenticated_client
 
@@ -91,6 +97,19 @@ class LiveOrderStatus:
     size_matched: float
     size_remaining: float
     avg_price: float | None = None
+
+
+@dataclass(frozen=True)
+class LiveOpenOrder:
+    """Normalised open order returned by get_open_orders."""
+
+    order_id: str
+    side: str
+    price: float
+    size: float
+    size_matched: float
+    size_remaining: float
+    status: str
 
 
 # ---------------------------------------------------------------------------
@@ -188,6 +207,17 @@ class LiveWriteClient:
         if self.dry_run:
             return _DRY_RUN_RESULT
 
+        if tick_size is None:
+            try:
+                tick_size = self._client.get_tick_size(token_id)
+            except Exception:
+                tick_size = None
+        if not neg_risk:
+            try:
+                neg_risk = bool(self._client.get_neg_risk(token_id))
+            except Exception:
+                neg_risk = False
+
         order_args = OrderArgs(
             token_id=token_id,
             price=price,
@@ -241,6 +271,79 @@ class LiveWriteClient:
                 f"cancel_order failed for order_id={order_id!r}: {exc}"
             ) from exc
 
+    def cancel_market_orders(self, token_id: str) -> Any:
+        """Cancel all open CLOB orders for an outcome token."""
+        if self.dry_run:
+            return {"dry_run": True, "asset_id": token_id}
+        try:
+            return self._client.cancel_market_orders(asset_id=token_id)
+        except Exception as exc:
+            raise LiveClientError(
+                f"cancel_market_orders failed for token_id={token_id!r}: {exc}"
+            ) from exc
+
+    def get_token_balance(self, token_id: str) -> float:
+        """Return conditional-token balance in shares for the authenticated maker."""
+        if self.dry_run:
+            return 0.0
+        try:
+            raw = self._client.get_balance_allowance(
+                BalanceAllowanceParams(asset_type=AssetType.CONDITIONAL, token_id=token_id)
+            )
+        except Exception as exc:
+            raise LiveClientError(
+                f"get_token_balance failed for token_id={token_id!r}: {exc}"
+            ) from exc
+
+        raw_balance = (
+            getattr(raw, "balance", None)
+            or (raw.get("balance") if isinstance(raw, dict) else None)
+            or 0
+        )
+        balance = float(raw_balance)
+        # Polymarket conditional token balances are returned in 1e6 units.
+        return round(balance / 1_000_000.0 if balance > 10_000 else balance, 6)
+
+    def get_open_orders(self, token_id: str) -> list[LiveOpenOrder]:
+        """Return open CLOB orders for an outcome token."""
+        if self.dry_run:
+            return []
+        try:
+            raw = self._client.get_orders(OpenOrderParams(asset_id=token_id))
+        except Exception as exc:
+            raise LiveClientError(
+                f"get_open_orders failed for token_id={token_id!r}: {exc}"
+            ) from exc
+
+        rows = raw
+        if isinstance(raw, dict):
+            rows = raw.get("data") or raw.get("orders") or raw.get("results") or []
+        orders: list[LiveOpenOrder] = []
+        for row in rows or []:
+            get = row.get if isinstance(row, dict) else lambda key, default=None: getattr(row, key, default)
+            order_id = str(get("id") or get("orderID") or get("order_id") or "")
+            if not order_id:
+                continue
+            side = str(get("side") or "").upper()
+            price = float(get("price") or 0.0)
+            total_size = float(get("size") or get("original_size") or get("originalSize") or 0.0)
+            matched = float(get("size_matched") or get("sizeMatched") or get("matched_size") or 0.0)
+            remaining = float(get("size_remaining") or get("remaining_size") or get("sizeRemaining") or 0.0)
+            if remaining <= 0.0 and total_size > 0.0:
+                remaining = max(0.0, total_size - matched)
+            orders.append(
+                LiveOpenOrder(
+                    order_id=order_id,
+                    side=side,
+                    price=price,
+                    size=total_size,
+                    size_matched=matched,
+                    size_remaining=remaining,
+                    status=str(get("status") or "open"),
+                )
+            )
+        return orders
+
     # ------------------------------------------------------------------
     # Order status polling
     # ------------------------------------------------------------------
@@ -277,7 +380,11 @@ class LiveWriteClient:
                                  (raw.get("size_matched") if isinstance(raw, dict) else None) or
                                  0.0)
             total_size   = float(getattr(raw, "size", None) or
+                                 getattr(raw, "original_size", None) or
+                                 getattr(raw, "originalSize", None) or
                                  (raw.get("size") if isinstance(raw, dict) else None) or
+                                 (raw.get("original_size") if isinstance(raw, dict) else None) or
+                                 (raw.get("originalSize") if isinstance(raw, dict) else None) or
                                  0.0)
             size_remaining = max(0.0, total_size - size_matched)
             raw_id     = (getattr(raw, "id", None) or

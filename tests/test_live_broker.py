@@ -36,8 +36,8 @@ class _FakeLiveWriteClient:
         self._status = status
         self._raises = raises
 
-    def submit_order(self, *, token_id, side, price, size):
-        self.calls.append(("submit_order", token_id, side, price, size))
+    def submit_order(self, *, token_id, side, price, size, neg_risk=False, tick_size=None):
+        self.calls.append(("submit_order", token_id, side, price, size, neg_risk, tick_size))
         if self._raises:
             raise self._raises
         return LiveOrderResult(
@@ -61,6 +61,7 @@ def _intent(
     size: float = 50.0,
     limit_price: float = 0.55,
     token_id: str = "tok-abc",
+    metadata: dict | None = None,
 ) -> OrderIntent:
     return OrderIntent(
         intent_id=str(uuid4()),
@@ -75,6 +76,7 @@ def _intent(
         limit_price=limit_price,
         max_notional_usd=size * limit_price,
         ts=datetime.now(timezone.utc),
+        metadata=metadata or {},
     )
 
 
@@ -201,6 +203,12 @@ class TestLiveBrokerCallArgs(unittest.TestCase):
         broker, fake = _broker()
         broker.submit_limit_order(_intent(size=30.0))
         self.assertAlmostEqual(fake.calls[0][4], 30.0)
+
+    def test_passes_market_signature_metadata(self) -> None:
+        broker, fake = _broker()
+        broker.submit_limit_order(_intent(metadata={"neg_risk": True, "tick_size": "0.01"}))
+        self.assertEqual(fake.calls[0][5], True)
+        self.assertEqual(fake.calls[0][6], "0.01")
 
     def test_no_call_on_rejected(self) -> None:
         # Even on error the call was made — just once

@@ -55,6 +55,14 @@ class _FakeClient:
             raise self._raises
         return self._submit_response
 
+    def get_tick_size(self, token_id):
+        self.calls.append(("get_tick_size", token_id))
+        return "0.01"
+
+    def get_neg_risk(self, token_id):
+        self.calls.append(("get_neg_risk", token_id))
+        return False
+
     def cancel(self, order_id):
         self.calls.append(("cancel", order_id))
         if self._raises:
@@ -137,8 +145,15 @@ class TestSubmitOrderLive(unittest.TestCase):
         fake = _FakeClient()
         client = LiveWriteClient(fake, dry_run=False)
         client.submit_order("tok-abc", "BUY", 0.60, 30.0)
-        self.assertEqual(len(fake.calls), 1)
-        self.assertEqual(fake.calls[0][0], "create_and_post_order")
+        self.assertEqual(fake.calls[-1][0], "create_and_post_order")
+
+    def test_resolves_tick_size_when_missing(self) -> None:
+        fake = _FakeClient()
+        client = LiveWriteClient(fake, dry_run=False)
+        client.submit_order("tok-abc", "BUY", 0.60, 30.0)
+        self.assertIn(("get_tick_size", "tok-abc"), fake.calls)
+        order_call = fake.calls[-1]
+        self.assertEqual(order_call[2].tick_size, "0.01")
 
     def test_returns_normalized_result(self) -> None:
         fake = _FakeClient(submit_response={

@@ -151,6 +151,18 @@ def _round_tick(price: float) -> float:
     return round(round(price / _TICK) * _TICK, 4)
 
 
+def _round_tick_up(price: float) -> float:
+    import math
+
+    return round(math.ceil((price - 1e-12) / _TICK) * _TICK, 4)
+
+
+def _round_tick_down(price: float) -> float:
+    import math
+
+    return round(math.floor((price + 1e-12) / _TICK) * _TICK, 4)
+
+
 def _clamp(price: float) -> float:
     return max(0.01, min(0.99, price))
 
@@ -158,14 +170,14 @@ def _clamp(price: float) -> float:
 def _apply_zone_bid(bid: float, zone_bid: Optional[float], notes: list[str]) -> float:
     if zone_bid is not None and bid < zone_bid:
         notes.append(f"bid clamped from {bid:.4f} to zone_bid={zone_bid:.4f}")
-        return _round_tick(zone_bid)
+        return _round_tick_up(zone_bid)
     return bid
 
 
 def _apply_zone_ask(ask: float, zone_ask: Optional[float], notes: list[str]) -> float:
     if zone_ask is not None and ask > zone_ask:
         notes.append(f"ask clamped from {ask:.4f} to zone_ask={zone_ask:.4f}")
-        return _round_tick(zone_ask)
+        return _round_tick_down(zone_ask)
     return ask
 
 
