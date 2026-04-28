@@ -579,27 +579,6 @@ class RewardProfitSelector:
         quote_ask = round(min(1.0, midpoint + (quote_spread / 2.0)), 6)
         quote_improvement_per_share = 0.0
         quote_improvement_reason = "NO_QUOTE_IMPROVEMENT"
-        requested_improvement = self.quote_improvement_cents / 100.0
-        if requested_improvement > 0.0:
-            max_maker_improvement = max(0.0, best_ask - quote_bid - 0.000001)
-            max_cost_improvement = (
-                self.max_quote_improvement_cost_usdc / quote_size
-                if self.max_quote_improvement_cost_usdc > 0.0 and quote_size > 0.0
-                else requested_improvement
-            )
-            quote_improvement_per_share = min(
-                requested_improvement,
-                max_maker_improvement,
-                max_cost_improvement,
-            )
-            if quote_improvement_per_share > 0.0:
-                quote_bid = round(quote_bid + quote_improvement_per_share, 6)
-                quote_spread = max(0.0, quote_ask - quote_bid)
-                quote_improvement_reason = "BID_IMPROVED_WITHIN_SPREAD"
-            elif max_maker_improvement <= 0.0:
-                quote_improvement_reason = "NO_ROOM_BEFORE_ASK"
-            else:
-                quote_improvement_reason = "MAX_IMPROVEMENT_COST_ZERO"
 
         liquidity_num = float(market.get("liquidity_num") or 0.0)
         volume_num = float(market.get("volume_num") or 0.0)
@@ -622,8 +601,6 @@ class RewardProfitSelector:
             share_floor,
             share_ceiling,
         )
-        quote_improvement_cost_usdc = round(quote_improvement_per_share * quote_size, 6)
-
         capital_basis_usdc = round(quote_size * best_ask, 6)
         immediate_entry_cost_usdc = round(quote_size * max(best_ask - best_bid, 0.0), 6)
         immediate_entry_cost_pct = round(
@@ -726,7 +703,6 @@ class RewardProfitSelector:
             sizing_reason = "KELLY_DISABLED_REWARD_MIN_SIZE"
 
         # Recompute all size-dependent metrics with effective_quote_size
-        quote_improvement_cost_usdc = round(quote_improvement_per_share * effective_quote_size, 6)
         capital_basis_usdc = round(effective_quote_size * best_ask, 6)
         immediate_entry_cost_usdc = round(effective_quote_size * max(best_ask - best_bid, 0.0), 6)
         immediate_entry_cost_pct = round(
@@ -755,6 +731,30 @@ class RewardProfitSelector:
             expected_reward_per_hour_lower / capital_basis_usdc, 8
         ) if capital_basis_usdc > 0.0 else 0.0
         # ────────────────────────────────────────────────────────────────────
+
+        requested_improvement = self.quote_improvement_cents / 100.0
+        if requested_improvement > 0.0:
+            # Apply price improvement after candidate scoring. This keeps selection
+            # based on the full spread, while live execution can queue closer to midpoint.
+            max_maker_improvement = max(0.0, best_ask - quote_bid - 0.000001)
+            max_cost_improvement = (
+                self.max_quote_improvement_cost_usdc / effective_quote_size
+                if self.max_quote_improvement_cost_usdc > 0.0 and effective_quote_size > 0.0
+                else requested_improvement
+            )
+            quote_improvement_per_share = min(
+                requested_improvement,
+                max_maker_improvement,
+                max_cost_improvement,
+            )
+            if quote_improvement_per_share > 0.0:
+                quote_bid = round(quote_bid + quote_improvement_per_share, 6)
+                quote_improvement_reason = "BID_IMPROVED_POST_SELECTION"
+            elif max_maker_improvement <= 0.0:
+                quote_improvement_reason = "NO_ROOM_BEFORE_ASK"
+            else:
+                quote_improvement_reason = "MAX_IMPROVEMENT_COST_ZERO"
+        quote_improvement_cost_usdc = round(quote_improvement_per_share * effective_quote_size, 6)
 
         return RewardProfitCandidate(
             event_slug=event_slug,

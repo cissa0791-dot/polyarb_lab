@@ -760,7 +760,7 @@ class RewardProfitSessionEngineTests(unittest.TestCase):
         self.assertAlmostEqual(cand.quote_ask, 0.464, places=6)
         self.assertAlmostEqual(cand.quote_improvement_cents, 0.1, places=6)
         self.assertAlmostEqual(cand.quote_improvement_cost_usdc, 0.05, places=6)
-        self.assertEqual(cand.quote_improvement_reason, "BID_IMPROVED_WITHIN_SPREAD")
+        self.assertEqual(cand.quote_improvement_reason, "BID_IMPROVED_POST_SELECTION")
 
     def test_quote_improvement_respects_cost_cap(self) -> None:
         selector = RewardProfitSelector(
