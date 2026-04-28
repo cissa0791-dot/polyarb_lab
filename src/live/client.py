@@ -301,8 +301,7 @@ class LiveWriteClient:
             or 0
         )
         balance = float(raw_balance)
-        # Polymarket conditional token balances are returned in 1e6 units.
-        return round(balance / 1_000_000.0 if balance > 10_000 else balance, 6)
+        return round(balance / 1_000_000.0, 6)
 
     def get_open_orders(self, token_id: str) -> list[LiveOpenOrder]:
         """Return open CLOB orders for an outcome token."""

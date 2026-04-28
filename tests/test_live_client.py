@@ -39,6 +39,7 @@ class _FakeClient:
         submit_response: dict | None = None,
         order_response: object | None = None,
         raises: Exception | None = None,
+        balance_response: object | None = None,
     ):
         self.calls: list[tuple] = []
         self._submit_response = submit_response or {
@@ -48,6 +49,13 @@ class _FakeClient:
         }
         self._order_response = order_response or _FakeOrder()
         self._raises = raises
+        self._balance_response = balance_response
+
+    def get_balance_allowance(self, params):
+        self.calls.append(("get_balance_allowance", params))
+        if self._raises:
+            raise self._raises
+        return self._balance_response or {"balance": "0"}
 
     def create_and_post_order(self, order_args, options):
         self.calls.append(("create_and_post_order", order_args, options))
@@ -315,6 +323,40 @@ class TestGetOrderStatusLive(unittest.TestCase):
 # ---------------------------------------------------------------------------
 # LiveClientError contract
 # ---------------------------------------------------------------------------
+
+class TestGetTokenBalance(unittest.TestCase):
+
+    def test_balance_in_microunits_always_divided_by_1e6(self) -> None:
+        # Polymarket returns balances in 1e6 units (e.g. 171_800_000 = 171.8 shares)
+        fake = _FakeClient(balance_response={"balance": "171800000"})
+        client = LiveWriteClient(fake, dry_run=False)
+        result = client.get_token_balance("tok-1")
+        self.assertAlmostEqual(result, 171.8, places=4)
+
+    def test_small_balance_also_divided_by_1e6(self) -> None:
+        # Previously the bug: balance <= 10_000 was NOT divided, returning raw int
+        fake = _FakeClient(balance_response={"balance": "5000"})
+        client = LiveWriteClient(fake, dry_run=False)
+        result = client.get_token_balance("tok-1")
+        self.assertAlmostEqual(result, 0.005, places=6)
+
+    def test_zero_balance_returns_zero(self) -> None:
+        fake = _FakeClient(balance_response={"balance": "0"})
+        client = LiveWriteClient(fake, dry_run=False)
+        self.assertEqual(client.get_token_balance("tok-1"), 0.0)
+
+    def test_dry_run_returns_zero_without_api_call(self) -> None:
+        fake = _FakeClient()
+        client = LiveWriteClient(fake, dry_run=True)
+        self.assertEqual(client.get_token_balance("tok-1"), 0.0)
+        self.assertEqual(len(fake.calls), 0)
+
+    def test_api_error_raises_live_client_error(self) -> None:
+        fake = _FakeClient(raises=RuntimeError("network"))
+        client = LiveWriteClient(fake, dry_run=False)
+        with self.assertRaises(LiveClientError):
+            client.get_token_balance("tok-1")
+
 
 class TestLiveClientError(unittest.TestCase):
 
