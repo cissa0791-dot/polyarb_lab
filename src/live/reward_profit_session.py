@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import uuid
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
@@ -73,6 +73,13 @@ class RewardProfitCandidate:
     quote_improvement_cents: float = 0.0
     quote_improvement_cost_usdc: float = 0.0
     quote_improvement_reason: str = "NO_QUOTE_IMPROVEMENT"
+    quote_mode: str = "passive"
+    quote_attempt: int = 0
+    next_quote_bid: float = 0.0
+    quote_decision_reason: str = "PASSIVE_BID"
+    profit_score: float = 0.0
+    fill_probability_score: float = 0.0
+    total_score: float = 0.0
 
 
 @dataclass
@@ -127,8 +134,12 @@ class RewardProfitConfig:
     stale_thesis_max_price_change: float = 0.02
     live_order_max_age_sec: float = 120.0
     live_requote_price_move_cents: float = 1.0
+    quote_mode: str = "adaptive"
     quote_improvement_cents: float = 0.0
+    max_quote_improvement_cents: float = 0.3
     max_quote_improvement_cost_usdc: float = 0.25
+    max_no_fill_requotes: int = 2
+    no_fill_cooldown_minutes: float = 30.0
     event_limit: int = 200
     market_limit: int = 400
     cycles: int = 1
@@ -169,6 +180,12 @@ class RewardMarketState:
     ask_order_status: str | None = None
     cancel_count: int = 0
     requote_count: int = 0
+    no_fill_requote_count: int = 0
+    quote_attempt: int = 0
+    queue_wait_sec: float = 0.0
+    next_quote_bid: float | None = None
+    quote_mode: str = "passive"
+    quote_decision_reason: str = "PASSIVE_BID"
     last_order_error: str | None = None
     last_cancel_reason: str | None = None
     hours_in_reward_zone: float = 0.0
@@ -516,10 +533,10 @@ class RewardProfitSelector:
         ordered = sorted(
             candidates,
             key=lambda item: (
-                item.break_even_hours,
-                -item.reward_minus_drawdown_per_hour,
-                -item.reward_per_dollar_inventory_per_hour,
-                -item.expected_reward_per_hour_lower,
+                -item.total_score,
+                -item.profit_score,
+                -item.fill_probability_score,
+                item.true_break_even_hours,
                 item.capital_basis_usdc,
                 item.market_slug,
             ),
@@ -732,6 +749,20 @@ class RewardProfitSelector:
         ) if capital_basis_usdc > 0.0 else 0.0
         # ────────────────────────────────────────────────────────────────────
 
+        profit_score = round(
+            _clamp(expected_net_edge_per_hour / max(immediate_entry_cost_usdc, 0.01), 0.0, 5.0) / 5.0,
+            6,
+        )
+        spread_width_score = 1.0 - _clamp(current_spread / max(reward_max_spread, 1e-9), 0.0, 1.0)
+        top_of_book_depth = float(market.get("best_bid_size") or market.get("bid_size") or market.get("liquidity_num") or 0.0)
+        depth_score = _clamp(top_of_book_depth / max(effective_quote_size * max(best_bid, 0.01), 1.0), 0.0, 1.0)
+        reward_size_score = _clamp(float(self.per_market_cap_usdc) / max(capital_basis_usdc, 1e-9), 0.0, 1.0)
+        fill_probability_score = round(
+            _clamp((activity_factor * 0.45) + (spread_width_score * 0.25) + (depth_score * 0.20) + (reward_size_score * 0.10), 0.0, 1.0),
+            6,
+        )
+        total_score = round((profit_score * 0.60) + (fill_probability_score * 0.40), 6)
+
         requested_improvement = self.quote_improvement_cents / 100.0
         if requested_improvement > 0.0:
             # Apply price improvement after candidate scoring. This keeps selection
@@ -792,6 +823,13 @@ class RewardProfitSelector:
             quote_improvement_cents=round(quote_improvement_per_share * 100.0, 6),
             quote_improvement_cost_usdc=quote_improvement_cost_usdc,
             quote_improvement_reason=quote_improvement_reason,
+            quote_mode="static" if quote_improvement_per_share > 0.0 else "passive",
+            quote_attempt=0,
+            next_quote_bid=quote_bid,
+            quote_decision_reason=quote_improvement_reason,
+            profit_score=profit_score,
+            fill_probability_score=fill_probability_score,
+            total_score=total_score,
             liquidity_factor=round(liquidity_factor, 6),
             activity_factor=round(activity_factor, 6),
         )
@@ -1078,6 +1116,7 @@ class RewardProfitSessionEngine:
     ) -> None:
         previous_ts = datetime.fromisoformat(market_state.last_cycle_ts) if market_state.last_cycle_ts else now
         dt_hours = max(0.0, (now - previous_ts).total_seconds() / 3600.0)
+        candidate = self._candidate_with_execution_quote(market_state, candidate)
 
         market_state.status = RewardMarketStatus.SELECTED.value
         if market_state.last_exit_ts and market_state.inventory_shares <= 0.0:
@@ -1091,9 +1130,13 @@ class RewardProfitSessionEngine:
         market_state.last_reward_rate = candidate.reward_daily_rate
         market_state.bid_filled_delta = 0.0
         market_state.ask_filled_delta = 0.0
+        market_state.quote_mode = candidate.quote_mode
+        market_state.quote_attempt = candidate.quote_attempt
+        market_state.next_quote_bid = candidate.next_quote_bid
+        market_state.quote_decision_reason = candidate.quote_decision_reason
 
         self._refresh_live_order_marks(market_state, now)
-        self._manage_live_order_lifecycle(market_state, candidate, now)
+        self._manage_live_order_lifecycle(state, market_state, candidate, now)
 
         if market_state.inventory_shares <= 0.0 and self.config.entry_mode == "inventory_first":
             filled_size, fill_price = self.order_manager.build_inventory(market_state, candidate)
@@ -1228,6 +1271,59 @@ class RewardProfitSessionEngine:
             ask_order_id = ask_order_id or f"dry-ask-{uuid.uuid4().hex[:10]}"
         return bid_order_id, ask_order_id
 
+    def _candidate_with_execution_quote(
+        self,
+        market_state: RewardMarketState,
+        candidate: RewardProfitCandidate,
+    ) -> RewardProfitCandidate:
+        mode = str(self.config.quote_mode or "passive").lower()
+        if mode not in {"passive", "midpoint", "adaptive", "urgent"}:
+            mode = "passive"
+
+        base_bid = candidate.best_bid
+        requested_cents = max(0.0, float(self.config.quote_improvement_cents))
+        max_cents = max(requested_cents, float(self.config.max_quote_improvement_cents))
+        attempt = 0
+        decision = "PASSIVE_BID"
+
+        if mode == "passive":
+            improvement_cents = 0.0
+        elif mode == "midpoint":
+            improvement_cents = requested_cents
+            decision = "MIDPOINT_IMPROVEMENT"
+        elif mode == "urgent":
+            improvement_cents = max_cents
+            decision = "URGENT_MAX_IMPROVEMENT"
+        else:
+            attempt = max(0, int(market_state.no_fill_requote_count))
+            improvement_cents = min(max_cents, requested_cents * (attempt + 1))
+            decision = "ADAPTIVE_INITIAL_IMPROVEMENT" if attempt <= 0 else "ADAPTIVE_NO_FILL_STEP_UP"
+
+        improvement_per_share = improvement_cents / 100.0
+        max_maker_improvement = max(0.0, candidate.best_ask - base_bid - 0.000001)
+        max_cost_improvement = (
+            float(self.config.max_quote_improvement_cost_usdc) / candidate.quote_size
+            if self.config.max_quote_improvement_cost_usdc > 0.0 and candidate.quote_size > 0.0
+            else improvement_per_share
+        )
+        actual_improvement = min(improvement_per_share, max_maker_improvement, max_cost_improvement)
+        if actual_improvement <= 0.0:
+            decision = "NO_ROOM_BEFORE_ASK" if max_maker_improvement <= 0.0 else "MAX_IMPROVEMENT_COST_ZERO"
+
+        quote_bid = round(base_bid + max(0.0, actual_improvement), 6)
+        quote_cost = round(actual_improvement * candidate.quote_size, 6)
+        return replace(
+            candidate,
+            quote_bid=quote_bid,
+            quote_improvement_cents=round(actual_improvement * 100.0, 6),
+            quote_improvement_cost_usdc=quote_cost,
+            quote_improvement_reason=decision,
+            quote_mode=mode,
+            quote_attempt=attempt,
+            next_quote_bid=quote_bid,
+            quote_decision_reason=decision,
+        )
+
     def _update_exit_behavior_metrics(
         self,
         market_state: RewardMarketState,
@@ -1342,6 +1438,7 @@ class RewardProfitSessionEngine:
             market_state.bid_order_status = "submitted"
             market_state.bid_order_age_sec = 0.0
             market_state.bid_order_remaining_size = round(candidate.quote_size, 6)
+            market_state.queue_wait_sec = 0.0
             market_state.last_order_error = None
             if previous_bid_id is not None:
                 market_state.requote_count += 1
@@ -1359,6 +1456,7 @@ class RewardProfitSessionEngine:
 
     def _manage_live_order_lifecycle(
         self,
+        state: RewardProfitSessionState,
         market_state: RewardMarketState,
         candidate: RewardProfitCandidate,
         now: datetime,
@@ -1370,13 +1468,27 @@ class RewardProfitSessionEngine:
         move_threshold = max(0.0, float(self.config.live_requote_price_move_cents)) / 100.0
         if market_state.bid_order_id:
             self._update_order_age(market_state, "bid", now)
-            stale = max_age > 0.0 and market_state.bid_order_age_sec >= max_age and market_state.bid_order_filled_size <= 1e-9
+            market_state.queue_wait_sec = market_state.bid_order_age_sec
+            has_bid_fill = market_state.bid_order_filled_size > 1e-9 or market_state.inventory_shares > 1e-9
+            stale = max_age > 0.0 and market_state.bid_order_age_sec >= max_age and not has_bid_fill
             moved = (
                 move_threshold > 0.0
                 and market_state.bid_order_price is not None
                 and abs(candidate.quote_bid - market_state.bid_order_price) >= move_threshold - 1e-12
+                and not has_bid_fill
             )
             if stale or moved:
+                if stale:
+                    market_state.no_fill_requote_count += 1
+                    if market_state.no_fill_requote_count > max(0, int(self.config.max_no_fill_requotes)):
+                        self._pause_market(
+                            market_state,
+                            reason="NO_FILL_REQUOTE_LIMIT",
+                            state=state,
+                            now=now,
+                            cooldown_minutes=self.config.no_fill_cooldown_minutes,
+                        )
+                        return
                 self._cancel_side_order(
                     market_state,
                     "bid",
@@ -1438,6 +1550,8 @@ class RewardProfitSessionEngine:
             market_state.bid_order_remaining_size = round(status.size_remaining, 6)
             delta = max(0.0, status.size_matched - market_state.bid_order_filled_size)
             if delta > 0.0:
+                market_state.no_fill_requote_count = 0
+                market_state.queue_wait_sec = 0.0
                 market_state.bid_filled_delta = round(delta, 6)
                 avg_price = status.avg_price or market_state.bid_order_price or market_state.avg_inventory_cost or 0.0
                 total_cost = (market_state.inventory_shares * market_state.avg_inventory_cost) + (delta * avg_price)
@@ -1585,11 +1699,18 @@ class RewardProfitSessionEngine:
                 continue
             if market_state.bid_order_id and self.order_manager.cancel_order(market_state.bid_order_id):
                 market_state.cancel_count += 1
-            if market_state.ask_order_id and self.order_manager.cancel_order(market_state.ask_order_id):
+            if (
+                market_state.ask_order_id
+                and market_state.inventory_shares <= 1e-9
+                and self.order_manager.cancel_order(market_state.ask_order_id)
+            ):
                 market_state.cancel_count += 1
             self._clear_side_order(market_state, "bid", keep_status=False)
-            self._clear_side_order(market_state, "ask", keep_status=False)
-            market_state.last_exit_reason = "RUN_FINISHED_CANCEL_OPEN_ORDERS"
+            if market_state.inventory_shares <= 1e-9:
+                self._clear_side_order(market_state, "ask", keep_status=False)
+                market_state.last_exit_reason = "RUN_FINISHED_CANCEL_OPEN_ORDERS"
+            else:
+                market_state.last_exit_reason = "RUN_FINISHED_KEEP_REDUCE_ONLY_ASK"
             if market_state.inventory_shares <= 0.0:
                 market_state.status = RewardMarketStatus.PAUSED.value
 
@@ -1600,6 +1721,7 @@ class RewardProfitSessionEngine:
         reason: str,
         state: RewardProfitSessionState | None = None,
         now: datetime | None = None,
+        cooldown_minutes: float | None = None,
     ) -> None:
         self._cancel_side_order(market_state, "bid", reason, count_requote=False)
         self._cancel_side_order(market_state, "ask", reason, count_requote=False)
@@ -1625,7 +1747,7 @@ class RewardProfitSessionEngine:
             6,
         )
         if state is not None and now is not None:
-            self._start_cooldown(market_state, state=state, now=now)
+            self._start_cooldown(market_state, state=state, now=now, cooldown_minutes=cooldown_minutes)
 
     def _close_market(
         self,
@@ -1666,10 +1788,11 @@ class RewardProfitSessionEngine:
         *,
         state: RewardProfitSessionState,
         now: datetime,
+        cooldown_minutes: float | None = None,
     ) -> None:
         from datetime import timedelta
 
-        minutes = self.config.exit_cooldown_minutes
+        minutes = self.config.exit_cooldown_minutes if cooldown_minutes is None else cooldown_minutes
         if market_state.reentry_count >= self.config.max_reentries_per_market:
             minutes = self.config.repeat_exit_cooldown_minutes
         market_state.last_exit_ts = now.isoformat()
@@ -1857,6 +1980,12 @@ class RewardProfitSessionEngine:
                 "ask_order_remaining_size": round(market.ask_order_remaining_size, 6),
                 "cancel_count": market.cancel_count,
                 "requote_count": market.requote_count,
+                "no_fill_requote_count": market.no_fill_requote_count,
+                "quote_mode": market.quote_mode,
+                "quote_attempt": market.quote_attempt,
+                "queue_wait_sec": round(market.queue_wait_sec, 3),
+                "next_quote_bid": round(float(market.next_quote_bid or 0.0), 6),
+                "quote_decision_reason": market.quote_decision_reason,
                 "last_order_error": market.last_order_error,
                 "last_cancel_reason": market.last_cancel_reason,
                 "sizing_mode": str(market.selection_metrics.get("sizing_mode") or ""),

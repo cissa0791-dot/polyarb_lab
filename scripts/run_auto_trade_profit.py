@@ -61,18 +61,22 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--stale-thesis-max-price-change", type=float, default=0.02)
     parser.add_argument("--live-order-max-age-sec", type=float, default=120.0)
     parser.add_argument("--live-requote-price-move-cents", type=float, default=1.0)
+    parser.add_argument("--quote-mode", choices=["passive", "midpoint", "adaptive", "urgent"], default="adaptive")
     parser.add_argument(
         "--quote-improvement-cents",
         type=float,
-        default=0.0,
+        default=0.1,
         help="Improve maker bid by this many cents, without crossing the ask. Example: 0.1 posts 46.3c when bid/ask are 46.2c/46.4c.",
     )
+    parser.add_argument("--max-quote-improvement-cents", type=float, default=0.3)
     parser.add_argument(
         "--max-quote-improvement-cost-usdc",
         type=float,
         default=0.25,
         help="Maximum extra inventory cost from quote improvement per market.",
     )
+    parser.add_argument("--max-no-fill-requotes", type=int, default=2)
+    parser.add_argument("--no-fill-cooldown-minutes", type=float, default=30.0)
     parser.add_argument("--event-limit", type=int, default=200)
     parser.add_argument("--market-limit", type=int, default=400)
     parser.add_argument("--cycles", type=int, default=1)
@@ -134,8 +138,12 @@ def main() -> None:
         stale_thesis_max_price_change=args.stale_thesis_max_price_change,
         live_order_max_age_sec=args.live_order_max_age_sec,
         live_requote_price_move_cents=args.live_requote_price_move_cents,
+        quote_mode=args.quote_mode,
         quote_improvement_cents=args.quote_improvement_cents,
+        max_quote_improvement_cents=args.max_quote_improvement_cents,
         max_quote_improvement_cost_usdc=args.max_quote_improvement_cost_usdc,
+        max_no_fill_requotes=args.max_no_fill_requotes,
+        no_fill_cooldown_minutes=args.no_fill_cooldown_minutes,
         event_limit=args.event_limit,
         market_limit=args.market_limit,
         cycles=args.cycles,
