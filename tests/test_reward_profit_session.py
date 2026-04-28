@@ -1374,6 +1374,65 @@ class RewardProfitSessionEngineTests(unittest.TestCase):
             self.assertEqual(lifecycle["sizing_mode"], "reward_min_size")
             self.assertGreater(lifecycle["effective_quote_size"], 0.0)
 
+    def test_report_includes_scan_diagnostics_funnel(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = RewardProfitConfig(
+                out_dir=tmpdir,
+                state_path=str(Path(tmpdir) / "s.json"),
+                pnl_path=str(Path(tmpdir) / "p.json"),
+                max_entry_cost_usdc=10.0,
+                max_entry_cost_pct=1.0,
+                max_break_even_hours=100.0,
+                live=False,
+            )
+            valid_market = {
+                "enable_orderbook": True,
+                "fees_enabled": False,
+                "is_binary_yes_no": True,
+                "yes_token_id": "tok-yes",
+                "best_bid": 0.35,
+                "best_ask": 0.36,
+                "rewards_min_size": 10.0,
+                "clob_rewards": [{"rewardsDailyRate": 100.0}],
+                "rewards_max_spread": 3.5,
+                "volume_num": 10000.0,
+                "liquidity_num": 10000.0,
+                "slug": "valid",
+                "question": "valid?",
+            }
+            registry = {
+                "summary": {"events_seen": 3, "markets_seen": 50},
+                "events": [
+                    {
+                        "slug": "event-1",
+                        "title": "event 1",
+                        "markets": [
+                            valid_market,
+                            {**valid_market, "slug": "no-book", "enable_orderbook": False},
+                            {**valid_market, "slug": "no-reward", "clob_rewards": []},
+                        ],
+                    }
+                ],
+            }
+            engine = RewardProfitSessionEngine(
+                config,
+                reward_client_factory=lambda dry_run: None,
+                order_manager=_CountingOrderManager(),
+                registry_provider=lambda cfg: registry,
+            )
+
+            state = engine.run_cycle(cycle_ts=datetime(2026, 4, 24, tzinfo=timezone.utc))
+            pnl = engine._build_pnl_report(state)
+            diagnostics = pnl["summary"]["scan_diagnostics"]
+
+            self.assertEqual(diagnostics["raw_markets_seen"], 50)
+            self.assertEqual(diagnostics["registry_markets"], 3)
+            self.assertEqual(diagnostics["scored_candidates"], 1)
+            self.assertEqual(diagnostics["eligible_candidates"], 1)
+            self.assertEqual(diagnostics["selected_markets"], 1)
+            self.assertEqual(diagnostics["candidate_prefilter_reasons"]["NO_ORDERBOOK"], 1)
+            self.assertEqual(diagnostics["candidate_prefilter_reasons"]["NO_CLOB_REWARD_RATE"], 1)
+
 
 if __name__ == "__main__":
     unittest.main()

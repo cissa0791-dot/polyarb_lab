@@ -226,6 +226,7 @@ class RewardProfitSessionState:
     last_eligible_candidate_count: int = 0
     last_filter_reasons: dict[str, int] = field(default_factory=dict)
     last_selection_reasons: dict[str, int] = field(default_factory=dict)
+    last_scan_diagnostics: dict[str, Any] = field(default_factory=dict)
     actual_reward_baseline_usdc: float = 0.0
     actual_reward_latest_usdc: float = 0.0
     reward_epoch_id: str | None = None
@@ -382,15 +383,94 @@ class RewardProfitSelector:
         self.drawdown_factor_per_day = drawdown_factor_per_day
 
     def build_candidates(self, registry: dict[str, Any]) -> list[RewardProfitCandidate]:
+        candidates, _diagnostics = self.build_candidates_with_diagnostics(registry)
+        return candidates
+
+    def build_candidates_with_diagnostics(
+        self,
+        registry: dict[str, Any],
+    ) -> tuple[list[RewardProfitCandidate], dict[str, Any]]:
         candidates: list[RewardProfitCandidate] = []
+        prefilter_reasons: dict[str, int] = {}
+        raw_events = list(registry.get("events") or [])
+        raw_summary = dict(registry.get("summary") or {})
+        raw_market_count = int(raw_summary.get("markets_seen") or 0)
+        registry_market_count = 0
+        reward_market_count = 0
+        orderbook_market_count = 0
+        binary_market_count = 0
+        top_of_book_market_count = 0
         for event in registry.get("events", []):
             event_slug = str(event.get("slug") or "")
             event_title = event.get("title")
             for market in event.get("markets", []):
+                registry_market_count += 1
+                if bool(market.get("enable_orderbook")):
+                    orderbook_market_count += 1
+                if bool(market.get("is_binary_yes_no")):
+                    binary_market_count += 1
+                if list(market.get("clob_rewards") or []):
+                    reward_market_count += 1
+                try:
+                    best_bid = float(market.get("best_bid") or 0.0)
+                    best_ask = float(market.get("best_ask") or 0.0)
+                except Exception:
+                    best_bid = 0.0
+                    best_ask = 0.0
+                if best_bid > 0.0 and best_ask > best_bid:
+                    top_of_book_market_count += 1
+
+                reason = self._candidate_prefilter_reason(market)
+                if reason is not None:
+                    prefilter_reasons[reason] = prefilter_reasons.get(reason, 0) + 1
+                    continue
                 candidate = self._build_candidate(event_slug=event_slug, event_title=event_title, market=market)
                 if candidate is not None:
                     candidates.append(candidate)
-        return candidates
+                else:
+                    prefilter_reasons["CANDIDATE_BUILD_FAILED"] = prefilter_reasons.get("CANDIDATE_BUILD_FAILED", 0) + 1
+        diagnostics = {
+            "raw_events_seen": int(raw_summary.get("events_seen") or len(raw_events)),
+            "raw_markets_seen": raw_market_count,
+            "registry_events": len(raw_events),
+            "registry_markets": registry_market_count,
+            "orderbook_enabled_markets": orderbook_market_count,
+            "binary_yes_no_markets": binary_market_count,
+            "clob_reward_markets": reward_market_count,
+            "top_of_book_markets": top_of_book_market_count,
+            "scored_candidates": len(candidates),
+            "candidate_prefilter_reasons": prefilter_reasons,
+        }
+        return candidates, diagnostics
+
+    def _candidate_prefilter_reason(self, market: dict[str, Any]) -> str | None:
+        if not bool(market.get("enable_orderbook")):
+            return "NO_ORDERBOOK"
+        if bool(market.get("fees_enabled")):
+            return "FEES_ENABLED"
+        if not bool(market.get("is_binary_yes_no")):
+            return "NOT_BINARY_YES_NO"
+        if not market.get("yes_token_id"):
+            return "MISSING_YES_TOKEN"
+
+        try:
+            best_bid = float(market.get("best_bid") or 0.0)
+            best_ask = float(market.get("best_ask") or 0.0)
+            quote_size = float(market.get("rewards_min_size") or 0.0)
+            reward_daily_rate = sum(float(row.get("rewardsDailyRate") or 0.0) for row in list(market.get("clob_rewards") or []))
+            rewards_max_spread_cents = float(market.get("rewards_max_spread") or 0.0)
+        except Exception:
+            return "INVALID_NUMERIC_FIELDS"
+
+        if best_bid <= 0.0 or best_ask <= best_bid:
+            return "INVALID_TOP_OF_BOOK"
+        if quote_size <= 0.0:
+            return "NO_REWARD_MIN_SIZE"
+        if reward_daily_rate <= 0.0:
+            return "NO_CLOB_REWARD_RATE"
+        if rewards_max_spread_cents <= 0.0:
+            return "NO_REWARD_MAX_SPREAD"
+        return None
 
     def select(
         self,
@@ -761,6 +841,7 @@ class RewardProfitSessionEngine:
             f"ETA {self._format_duration(remaining_sec)} | "
             f"selected {len(state.selected_market_slugs)} | "
             f"active {summary['active_quote_market_count']} | "
+            f"raw {summary['scan_diagnostics'].get('raw_markets_seen', 0)} | "
             f"scanned {state.last_scanned_candidate_count} | "
             f"eligible {state.last_eligible_candidate_count} | "
             f"orders b{summary['open_bid_order_count']}/a{summary['open_ask_order_count']} "
@@ -870,9 +951,22 @@ class RewardProfitSessionEngine:
 
         if scanned_candidates is None:
             registry = self.registry_provider(self.config)
-            scanned_candidates = self.selector.build_candidates(registry)
+            scanned_candidates, scan_diagnostics = self.selector.build_candidates_with_diagnostics(registry)
         else:
             registry = {"events": []}
+            scan_diagnostics = {
+                "raw_events_seen": 0,
+                "raw_markets_seen": 0,
+                "registry_events": 0,
+                "registry_markets": 0,
+                "orderbook_enabled_markets": 0,
+                "binary_yes_no_markets": 0,
+                "clob_reward_markets": 0,
+                "top_of_book_markets": 0,
+                "scored_candidates": len(scanned_candidates),
+                "candidate_prefilter_reasons": {},
+                "source": "injected_scanned_candidates",
+            }
 
         horizon = self.config.projection_horizon_hours
         max_true_be = self.config.max_true_break_even_hours
@@ -887,6 +981,9 @@ class RewardProfitSessionEngine:
         state.last_scanned_candidate_count = len(scanned_candidates)
         state.last_eligible_candidate_count = len(eligible_candidates)
         state.last_filter_reasons = filter_reasons
+        scan_diagnostics["eligible_candidates"] = len(eligible_candidates)
+        scan_diagnostics["candidate_filter_reasons"] = dict(filter_reasons)
+        state.last_scan_diagnostics = scan_diagnostics
         selected, selection_reasons = self.selector.select_with_reasons(
             eligible_candidates,
             capital_limit_usdc=self.config.capital_limit_usdc,
@@ -895,6 +992,8 @@ class RewardProfitSessionEngine:
             max_markets_per_event=self.config.max_markets_per_event,
         )
         state.last_selection_reasons = selection_reasons
+        state.last_scan_diagnostics["selected_markets"] = len(selected)
+        state.last_scan_diagnostics["selection_reasons"] = dict(selection_reasons)
         selected_by_slug = {item.market_slug: item for item in selected}
         state.selected_market_slugs = [item.market_slug for item in selected]
 
@@ -1648,6 +1747,7 @@ class RewardProfitSessionEngine:
             last_eligible_candidate_count=int(payload.get("last_eligible_candidate_count") or 0),
             last_filter_reasons=dict(payload.get("last_filter_reasons") or {}),
             last_selection_reasons=dict(payload.get("last_selection_reasons") or {}),
+            last_scan_diagnostics=dict(payload.get("last_scan_diagnostics") or {}),
             actual_reward_baseline_usdc=float(payload.get("actual_reward_baseline_usdc") or 0.0),
             actual_reward_latest_usdc=float(payload.get("actual_reward_latest_usdc") or 0.0),
             reward_epoch_id=payload.get("reward_epoch_id"),
@@ -1749,6 +1849,7 @@ class RewardProfitSessionEngine:
                 "last_eligible_candidate_count": state.last_eligible_candidate_count,
                 "last_filter_reasons": dict(state.last_filter_reasons),
                 "last_selection_reasons": dict(state.last_selection_reasons),
+                "scan_diagnostics": dict(state.last_scan_diagnostics),
                 "capital_limit_usdc": round(state.capital_limit_usdc, 6),
                 "capital_in_use_usdc": round(total_capital, 6),
                 "active_quote_market_count": active_quote_count,
