@@ -733,6 +733,62 @@ class RewardProfitSessionEngineTests(unittest.TestCase):
         self.assertIsNotNone(cand)
         self.assertAlmostEqual(cand.quote_size, 75.0, places=1)
 
+    def test_quote_improvement_moves_bid_toward_midpoint(self) -> None:
+        selector = RewardProfitSelector(
+            use_kelly_sizing=False,
+            quote_improvement_cents=0.1,
+            max_quote_improvement_cost_usdc=0.25,
+        )
+        market = {
+            "enable_orderbook": True,
+            "fees_enabled": False,
+            "is_binary_yes_no": True,
+            "yes_token_id": "tok-mid",
+            "best_bid": 0.462,
+            "best_ask": 0.464,
+            "rewards_min_size": 50.0,
+            "rewards_max_spread": 4.5,
+            "clob_rewards": [{"rewardsDailyRate": 211.0}],
+            "liquidity_num": 8000.0,
+            "volume_num": 20000.0,
+            "slug": "midpoint-market",
+            "question": "mid?",
+        }
+        cand = selector._build_candidate(event_slug="ev", event_title="ev", market=market)
+        self.assertIsNotNone(cand)
+        self.assertAlmostEqual(cand.quote_bid, 0.463, places=6)
+        self.assertAlmostEqual(cand.quote_ask, 0.464, places=6)
+        self.assertAlmostEqual(cand.quote_improvement_cents, 0.1, places=6)
+        self.assertAlmostEqual(cand.quote_improvement_cost_usdc, 0.05, places=6)
+        self.assertEqual(cand.quote_improvement_reason, "BID_IMPROVED_WITHIN_SPREAD")
+
+    def test_quote_improvement_respects_cost_cap(self) -> None:
+        selector = RewardProfitSelector(
+            use_kelly_sizing=False,
+            quote_improvement_cents=0.1,
+            max_quote_improvement_cost_usdc=0.025,
+        )
+        market = {
+            "enable_orderbook": True,
+            "fees_enabled": False,
+            "is_binary_yes_no": True,
+            "yes_token_id": "tok-cap",
+            "best_bid": 0.462,
+            "best_ask": 0.464,
+            "rewards_min_size": 50.0,
+            "rewards_max_spread": 4.5,
+            "clob_rewards": [{"rewardsDailyRate": 211.0}],
+            "liquidity_num": 8000.0,
+            "volume_num": 20000.0,
+            "slug": "cap-market",
+            "question": "cap?",
+        }
+        cand = selector._build_candidate(event_slug="ev", event_title="ev", market=market)
+        self.assertIsNotNone(cand)
+        self.assertAlmostEqual(cand.quote_bid, 0.4625, places=6)
+        self.assertAlmostEqual(cand.quote_improvement_cents, 0.05, places=6)
+        self.assertAlmostEqual(cand.quote_improvement_cost_usdc, 0.025, places=6)
+
     def test_kelly_capital_respects_per_market_cap(self) -> None:
         selector = RewardProfitSelector(
             use_kelly_sizing=True,

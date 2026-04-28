@@ -70,6 +70,9 @@ class RewardProfitCandidate:
     sizing_mode: str = "reward_min_size"
     effective_quote_size: float = 0.0
     sizing_reason: str = "KELLY_DISABLED_REWARD_MIN_SIZE"
+    quote_improvement_cents: float = 0.0
+    quote_improvement_cost_usdc: float = 0.0
+    quote_improvement_reason: str = "NO_QUOTE_IMPROVEMENT"
 
 
 @dataclass
@@ -124,6 +127,8 @@ class RewardProfitConfig:
     stale_thesis_max_price_change: float = 0.02
     live_order_max_age_sec: float = 120.0
     live_requote_price_move_cents: float = 1.0
+    quote_improvement_cents: float = 0.0
+    max_quote_improvement_cost_usdc: float = 0.25
     event_limit: int = 200
     market_limit: int = 400
     cycles: int = 1
@@ -369,6 +374,8 @@ class RewardProfitSelector:
         max_drawdown_per_market: float = 3.0,
         per_market_cap_usdc: float = 120.0,
         reward_calibration_factor: float = 1.0,
+        quote_improvement_cents: float = 0.0,
+        max_quote_improvement_cost_usdc: float = 0.25,
     ) -> None:
         self.reward_share_floor = reward_share_floor
         self.reward_share_ceiling = reward_share_ceiling
@@ -381,6 +388,8 @@ class RewardProfitSelector:
         self.reward_calibration_factor = reward_calibration_factor
         self.maker_take_share = maker_take_share
         self.drawdown_factor_per_day = drawdown_factor_per_day
+        self.quote_improvement_cents = max(0.0, float(quote_improvement_cents))
+        self.max_quote_improvement_cost_usdc = max(0.0, float(max_quote_improvement_cost_usdc))
 
     def build_candidates(self, registry: dict[str, Any]) -> list[RewardProfitCandidate]:
         candidates, _diagnostics = self.build_candidates_with_diagnostics(registry)
@@ -568,6 +577,29 @@ class RewardProfitSelector:
         quote_spread = min(current_spread, reward_max_spread)
         quote_bid = round(max(0.0, midpoint - (quote_spread / 2.0)), 6)
         quote_ask = round(min(1.0, midpoint + (quote_spread / 2.0)), 6)
+        quote_improvement_per_share = 0.0
+        quote_improvement_reason = "NO_QUOTE_IMPROVEMENT"
+        requested_improvement = self.quote_improvement_cents / 100.0
+        if requested_improvement > 0.0:
+            max_maker_improvement = max(0.0, best_ask - quote_bid - 0.000001)
+            max_cost_improvement = (
+                self.max_quote_improvement_cost_usdc / quote_size
+                if self.max_quote_improvement_cost_usdc > 0.0 and quote_size > 0.0
+                else requested_improvement
+            )
+            quote_improvement_per_share = min(
+                requested_improvement,
+                max_maker_improvement,
+                max_cost_improvement,
+            )
+            if quote_improvement_per_share > 0.0:
+                quote_bid = round(quote_bid + quote_improvement_per_share, 6)
+                quote_spread = max(0.0, quote_ask - quote_bid)
+                quote_improvement_reason = "BID_IMPROVED_WITHIN_SPREAD"
+            elif max_maker_improvement <= 0.0:
+                quote_improvement_reason = "NO_ROOM_BEFORE_ASK"
+            else:
+                quote_improvement_reason = "MAX_IMPROVEMENT_COST_ZERO"
 
         liquidity_num = float(market.get("liquidity_num") or 0.0)
         volume_num = float(market.get("volume_num") or 0.0)
@@ -590,6 +622,7 @@ class RewardProfitSelector:
             share_floor,
             share_ceiling,
         )
+        quote_improvement_cost_usdc = round(quote_improvement_per_share * quote_size, 6)
 
         capital_basis_usdc = round(quote_size * best_ask, 6)
         immediate_entry_cost_usdc = round(quote_size * max(best_ask - best_bid, 0.0), 6)
@@ -693,6 +726,7 @@ class RewardProfitSelector:
             sizing_reason = "KELLY_DISABLED_REWARD_MIN_SIZE"
 
         # Recompute all size-dependent metrics with effective_quote_size
+        quote_improvement_cost_usdc = round(quote_improvement_per_share * effective_quote_size, 6)
         capital_basis_usdc = round(effective_quote_size * best_ask, 6)
         immediate_entry_cost_usdc = round(effective_quote_size * max(best_ask - best_bid, 0.0), 6)
         immediate_entry_cost_pct = round(
@@ -755,6 +789,9 @@ class RewardProfitSelector:
             sizing_mode=sizing_mode,
             effective_quote_size=round(effective_quote_size, 6),
             sizing_reason=sizing_reason,
+            quote_improvement_cents=round(quote_improvement_per_share * 100.0, 6),
+            quote_improvement_cost_usdc=quote_improvement_cost_usdc,
+            quote_improvement_reason=quote_improvement_reason,
             liquidity_factor=round(liquidity_factor, 6),
             activity_factor=round(activity_factor, 6),
         )
@@ -783,6 +820,8 @@ class RewardProfitSessionEngine:
             max_drawdown_per_market=config.max_drawdown_per_market,
             per_market_cap_usdc=config.per_market_cap_usdc,
             reward_calibration_factor=config.reward_calibration_factor,
+            quote_improvement_cents=config.quote_improvement_cents,
+            max_quote_improvement_cost_usdc=config.max_quote_improvement_cost_usdc,
         )
         self.registry_provider = registry_provider or _default_registry_provider
         self.reward_client_factory = reward_client_factory or _default_reward_client_factory
