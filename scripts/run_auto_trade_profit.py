@@ -83,6 +83,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--interval-sec", type=int, default=0)
     parser.add_argument("--reset-state", action="store_true")
     parser.add_argument("--keep-open-orders", action="store_true", help="Do not cancel live open orders when the run exits.")
+    parser.add_argument("--exclude-market-slug", action="append", dest="excluded_market_slugs", default=[], metavar="SLUG", help="Skip this market slug (repeatable).")
     parser.add_argument("--no-progress", action="store_true")
     parser.add_argument("--verbose", action="store_true")
     return parser.parse_args()
@@ -152,6 +153,7 @@ def main() -> None:
         verbose=bool(args.verbose),
         show_progress=not args.no_progress,
         cancel_open_orders_on_finish=not args.keep_open_orders,
+        excluded_market_slugs=list(args.excluded_market_slugs),
     )
     if args.reset_state:
         for path_str in (config.state_path, config.pnl_path):

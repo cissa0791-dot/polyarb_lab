@@ -148,6 +148,7 @@ class RewardProfitConfig:
     verbose: bool = False
     show_progress: bool = False
     cancel_open_orders_on_finish: bool = True
+    excluded_market_slugs: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -430,7 +431,9 @@ class RewardProfitSelector:
         reward_calibration_factor: float = 1.0,
         quote_improvement_cents: float = 0.0,
         max_quote_improvement_cost_usdc: float = 0.25,
+        excluded_market_slugs: list[str] | None = None,
     ) -> None:
+        self.excluded_market_slugs: set[str] = set(excluded_market_slugs or [])
         self.reward_share_floor = reward_share_floor
         self.reward_share_ceiling = reward_share_ceiling
         self.reward_share_quality_weight = reward_share_quality_weight
@@ -507,6 +510,8 @@ class RewardProfitSelector:
         return candidates, diagnostics
 
     def _candidate_prefilter_reason(self, market: dict[str, Any]) -> str | None:
+        if self.excluded_market_slugs and str(market.get("slug") or "") in self.excluded_market_slugs:
+            return "EXCLUDED_SLUG"
         if not bool(market.get("enable_orderbook")):
             return "NO_ORDERBOOK"
         if bool(market.get("fees_enabled")):
@@ -897,6 +902,7 @@ class RewardProfitSessionEngine:
             reward_calibration_factor=config.reward_calibration_factor,
             quote_improvement_cents=config.quote_improvement_cents,
             max_quote_improvement_cost_usdc=config.max_quote_improvement_cost_usdc,
+            excluded_market_slugs=list(config.excluded_market_slugs),
         )
         self.registry_provider = registry_provider or _default_registry_provider
         self.reward_client_factory = reward_client_factory or _default_reward_client_factory
