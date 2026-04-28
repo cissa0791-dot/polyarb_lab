@@ -12,7 +12,7 @@ from src.ingest.gamma import fetch_events, fetch_markets
 from src.intelligence.market_intelligence import build_event_market_registry
 from src.live.auth import load_live_credentials
 from src.live.broker import LiveBroker
-from src.live.client import LiveClientError, LiveOrderStatus, LiveWriteClient
+from src.live.client import LiveClientError, LiveOpenOrder, LiveOrderStatus, LiveWriteClient
 from src.live.rewards import RewardClient, RewardClientError
 
 
@@ -227,6 +227,14 @@ class RewardMarketState:
     reward_estimate_at_last_actual_usdc: float = 0.0
     reward_actual_vs_estimate_ratio: float = 0.0
     selection_metrics: dict[str, Any] = field(default_factory=dict)
+    live_synced_inventory_shares: float = 0.0
+    live_open_buy_order_count: int = 0
+    live_open_sell_order_count: int = 0
+    live_sync_ts: str | None = None
+    inventory_mode: str = "normal"
+    buy_block_reason: str | None = None
+    sell_cover_size: float = 0.0
+    external_order_sync_count: int = 0
 
 
 @dataclass
@@ -296,7 +304,13 @@ class RewardOrderManager:
         bid_order_id = market.bid_order_id
         ask_order_id = market.ask_order_id
 
-        if not bid_order_id:
+        if market.inventory_shares > 1e-9:
+            if bid_order_id:
+                self.cancel_order(bid_order_id)
+                bid_order_id = None
+                market.buy_block_reason = "INVENTORY_PRESENT_CANCEL_BUY"
+            market.inventory_mode = "sell_only"
+        if not bid_order_id and market.inventory_shares <= 1e-9:
             bid_intent = _make_order_intent(
                 candidate_id=f"reward_profit:{candidate.market_slug}:bid",
                 market_slug=candidate.market_slug,
@@ -313,18 +327,20 @@ class RewardOrderManager:
             bid_order_id = str(bid_report.metadata.get("live_order_id") or "")
 
         if not ask_order_id and market.inventory_shares > 0.0:
+            sell_size = _sellable_token_size(market.inventory_shares)
             ask_intent = _make_order_intent(
                 candidate_id=f"reward_profit:{candidate.market_slug}:ask",
                 market_slug=candidate.market_slug,
                 token_id=candidate.token_id,
                 side="SELL",
-                size=min(candidate.quote_size, market.inventory_shares),
+                size=sell_size,
                 limit_price=candidate.quote_ask,
                 neg_risk=candidate.neg_risk,
                 tick_size=candidate.tick_size,
             )
             ask_report = self.broker.submit_limit_order(ask_intent)
             ask_order_id = str(ask_report.metadata.get("live_order_id") or "")
+            market.sell_cover_size = round(sell_size, 6)
 
         return bid_order_id or None, ask_order_id or None
 
@@ -341,6 +357,27 @@ class RewardOrderManager:
         if not order_id or not self.live or self.write_client is None:
             return None
         return self.write_client.get_order_status(order_id)
+
+    def get_token_balance(self, token_id: str) -> float:
+        if not self.live or self.write_client is None:
+            return 0.0
+        return self.write_client.get_token_balance(token_id)
+
+    def get_open_orders(self, token_id: str) -> list[LiveOpenOrder]:
+        if not self.live or self.write_client is None:
+            return []
+        return self.write_client.get_open_orders(token_id)
+
+    def cancel_market_orders(self, token_id: str) -> Any:
+        if not self.live or self.write_client is None:
+            return {"dry_run": True, "asset_id": token_id}
+        return self.write_client.cancel_market_orders(token_id)
+
+
+def _sellable_token_size(balance: float, *, dust_shares: float = 0.00001) -> float:
+    raw_units = int(max(0.0, balance) * 1_000_000)
+    dust_units = int(max(0.0, dust_shares) * 1_000_000)
+    return round(max(0, raw_units - dust_units) / 1_000_000.0, 6)
 
 
 def _make_order_intent(
@@ -924,6 +961,9 @@ class RewardProfitSessionEngine:
             f"orders b{summary['open_bid_order_count']}/a{summary['open_ask_order_count']} "
             f"age {summary['max_order_age_sec']:.0f}s | "
             f"fill b{summary['bid_order_filled_shares']:.4f}/a{summary['ask_order_filled_shares']:.4f} | "
+            f"inv {summary['live_synced_inventory_shares']:.4f} | "
+            f"live buy {summary['live_open_buy_order_count']} sell {summary['live_open_sell_order_count']} | "
+            f"mode {summary['inventory_mode']} | "
             f"reward ${summary['reward_accrued_estimate_usdc'] + summary['reward_accrued_actual_usdc']:.4f} | "
             f"spread ${summary['spread_realized_usdc']:.4f} | "
             f"mtm ${summary['inventory_mtm_pnl_usdc']:.4f} | "
@@ -1092,6 +1132,7 @@ class RewardProfitSessionEngine:
                 )
                 state.markets[candidate.market_slug] = market_state
 
+            self._sync_live_market_state(market_state, candidate, now)
             self._advance_market_state(state, market_state, candidate, now)
 
         pnl_report = self._build_pnl_report(state)
@@ -1253,6 +1294,113 @@ class RewardProfitSessionEngine:
             and (market_state.bid_order_filled_size + market_state.ask_order_filled_size) <= 0.0
         ):
             self._close_market(market_state, exit_price=candidate.best_bid, reason="STAGNATION_NO_FILLS", state=state, now=now)
+
+    def _sync_live_market_state(
+        self,
+        market_state: RewardMarketState,
+        candidate: RewardProfitCandidate,
+        now: datetime,
+    ) -> None:
+        if not self.config.live:
+            return
+        try:
+            balance = self.order_manager.get_token_balance(candidate.token_id)
+            open_orders = self.order_manager.get_open_orders(candidate.token_id)
+        except Exception as exc:
+            market_state.last_order_error = f"live sync failed: {exc}"
+            return
+
+        market_state.live_sync_ts = now.isoformat()
+        market_state.live_synced_inventory_shares = round(balance, 6)
+        if balance > 1e-9:
+            previous_inventory_value = market_state.inventory_shares * market_state.avg_inventory_cost
+            external_delta = max(0.0, balance - market_state.inventory_shares)
+            if external_delta > 1e-9 and market_state.avg_inventory_cost <= 0.0:
+                market_state.avg_inventory_cost = candidate.quote_bid
+            elif external_delta > 1e-9 and market_state.inventory_shares > 1e-9:
+                total_cost = previous_inventory_value + external_delta * candidate.quote_bid
+                market_state.avg_inventory_cost = round(total_cost / balance, 6)
+            market_state.inventory_shares = round(balance, 6)
+            market_state.inventory_mode = "sell_only"
+            market_state.buy_block_reason = "INVENTORY_PRESENT"
+        else:
+            market_state.inventory_shares = 0.0
+            market_state.inventory_mode = "normal"
+            market_state.buy_block_reason = None
+
+        buys = [order for order in open_orders if order.side == "BUY" and order.size_remaining > 1e-9]
+        sells = [order for order in open_orders if order.side == "SELL" and order.size_remaining > 1e-9]
+        market_state.live_open_buy_order_count = len(buys)
+        market_state.live_open_sell_order_count = len(sells)
+        market_state.external_order_sync_count += len(open_orders)
+
+        if market_state.inventory_shares > 1e-9:
+            for order in buys:
+                if self.order_manager.cancel_order(order.order_id):
+                    market_state.cancel_count += 1
+                    market_state.last_cancel_reason = "INVENTORY_PRESENT_CANCEL_BUY"
+            market_state.bid_order_id = None
+            market_state.buy_block_reason = "INVENTORY_PRESENT_CANCEL_BUY" if buys else "INVENTORY_PRESENT"
+
+            sellable = _sellable_token_size(market_state.inventory_shares)
+            rebuild_sell = len(sells) > 1
+            if len(sells) == 1 and sells[0].size_remaining < sellable - 1e-6:
+                rebuild_sell = True
+                market_state.last_cancel_reason = "SELL_UNDER_COVERS_INVENTORY"
+            if rebuild_sell:
+                for order in sells:
+                    if self.order_manager.cancel_order(order.order_id):
+                        market_state.cancel_count += 1
+                self._clear_side_order(market_state, "ask", keep_status=False)
+                market_state.live_open_sell_order_count = 0
+                market_state.ask_order_id = None
+            elif len(sells) == 1:
+                self._bind_live_open_order(market_state, "ask", sells[0], now)
+                market_state.sell_cover_size = round(sells[0].size_remaining, 6)
+            else:
+                market_state.ask_order_id = None
+                market_state.sell_cover_size = round(sellable, 6)
+            return
+
+        if sells:
+            for order in sells:
+                if self.order_manager.cancel_order(order.order_id):
+                    market_state.cancel_count += 1
+                    market_state.last_cancel_reason = "CANCEL_SELL_NO_INVENTORY"
+            self._clear_side_order(market_state, "ask", keep_status=False)
+        if len(buys) > 1:
+            for order in buys[1:]:
+                if self.order_manager.cancel_order(order.order_id):
+                    market_state.cancel_count += 1
+                    market_state.last_cancel_reason = "DEDUP_BUY_OPEN_ORDERS"
+        if buys:
+            self._bind_live_open_order(market_state, "bid", buys[0], now)
+        else:
+            market_state.bid_order_id = None
+
+    def _bind_live_open_order(
+        self,
+        market_state: RewardMarketState,
+        side: str,
+        order: LiveOpenOrder,
+        now: datetime,
+    ) -> None:
+        if side == "bid":
+            market_state.bid_order_id = order.order_id
+            market_state.bid_order_created_ts = market_state.bid_order_created_ts or now.isoformat()
+            market_state.bid_order_price = order.price
+            market_state.bid_order_size = round(order.size, 6)
+            market_state.bid_order_filled_size = round(order.size_matched, 6)
+            market_state.bid_order_remaining_size = round(order.size_remaining, 6)
+            market_state.bid_order_status = order.status
+            return
+        market_state.ask_order_id = order.order_id
+        market_state.ask_order_created_ts = market_state.ask_order_created_ts or now.isoformat()
+        market_state.ask_order_price = order.price
+        market_state.ask_order_size = round(order.size, 6)
+        market_state.ask_order_filled_size = round(order.size_matched, 6)
+        market_state.ask_order_remaining_size = round(order.size_remaining, 6)
+        market_state.ask_order_status = order.status
 
     def _ensure_quote_orders(
         self,
@@ -1443,7 +1591,7 @@ class RewardProfitSessionEngine:
             if previous_bid_id is not None:
                 market_state.requote_count += 1
         if market_state.ask_order_id and market_state.ask_order_id != previous_ask_id:
-            ask_size = min(candidate.quote_size, market_state.inventory_shares)
+            ask_size = market_state.sell_cover_size or _sellable_token_size(market_state.inventory_shares)
             market_state.ask_order_created_ts = now.isoformat()
             market_state.ask_order_price = round(candidate.quote_ask, 6)
             market_state.ask_order_size = round(ask_size, 6)
@@ -1724,6 +1872,16 @@ class RewardProfitSessionEngine:
         cooldown_minutes: float | None = None,
     ) -> None:
         self._cancel_side_order(market_state, "bid", reason, count_requote=False)
+        if self.config.live and market_state.inventory_shares > 1e-9:
+            market_state.status = RewardMarketStatus.EXITING.value
+            market_state.inventory_mode = "sell_only"
+            market_state.buy_block_reason = "INVENTORY_PRESENT"
+            market_state.last_exit_reason = reason
+            market_state.capital_in_use_usdc = round(
+                market_state.inventory_shares * market_state.avg_inventory_cost,
+                6,
+            )
+            return
         self._cancel_side_order(market_state, "ask", reason, count_requote=False)
         market_state.status = RewardMarketStatus.PAUSED.value
         market_state.last_exit_reason = reason
@@ -1759,6 +1917,22 @@ class RewardProfitSessionEngine:
         now: datetime | None = None,
     ) -> None:
         self._cancel_side_order(market_state, "bid", reason, count_requote=False)
+        if self.config.live and market_state.inventory_shares > 1e-9:
+            market_state.status = RewardMarketStatus.EXITING.value
+            market_state.inventory_mode = "sell_only"
+            market_state.buy_block_reason = "INVENTORY_PRESENT"
+            market_state.last_exit_reason = reason
+            market_state.inventory_mtm_pnl_usdc = round(
+                market_state.inventory_shares * (exit_price - market_state.avg_inventory_cost),
+                6,
+            )
+            market_state.capital_in_use_usdc = round(
+                market_state.inventory_shares * market_state.avg_inventory_cost,
+                6,
+            )
+            if state is not None and now is not None:
+                self._start_cooldown(market_state, state=state, now=now)
+            return
         self._cancel_side_order(market_state, "ask", reason, count_requote=False)
         market_state.status = RewardMarketStatus.CLOSED.value
         market_state.last_exit_reason = reason
@@ -1936,6 +2110,10 @@ class RewardProfitSessionEngine:
         total_bid_filled = 0.0
         total_ask_filled = 0.0
         max_order_age_sec = 0.0
+        live_synced_inventory = 0.0
+        live_open_buy_orders = 0
+        live_open_sell_orders = 0
+        inventory_modes: set[str] = set()
         for market in state.markets.values():
             if market.status == RewardMarketStatus.QUOTING.value:
                 active_quote_count += 1
@@ -1947,6 +2125,10 @@ class RewardProfitSessionEngine:
                 open_ask_count += 1
             total_bid_filled += market.bid_order_filled_size
             total_ask_filled += market.ask_order_filled_size
+            live_synced_inventory += market.live_synced_inventory_shares
+            live_open_buy_orders += market.live_open_buy_order_count
+            live_open_sell_orders += market.live_open_sell_order_count
+            inventory_modes.add(market.inventory_mode)
             max_order_age_sec = max(max_order_age_sec, market.bid_order_age_sec, market.ask_order_age_sec)
             total_capital += market.capital_in_use_usdc
             total_reward_est += market.reward_accrued_estimate_usdc
@@ -1991,6 +2173,14 @@ class RewardProfitSessionEngine:
                 "sizing_mode": str(market.selection_metrics.get("sizing_mode") or ""),
                 "effective_quote_size": round(float(market.selection_metrics.get("effective_quote_size") or 0.0), 6),
                 "sizing_reason": str(market.selection_metrics.get("sizing_reason") or ""),
+                "live_synced_inventory_shares": round(market.live_synced_inventory_shares, 6),
+                "live_open_buy_order_count": market.live_open_buy_order_count,
+                "live_open_sell_order_count": market.live_open_sell_order_count,
+                "live_sync_ts": market.live_sync_ts,
+                "inventory_mode": market.inventory_mode,
+                "buy_block_reason": market.buy_block_reason,
+                "sell_cover_size": round(market.sell_cover_size, 6),
+                "external_order_sync_count": market.external_order_sync_count,
             }
             market_rows.append(market_row)
 
@@ -2024,6 +2214,10 @@ class RewardProfitSessionEngine:
                 "cooldown_market_count": cooldown_count,
                 "open_bid_order_count": open_bid_count,
                 "open_ask_order_count": open_ask_count,
+                "live_synced_inventory_shares": round(live_synced_inventory, 6),
+                "live_open_buy_order_count": live_open_buy_orders,
+                "live_open_sell_order_count": live_open_sell_orders,
+                "inventory_mode": "sell_only" if "sell_only" in inventory_modes else "normal",
                 "bid_order_filled_shares": round(total_bid_filled, 6),
                 "ask_order_filled_shares": round(total_ask_filled, 6),
                 "max_order_age_sec": round(max_order_age_sec, 3),

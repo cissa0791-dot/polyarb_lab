@@ -21,7 +21,7 @@ def parse_args() -> argparse.Namespace:
         description="Cancel all open orders for a Polymarket token, then place one limit SELL."
     )
     parser.add_argument("--token-id", required=True, help="Outcome token ID to flatten")
-    parser.add_argument("--size", type=float, required=True, help="Shares to sell")
+    parser.add_argument("--size", required=True, help="Shares to sell, or 'auto' for token balance minus dust")
     parser.add_argument("--price", type=float, required=True, help="Limit sell price, e.g. 0.463")
     parser.add_argument("--neg-risk", action="store_true", help="Force neg-risk order option")
     parser.add_argument("--tick-size", default=None, help="Optional tick size override, e.g. 0.001")
@@ -32,8 +32,6 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
-    if args.size <= 0:
-        raise SystemExit("--size must be positive")
     if not 0 < args.price < 1:
         raise SystemExit("--price must be between 0 and 1")
 
@@ -43,10 +41,25 @@ def main() -> int:
     creds = load_live_credentials()
 
     dry_run = not args.live
+    client = LiveWriteClient.from_credentials(
+        creds,
+        "https://clob.polymarket.com",
+        dry_run=dry_run,
+        signature_type=signature_type,
+        funder=funder,
+    )
+    if str(args.size).lower() == "auto":
+        balance = client.get_token_balance(args.token_id)
+        size = max(0.0, int(balance * 1_000_000 - 10) / 1_000_000.0)
+    else:
+        size = float(args.size)
+    if size <= 0:
+        raise SystemExit("--size must be positive")
+
     print("POLYMARKET EMERGENCY FLATTEN")
     print(f"Mode:    {'LIVE' if args.live else 'DRY_RUN'}")
     print(f"Token:   {args.token_id}")
-    print(f"Sell:    {args.size:.6f} @ {args.price:.6f}")
+    print(f"Sell:    {size:.6f} @ {args.price:.6f}")
 
     if not args.skip_cancel:
         if dry_run:
@@ -61,18 +74,11 @@ def main() -> int:
             cancel_result = raw_client.cancel_market_orders(asset_id=args.token_id)
             print(f"Cancel:  {cancel_result}")
 
-    client = LiveWriteClient.from_credentials(
-        creds,
-        "https://clob.polymarket.com",
-        dry_run=dry_run,
-        signature_type=signature_type,
-        funder=funder,
-    )
     result = client.submit_order(
         token_id=args.token_id,
         side="SELL",
         price=args.price,
-        size=args.size,
+        size=size,
         neg_risk=args.neg_risk,
         tick_size=args.tick_size,
     )
