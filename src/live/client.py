@@ -288,7 +288,11 @@ class LiveWriteClient:
                                  (raw.get("size_matched") if isinstance(raw, dict) else None) or
                                  0.0)
             total_size   = float(getattr(raw, "size", None) or
+                                 getattr(raw, "original_size", None) or
+                                 getattr(raw, "originalSize", None) or
                                  (raw.get("size") if isinstance(raw, dict) else None) or
+                                 (raw.get("original_size") if isinstance(raw, dict) else None) or
+                                 (raw.get("originalSize") if isinstance(raw, dict) else None) or
                                  0.0)
             size_remaining = max(0.0, total_size - size_matched)
             raw_id     = (getattr(raw, "id", None) or

@@ -59,6 +59,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--volume-spike-multiple", type=float, default=3.0)
     parser.add_argument("--stale-thesis-hours", type=float, default=24.0)
     parser.add_argument("--stale-thesis-max-price-change", type=float, default=0.02)
+    parser.add_argument("--live-order-max-age-sec", type=float, default=120.0)
+    parser.add_argument("--live-requote-price-move-cents", type=float, default=1.0)
     parser.add_argument("--event-limit", type=int, default=200)
     parser.add_argument("--market-limit", type=int, default=400)
     parser.add_argument("--cycles", type=int, default=1)
@@ -118,6 +120,8 @@ def main() -> None:
         volume_spike_multiple=args.volume_spike_multiple,
         stale_thesis_hours=args.stale_thesis_hours,
         stale_thesis_max_price_change=args.stale_thesis_max_price_change,
+        live_order_max_age_sec=args.live_order_max_age_sec,
+        live_requote_price_move_cents=args.live_requote_price_move_cents,
         event_limit=args.event_limit,
         market_limit=args.market_limit,
         cycles=args.cycles,
