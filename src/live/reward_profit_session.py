@@ -514,8 +514,6 @@ class RewardProfitSelector:
             return "EXCLUDED_SLUG"
         if not bool(market.get("enable_orderbook")):
             return "NO_ORDERBOOK"
-        if bool(market.get("fees_enabled")):
-            return "FEES_ENABLED"
         if not bool(market.get("is_binary_yes_no")):
             return "NOT_BINARY_YES_NO"
         if not market.get("yes_token_id"):
@@ -605,8 +603,6 @@ class RewardProfitSelector:
 
     def _build_candidate(self, *, event_slug: str, event_title: str | None, market: dict[str, Any]) -> RewardProfitCandidate | None:
         if not bool(market.get("enable_orderbook")):
-            return None
-        if bool(market.get("fees_enabled")):
             return None
         if not bool(market.get("is_binary_yes_no")):
             return None

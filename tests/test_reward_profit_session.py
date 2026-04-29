@@ -1650,6 +1650,7 @@ class RewardProfitSessionEngineTests(unittest.TestCase):
                         "title": "event 1",
                         "markets": [
                             valid_market,
+                            {**valid_market, "slug": "fee-enabled", "fees_enabled": True},
                             {**valid_market, "slug": "no-book", "enable_orderbook": False},
                             {**valid_market, "slug": "no-reward", "clob_rewards": []},
                         ],
@@ -1668,12 +1669,13 @@ class RewardProfitSessionEngineTests(unittest.TestCase):
             diagnostics = pnl["summary"]["scan_diagnostics"]
 
             self.assertEqual(diagnostics["raw_markets_seen"], 50)
-            self.assertEqual(diagnostics["registry_markets"], 3)
-            self.assertEqual(diagnostics["scored_candidates"], 1)
-            self.assertEqual(diagnostics["eligible_candidates"], 1)
+            self.assertEqual(diagnostics["registry_markets"], 4)
+            self.assertEqual(diagnostics["scored_candidates"], 2)
+            self.assertEqual(diagnostics["eligible_candidates"], 2)
             self.assertEqual(diagnostics["selected_markets"], 1)
             self.assertEqual(diagnostics["candidate_prefilter_reasons"]["NO_ORDERBOOK"], 1)
             self.assertEqual(diagnostics["candidate_prefilter_reasons"]["NO_CLOB_REWARD_RATE"], 1)
+            self.assertNotIn("FEES_ENABLED", diagnostics["candidate_prefilter_reasons"])
 
 
 if __name__ == "__main__":
