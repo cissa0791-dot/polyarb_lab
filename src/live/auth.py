@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from importlib import metadata
 
 from py_clob_client.client import ClobClient
 from py_clob_client.clob_types import ApiCreds
@@ -36,6 +37,27 @@ from py_clob_client.clob_types import ApiCreds
 
 class CredentialError(Exception):
     """Raised when required live-execution credentials are absent or invalid."""
+
+
+def assert_clob_v2_available() -> None:
+    """Fail fast when live trading would use the pre-V2 CLOB SDK.
+
+    Polymarket CLOB V2 uses a new EIP-712 exchange domain.  The old
+    ``py-clob-client`` package can still authenticate Level-2 requests, but
+    orders signed with it are rejected by the matching engine with
+    ``order_version_mismatch``.  The V2 wheel keeps the same import namespace
+    (``py_clob_client``), so package metadata is the reliable runtime guard.
+    """
+    try:
+        metadata.version("py-clob-client-v2")
+    except metadata.PackageNotFoundError as exc:
+        raise CredentialError(
+            "Polymarket live trading now requires py-clob-client-v2>=1.0.0. "
+            "Install it on the VPS with:\n"
+            "  python -m pip install -U py-clob-client-v2\n\n"
+            "The old py-clob-client package can pass auth but will reject live "
+            "orders with order_version_mismatch."
+        ) from exc
 
 
 # ---------------------------------------------------------------------------
@@ -150,6 +172,7 @@ def build_authenticated_client(
     Returns:
         Authenticated ClobClient ready for order submission.
     """
+    assert_clob_v2_available()
     return ClobClient(
         host=host,
         chain_id=creds.chain_id,

@@ -10,8 +10,10 @@ separate integration/dry-run test.
 from __future__ import annotations
 
 import unittest
+from importlib import metadata
+from unittest.mock import patch
 
-from src.live.auth import CredentialError, LiveCredentials, load_live_credentials
+from src.live.auth import CredentialError, LiveCredentials, assert_clob_v2_available, load_live_credentials
 
 
 _ALL_VARS = [
@@ -173,6 +175,15 @@ class TestLoadLiveCredentials(unittest.TestCase):
 
     def test_credential_error_is_exception(self) -> None:
         self.assertTrue(issubclass(CredentialError, Exception))
+
+    def test_clob_v2_guard_reports_install_command(self) -> None:
+        with patch("src.live.auth.metadata.version", side_effect=metadata.PackageNotFoundError):
+            with self.assertRaises(CredentialError) as ctx:
+                assert_clob_v2_available()
+
+        message = str(ctx.exception)
+        self.assertIn("py-clob-client-v2", message)
+        self.assertIn("order_version_mismatch", message)
 
 
 if __name__ == "__main__":

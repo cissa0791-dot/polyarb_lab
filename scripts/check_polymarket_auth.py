@@ -20,7 +20,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from py_clob_client.client import ClobClient
 from py_clob_client.clob_types import ApiCreds
 
-from src.live.auth import CredentialError, load_live_credentials
+from src.live.auth import CredentialError, assert_clob_v2_available, load_live_credentials
 
 
 CLOB_HOST = "https://clob.polymarket.com"
@@ -50,6 +50,14 @@ def _fetch_json(path: str) -> object:
 
 def main() -> int:
     print("POLYMARKET AUTH CHECK")
+
+    try:
+        assert_clob_v2_available()
+        print("CLOB SDK:           V2 OK")
+    except CredentialError as exc:
+        print("CLOB SDK:           FAIL")
+        print(str(exc))
+        return 2
 
     try:
         server_time = _fetch_json("/time")
