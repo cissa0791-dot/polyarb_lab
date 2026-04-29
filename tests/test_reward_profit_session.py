@@ -81,7 +81,7 @@ class _LiveLifecycleOrderManager(RewardOrderManager):
             bid_id = None
         if ask_id is None and market.inventory_shares > 0.0:
             ask_id = f"live-ask-{self.quote_calls}"
-            ask_size = round(max(0, int(market.inventory_shares * 1_000_000 - 10)) / 1_000_000.0, 6)
+            ask_size = round(max(0, int(market.inventory_shares * 1_000_000 - 100)) / 1_000_000.0, 6)
             market.sell_cover_size = round(ask_size, 6)
             self.submitted.append(("ask", ask_id, candidate.quote_ask, ask_size))
             self.statuses.setdefault(
@@ -1235,7 +1235,7 @@ class RewardProfitSessionEngineTests(unittest.TestCase):
 
     def test_live_run_cancels_open_orders_on_finish(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
-            manager = _CountingOrderManager()
+            manager = _LiveLifecycleOrderManager()
             config = RewardProfitConfig(
                 out_dir=tmpdir,
                 state_path=str(Path(tmpdir) / "s.json"),
@@ -1253,15 +1253,29 @@ class RewardProfitSessionEngineTests(unittest.TestCase):
                 order_manager=manager,
                 registry_provider=lambda cfg: {"events": []},
             )
+            candidate = _candidate(market_slug="m1", spread_capture_hour=1.0)
+            manager.token_balances[candidate.token_id] = 0.0
             state = engine.run_cycle(
-                scanned_candidates=[_candidate(market_slug="m1", spread_capture_hour=1.0)],
+                scanned_candidates=[candidate],
                 cycle_ts=datetime(2026, 4, 24, tzinfo=timezone.utc),
             )
+            bid_id = state.markets["m1"].bid_order_id
+            manager.open_orders[candidate.token_id] = [
+                LiveOpenOrder(
+                    order_id=str(bid_id),
+                    side="BUY",
+                    price=candidate.quote_bid,
+                    size=candidate.quote_size,
+                    size_matched=0.0,
+                    size_remaining=candidate.quote_size,
+                    status="open",
+                )
+            ]
 
-            self.assertEqual(state.markets["m1"].bid_order_id, "dry-bid-1")
+            self.assertEqual(bid_id, "live-bid-1")
             engine._cancel_open_orders_on_finish(state)
 
-            self.assertIn("dry-bid-1", manager.cancel_calls)
+            self.assertIn("live-bid-1", manager.cancel_calls)
             self.assertIsNone(state.markets["m1"].bid_order_id)
             self.assertEqual(state.markets["m1"].status, RewardMarketStatus.PAUSED.value)
             self.assertEqual(state.markets["m1"].last_exit_reason, "RUN_FINISHED_CANCEL_OPEN_ORDERS")
@@ -1483,6 +1497,9 @@ class RewardProfitSessionEngineTests(unittest.TestCase):
             self.assertIsNone(market.bid_order_id)
             self.assertEqual(market.ask_order_id, ask_id)
             self.assertEqual(market.last_exit_reason, "RUN_FINISHED_KEEP_REDUCE_ONLY_ASK")
+            self.assertEqual(market.finish_action, "PROTECT_INVENTORY_SELL_ONLY")
+            self.assertEqual(market.protected_sell_order_id, ask_id)
+            self.assertEqual(market.preserved_sell_count, 1)
             self.assertNotIn(ask_id, manager.cancel_calls)
 
     def test_live_sync_inventory_blocks_buy_and_places_sell(self) -> None:
@@ -1515,7 +1532,37 @@ class RewardProfitSessionEngineTests(unittest.TestCase):
             self.assertIsNone(market.bid_order_id)
             self.assertIsNotNone(market.ask_order_id)
             self.assertEqual([row[0] for row in manager.submitted], ["ask"])
-            self.assertAlmostEqual(market.sell_cover_size, 11.99999, places=6)
+            self.assertAlmostEqual(market.sell_cover_size, 11.9999, places=6)
+
+    def test_dry_run_does_not_call_live_account_sync(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manager = _LiveLifecycleOrderManager()
+            config = RewardProfitConfig(
+                out_dir=tmpdir,
+                state_path=str(Path(tmpdir) / "s.json"),
+                pnl_path=str(Path(tmpdir) / "p.json"),
+                max_entry_cost_usdc=10.0,
+                max_entry_cost_pct=1.0,
+                max_break_even_hours=100.0,
+                entry_mode="maker_first",
+                live=False,
+            )
+            engine = RewardProfitSessionEngine(
+                config,
+                reward_client_factory=lambda dry_run: None,
+                order_manager=manager,
+                registry_provider=lambda cfg: {"events": []},
+            )
+
+            state = engine.run_cycle(
+                scanned_candidates=[_candidate(market_slug="m1", spread_capture_hour=1.0)],
+                cycle_ts=datetime(2026, 4, 24, tzinfo=timezone.utc),
+            )
+            pnl = engine._build_pnl_report(state)
+
+            self.assertEqual(manager.quote_calls, 0)
+            self.assertEqual(pnl["summary"]["account_sync_enabled"], False)
+            self.assertEqual(pnl["summary"]["account_sync_mode"], "dry_run_disabled")
 
     def test_live_sync_cancels_open_buy_when_inventory_exists(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1583,7 +1630,65 @@ class RewardProfitSessionEngineTests(unittest.TestCase):
             self.assertIn("sell-2", manager.cancel_calls)
             self.assertIsNotNone(market.ask_order_id)
             self.assertEqual([row[0] for row in manager.submitted], ["ask"])
-            self.assertAlmostEqual(market.sell_cover_size, 8.99999, places=6)
+            self.assertAlmostEqual(market.sell_cover_size, 8.9999, places=6)
+
+    def test_live_inventory_share_limit_blocks_new_buy(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manager = _LiveLifecycleOrderManager()
+            config = RewardProfitConfig(
+                out_dir=tmpdir,
+                state_path=str(Path(tmpdir) / "s.json"),
+                pnl_path=str(Path(tmpdir) / "p.json"),
+                max_entry_cost_usdc=10.0,
+                max_entry_cost_pct=1.0,
+                max_break_even_hours=100.0,
+                entry_mode="maker_first",
+                live=True,
+                max_inventory_shares_per_market=50.0,
+            )
+            engine = RewardProfitSessionEngine(
+                config,
+                reward_client_factory=lambda dry_run: None,
+                order_manager=manager,
+                registry_provider=lambda cfg: {"events": []},
+            )
+            cand = _candidate(market_slug="m1", quote_size=60.0, capital=24.0, best_bid=0.35, best_ask=0.40)
+            manager.token_balances[cand.token_id] = 0.0
+
+            state = engine.run_cycle(scanned_candidates=[cand], cycle_ts=datetime(2026, 4, 24, tzinfo=timezone.utc))
+
+            self.assertEqual(state.selected_market_slugs, [])
+            self.assertEqual(state.last_filter_reasons["INVENTORY_LIMIT"], 1)
+            self.assertEqual(manager.submitted, [])
+
+    def test_live_inventory_usdc_limit_blocks_new_buy(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manager = _LiveLifecycleOrderManager()
+            config = RewardProfitConfig(
+                out_dir=tmpdir,
+                state_path=str(Path(tmpdir) / "s.json"),
+                pnl_path=str(Path(tmpdir) / "p.json"),
+                max_entry_cost_usdc=10.0,
+                max_entry_cost_pct=1.0,
+                max_break_even_hours=100.0,
+                entry_mode="maker_first",
+                live=True,
+                max_inventory_usdc_per_market=10.0,
+            )
+            engine = RewardProfitSessionEngine(
+                config,
+                reward_client_factory=lambda dry_run: None,
+                order_manager=manager,
+                registry_provider=lambda cfg: {"events": []},
+            )
+            cand = _candidate(market_slug="m1", quote_size=50.0, capital=20.0, best_bid=0.35, best_ask=0.40)
+            manager.token_balances[cand.token_id] = 0.0
+
+            state = engine.run_cycle(scanned_candidates=[cand], cycle_ts=datetime(2026, 4, 24, tzinfo=timezone.utc))
+
+            self.assertEqual(state.selected_market_slugs, [])
+            self.assertEqual(state.last_filter_reasons["INVENTORY_LIMIT"], 1)
+            self.assertEqual(manager.submitted, [])
 
     def test_report_includes_live_order_lifecycle_and_sizing(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1676,6 +1781,27 @@ class RewardProfitSessionEngineTests(unittest.TestCase):
             self.assertEqual(diagnostics["candidate_prefilter_reasons"]["NO_ORDERBOOK"], 1)
             self.assertEqual(diagnostics["candidate_prefilter_reasons"]["NO_CLOB_REWARD_RATE"], 1)
             self.assertNotIn("FEES_ENABLED", diagnostics["candidate_prefilter_reasons"])
+
+    def test_report_warns_when_scanned_candidate_count_is_low(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = RewardProfitConfig(
+                out_dir=tmpdir,
+                state_path=str(Path(tmpdir) / "s.json"),
+                pnl_path=str(Path(tmpdir) / "p.json"),
+            )
+            engine = RewardProfitSessionEngine(
+                config,
+                reward_client_factory=lambda dry_run: None,
+                order_manager=_CountingOrderManager(),
+                registry_provider=lambda cfg: {"events": []},
+            )
+            state = engine._load_state()
+            state.last_scan_diagnostics = {"raw_markets_seen": 2000}
+            state.last_scanned_candidate_count = 16
+
+            pnl = engine._build_pnl_report(state)
+
+            self.assertIn("LOW_SCANNED_CANDIDATE_COUNT", pnl["summary"]["warnings"])
 
 
 if __name__ == "__main__":

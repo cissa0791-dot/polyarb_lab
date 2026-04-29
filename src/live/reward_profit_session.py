@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import uuid
-from dataclasses import asdict, dataclass, field, replace
+from dataclasses import asdict, dataclass, field, fields as dataclass_fields, replace
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
@@ -140,6 +140,9 @@ class RewardProfitConfig:
     max_quote_improvement_cost_usdc: float = 0.25
     max_no_fill_requotes: int = 2
     no_fill_cooldown_minutes: float = 30.0
+    max_inventory_shares_per_market: float = 0.0
+    max_inventory_usdc_per_market: float = 0.0
+    inventory_dust_shares: float = 0.0001
     event_limit: int = 200
     market_limit: int = 400
     cycles: int = 1
@@ -236,6 +239,10 @@ class RewardMarketState:
     buy_block_reason: str | None = None
     sell_cover_size: float = 0.0
     external_order_sync_count: int = 0
+    finish_action: str | None = None
+    protected_sell_order_id: str | None = None
+    canceled_buy_count: int = 0
+    preserved_sell_count: int = 0
 
 
 @dataclass
@@ -375,7 +382,7 @@ class RewardOrderManager:
         return self.write_client.cancel_market_orders(token_id)
 
 
-def _sellable_token_size(balance: float, *, dust_shares: float = 0.00001) -> float:
+def _sellable_token_size(balance: float, *, dust_shares: float = 0.0001) -> float:
     raw_units = int(max(0.0, balance) * 1_000_000)
     dust_units = int(max(0.0, dust_shares) * 1_000_000)
     return round(max(0, raw_units - dust_units) / 1_000_000.0, 6)
@@ -995,6 +1002,17 @@ class RewardProfitSessionEngine:
             return "ENTRY_COST_PCT"
         if self.config.max_break_even_hours > 0.0 and item.break_even_hours > self.config.max_break_even_hours + 1e-9:
             return "BREAK_EVEN_HOURS"
+        if self.config.live:
+            if (
+                self.config.max_inventory_shares_per_market > 0.0
+                and item.quote_size > self.config.max_inventory_shares_per_market + 1e-9
+            ):
+                return "INVENTORY_LIMIT"
+            if (
+                self.config.max_inventory_usdc_per_market > 0.0
+                and item.quote_size * item.quote_bid > self.config.max_inventory_usdc_per_market + 1e-9
+            ):
+                return "INVENTORY_LIMIT"
         if self.config.min_reward_minus_drawdown_per_hour > 0.0 and item.reward_minus_drawdown_per_hour < self.config.min_reward_minus_drawdown_per_hour:
             return "REWARD_MINUS_DRAWDOWN"
         if self.config.min_reward_per_dollar_inventory_per_hour > 0.0 and item.reward_per_dollar_inventory_per_hour < self.config.min_reward_per_dollar_inventory_per_hour:
@@ -1314,7 +1332,9 @@ class RewardProfitSessionEngine:
 
         market_state.live_sync_ts = now.isoformat()
         market_state.live_synced_inventory_shares = round(balance, 6)
-        if balance > 1e-9:
+        dust = max(0.0, float(self.config.inventory_dust_shares))
+        has_inventory = balance > dust + 1e-9
+        if has_inventory:
             previous_inventory_value = market_state.inventory_shares * market_state.avg_inventory_cost
             external_delta = max(0.0, balance - market_state.inventory_shares)
             if external_delta > 1e-9 and market_state.avg_inventory_cost <= 0.0:
@@ -1336,15 +1356,19 @@ class RewardProfitSessionEngine:
         market_state.live_open_sell_order_count = len(sells)
         market_state.external_order_sync_count += len(open_orders)
 
-        if market_state.inventory_shares > 1e-9:
+        if market_state.inventory_shares > dust + 1e-9:
             for order in buys:
                 if self.order_manager.cancel_order(order.order_id):
                     market_state.cancel_count += 1
+                    market_state.canceled_buy_count += 1
                     market_state.last_cancel_reason = "INVENTORY_PRESENT_CANCEL_BUY"
             market_state.bid_order_id = None
             market_state.buy_block_reason = "INVENTORY_PRESENT_CANCEL_BUY" if buys else "INVENTORY_PRESENT"
 
-            sellable = _sellable_token_size(market_state.inventory_shares)
+            if self._inventory_limit_reached(market_state, candidate):
+                market_state.buy_block_reason = "INVENTORY_LIMIT"
+
+            sellable = _sellable_token_size(market_state.inventory_shares, dust_shares=dust)
             rebuild_sell = len(sells) > 1
             if len(sells) == 1 and sells[0].size_remaining < sellable - 1e-6:
                 rebuild_sell = True
@@ -1359,6 +1383,8 @@ class RewardProfitSessionEngine:
             elif len(sells) == 1:
                 self._bind_live_open_order(market_state, "ask", sells[0], now)
                 market_state.sell_cover_size = round(sells[0].size_remaining, 6)
+                market_state.protected_sell_order_id = sells[0].order_id
+                market_state.preserved_sell_count = 1
             else:
                 market_state.ask_order_id = None
                 market_state.sell_cover_size = round(sellable, 6)
@@ -1370,6 +1396,8 @@ class RewardProfitSessionEngine:
                     market_state.cancel_count += 1
                     market_state.last_cancel_reason = "CANCEL_SELL_NO_INVENTORY"
             self._clear_side_order(market_state, "ask", keep_status=False)
+        else:
+            market_state.ask_order_id = None
         if len(buys) > 1:
             for order in buys[1:]:
                 if self.order_manager.cancel_order(order.order_id):
@@ -1412,6 +1440,19 @@ class RewardProfitSessionEngine:
     ) -> tuple[str | None, str | None]:
         if self.config.entry_mode != "maker_first":
             return self.order_manager.ensure_quote_orders(market_state, candidate)
+        if self.config.live and self._inventory_limit_reached(market_state, candidate):
+            if market_state.bid_order_id:
+                self._cancel_side_order(
+                    market_state,
+                    "bid",
+                    "INVENTORY_LIMIT_CANCEL_BUY",
+                    count_requote=False,
+                )
+                market_state.canceled_buy_count += 1
+            market_state.inventory_mode = "sell_only"
+            market_state.buy_block_reason = "INVENTORY_LIMIT"
+            if market_state.inventory_shares <= self.config.inventory_dust_shares + 1e-9:
+                return None, None
         if self.config.live:
             return self.order_manager.ensure_quote_orders(market_state, candidate)
 
@@ -1420,6 +1461,23 @@ class RewardProfitSessionEngine:
         if market_state.inventory_shares > 0.0:
             ask_order_id = ask_order_id or f"dry-ask-{uuid.uuid4().hex[:10]}"
         return bid_order_id, ask_order_id
+
+    def _inventory_limit_reached(
+        self,
+        market_state: RewardMarketState,
+        candidate: RewardProfitCandidate,
+    ) -> bool:
+        max_shares = float(self.config.max_inventory_shares_per_market)
+        if max_shares > 0.0 and market_state.inventory_shares >= max_shares - 1e-9:
+            return True
+        max_usdc = float(self.config.max_inventory_usdc_per_market)
+        if max_usdc > 0.0:
+            inventory_cost = market_state.inventory_shares * (
+                market_state.avg_inventory_cost or candidate.quote_bid or candidate.best_bid
+            )
+            if inventory_cost >= max_usdc - 1e-9:
+                return True
+        return False
 
     def _candidate_with_execution_quote(
         self,
@@ -1844,25 +1902,57 @@ class RewardProfitSessionEngine:
 
     def _cancel_open_orders_on_finish(self, state: RewardProfitSessionState) -> None:
         for market_state in state.markets.values():
+            candidate = self._candidate_from_market_state(market_state)
+            if candidate is not None:
+                self._sync_live_market_state(market_state, candidate, _utc_now())
             had_open_order = bool(market_state.bid_order_id or market_state.ask_order_id)
-            if not had_open_order:
+            has_inventory = market_state.inventory_shares > self.config.inventory_dust_shares + 1e-9
+            if not had_open_order and not has_inventory:
+                market_state.finish_action = "NO_OPEN_ORDERS"
                 continue
             if market_state.bid_order_id and self.order_manager.cancel_order(market_state.bid_order_id):
                 market_state.cancel_count += 1
-            if (
-                market_state.ask_order_id
-                and market_state.inventory_shares <= 1e-9
-                and self.order_manager.cancel_order(market_state.ask_order_id)
-            ):
-                market_state.cancel_count += 1
+                market_state.canceled_buy_count += 1
             self._clear_side_order(market_state, "bid", keep_status=False)
-            if market_state.inventory_shares <= 1e-9:
+            if not has_inventory:
+                if market_state.ask_order_id and self.order_manager.cancel_order(market_state.ask_order_id):
+                    market_state.cancel_count += 1
                 self._clear_side_order(market_state, "ask", keep_status=False)
                 market_state.last_exit_reason = "RUN_FINISHED_CANCEL_OPEN_ORDERS"
+                market_state.finish_action = "CANCEL_OPEN_ORDERS"
             else:
+                market_state.inventory_mode = "sell_only"
+                market_state.buy_block_reason = market_state.buy_block_reason or "INVENTORY_PRESENT"
+                if market_state.ask_order_id is None and candidate is not None:
+                    previous_bid_id = market_state.bid_order_id
+                    previous_ask_id = market_state.ask_order_id
+                    bid_order_id, ask_order_id = self._ensure_quote_orders(market_state, candidate, _utc_now())
+                    market_state.bid_order_id = bid_order_id
+                    market_state.ask_order_id = ask_order_id
+                    self._record_new_order_metadata(
+                        market_state,
+                        candidate,
+                        _utc_now(),
+                        previous_bid_id,
+                        previous_ask_id,
+                    )
+                market_state.protected_sell_order_id = market_state.ask_order_id
+                market_state.preserved_sell_count = 1 if market_state.ask_order_id else 0
                 market_state.last_exit_reason = "RUN_FINISHED_KEEP_REDUCE_ONLY_ASK"
-            if market_state.inventory_shares <= 0.0:
+                market_state.finish_action = "PROTECT_INVENTORY_SELL_ONLY"
+            if market_state.inventory_shares <= self.config.inventory_dust_shares + 1e-9:
                 market_state.status = RewardMarketStatus.PAUSED.value
+
+    @staticmethod
+    def _candidate_from_market_state(market_state: RewardMarketState) -> RewardProfitCandidate | None:
+        if not market_state.selection_metrics:
+            return None
+        field_names = {item.name for item in dataclass_fields(RewardProfitCandidate)}
+        payload = {key: value for key, value in market_state.selection_metrics.items() if key in field_names}
+        try:
+            return RewardProfitCandidate(**payload)
+        except TypeError:
+            return None
 
     def _pause_market(
         self,
@@ -2183,6 +2273,10 @@ class RewardProfitSessionEngine:
                 "buy_block_reason": market.buy_block_reason,
                 "sell_cover_size": round(market.sell_cover_size, 6),
                 "external_order_sync_count": market.external_order_sync_count,
+                "finish_action": market.finish_action,
+                "protected_sell_order_id": market.protected_sell_order_id,
+                "canceled_buy_count": market.canceled_buy_count,
+                "preserved_sell_count": market.preserved_sell_count,
             }
             market_rows.append(market_row)
 
@@ -2196,6 +2290,10 @@ class RewardProfitSessionEngine:
             6,
         )
         verified_net_after_reward_and_cost = round(verified_net_after_reward - total_cost_proxy, 6)
+        warnings: list[str] = []
+        raw_seen = int(state.last_scan_diagnostics.get("raw_markets_seen") or 0)
+        if raw_seen >= 1000 and state.last_scanned_candidate_count < 100:
+            warnings.append("LOW_SCANNED_CANDIDATE_COUNT")
         return {
             "report_type": "reward_profit_pnl",
             "session_id": state.session_id,
@@ -2210,6 +2308,9 @@ class RewardProfitSessionEngine:
                 "last_filter_reasons": dict(state.last_filter_reasons),
                 "last_selection_reasons": dict(state.last_selection_reasons),
                 "scan_diagnostics": dict(state.last_scan_diagnostics),
+                "warnings": warnings,
+                "account_sync_enabled": bool(self.config.live),
+                "account_sync_mode": "live_enabled" if self.config.live else "dry_run_disabled",
                 "capital_limit_usdc": round(state.capital_limit_usdc, 6),
                 "capital_in_use_usdc": round(total_capital, 6),
                 "active_quote_market_count": active_quote_count,
@@ -2220,6 +2321,10 @@ class RewardProfitSessionEngine:
                 "live_open_buy_order_count": live_open_buy_orders,
                 "live_open_sell_order_count": live_open_sell_orders,
                 "inventory_mode": "sell_only" if "sell_only" in inventory_modes else "normal",
+                "finish_action": next((market.finish_action for market in state.markets.values() if market.finish_action), None),
+                "protected_sell_order_id": next((market.protected_sell_order_id for market in state.markets.values() if market.protected_sell_order_id), None),
+                "canceled_buy_count": sum(market.canceled_buy_count for market in state.markets.values()),
+                "preserved_sell_count": sum(market.preserved_sell_count for market in state.markets.values()),
                 "bid_order_filled_shares": round(total_bid_filled, 6),
                 "ask_order_filled_shares": round(total_ask_filled, 6),
                 "max_order_age_sec": round(max_order_age_sec, 3),

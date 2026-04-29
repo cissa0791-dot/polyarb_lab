@@ -77,6 +77,9 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--max-no-fill-requotes", type=int, default=2)
     parser.add_argument("--no-fill-cooldown-minutes", type=float, default=30.0)
+    parser.add_argument("--max-inventory-shares-per-market", type=float, default=None)
+    parser.add_argument("--max-inventory-usdc-per-market", type=float, default=None)
+    parser.add_argument("--inventory-dust-shares", type=float, default=0.0001)
     parser.add_argument("--event-limit", type=int, default=200)
     parser.add_argument("--market-limit", type=int, default=400)
     parser.add_argument("--cycles", type=int, default=1)
@@ -91,6 +94,16 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    max_inventory_shares = (
+        float(args.max_inventory_shares_per_market)
+        if args.max_inventory_shares_per_market is not None
+        else (50.0 if args.live else 0.0)
+    )
+    max_inventory_usdc = (
+        float(args.max_inventory_usdc_per_market)
+        if args.max_inventory_usdc_per_market is not None
+        else (min(float(args.per_market_cap), 25.0) if args.live else 0.0)
+    )
     config = RewardProfitConfig(
         out_dir=str(ROOT / "data" / "reports"),
         state_path=str(ROOT / "data" / "reports" / "auto_trade_profit_state_latest.json"),
@@ -145,6 +158,9 @@ def main() -> None:
         max_quote_improvement_cost_usdc=args.max_quote_improvement_cost_usdc,
         max_no_fill_requotes=args.max_no_fill_requotes,
         no_fill_cooldown_minutes=args.no_fill_cooldown_minutes,
+        max_inventory_shares_per_market=max_inventory_shares,
+        max_inventory_usdc_per_market=max_inventory_usdc,
+        inventory_dust_shares=args.inventory_dust_shares,
         event_limit=args.event_limit,
         market_limit=args.market_limit,
         cycles=args.cycles,
