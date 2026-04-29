@@ -322,8 +322,28 @@ class RewardOrderManager:
                 tick_size=candidate.tick_size,
             )
             bid_report = self.broker.submit_limit_order(bid_intent)
-            if bid_report.metadata.get("error"):
-                print(f"[BROKER] bid REJECTED for {candidate.market_slug}: {bid_report.metadata['error']}", flush=True)
+            error_str = str(bid_report.metadata.get("error") or "")
+            if error_str:
+                print(f"[BROKER] bid REJECTED for {candidate.market_slug}: {error_str}", flush=True)
+                if "crosses the book" in error_str.lower():
+                    adjusted_price = round(candidate.quote_bid - 0.01, 6)
+                    if adjusted_price >= 0.01:
+                        adj_intent = _make_order_intent(
+                            candidate_id=f"reward_profit:{candidate.market_slug}:bid",
+                            market_slug=candidate.market_slug,
+                            token_id=candidate.token_id,
+                            side="BUY",
+                            size=candidate.quote_size,
+                            limit_price=adjusted_price,
+                            neg_risk=candidate.neg_risk,
+                            tick_size=candidate.tick_size,
+                        )
+                        bid_report = self.broker.submit_limit_order(adj_intent)
+                        retry_err = str(bid_report.metadata.get("error") or "")
+                        if retry_err:
+                            print(f"[BROKER] bid REJECTED after -1tick for {candidate.market_slug}: {retry_err}", flush=True)
+                        else:
+                            print(f"[BROKER] bid placed at adjusted price {adjusted_price:.6f} for {candidate.market_slug}", flush=True)
             bid_order_id = str(bid_report.metadata.get("live_order_id") or "")
 
         if not ask_order_id and market.inventory_shares > 0.0:
@@ -804,7 +824,7 @@ class RewardProfitSelector:
         if requested_improvement > 0.0:
             # Apply price improvement after candidate scoring. This keeps selection
             # based on the full spread, while live execution can queue closer to midpoint.
-            max_maker_improvement = max(0.0, best_ask - quote_bid - 0.000001)
+            max_maker_improvement = max(0.0, best_ask - quote_bid - 0.01)
             max_cost_improvement = (
                 self.max_quote_improvement_cost_usdc / effective_quote_size
                 if self.max_quote_improvement_cost_usdc > 0.0 and effective_quote_size > 0.0
