@@ -39,6 +39,7 @@ from py_clob_client.client import ClobClient
 from py_clob_client.clob_types import (
     AssetType,
     BalanceAllowanceParams,
+    CreateOrderOptions,
     OpenOrderParams,
     OrderArgs,
     PartialCreateOrderOptions,
@@ -265,6 +266,20 @@ class LiveWriteClient:
         tick_size: str | None,
         neg_risk: bool,
     ) -> dict[str, Any]:
+        builder = getattr(self._client, "builder", None)
+        post_order = getattr(self._client, "post_order", None)
+        if builder is not None and post_order is not None and tick_size is not None:
+            resolve_fee_rate = getattr(self._client, "_ClobClient__resolve_fee_rate", None)
+            if callable(resolve_fee_rate):
+                order_args.fee_rate_bps = resolve_fee_rate(order_args.token_id, order_args.fee_rate_bps)
+            order = builder.create_order(
+                order_args,
+                CreateOrderOptions(
+                    tick_size=tick_size,
+                    neg_risk=bool(neg_risk),
+                ),
+            )
+            return post_order(order)
         options = PartialCreateOrderOptions(
             tick_size=tick_size,
             neg_risk=neg_risk,

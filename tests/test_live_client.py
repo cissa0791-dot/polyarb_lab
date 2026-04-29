@@ -84,6 +84,25 @@ class _FakeClient:
         return self._order_response
 
 
+class _FakeBuilder:
+    def __init__(self, owner):
+        self.owner = owner
+
+    def create_order(self, order_args, options):
+        self.owner.calls.append(("builder.create_order", order_args, options))
+        return {"order_args": order_args, "options": options}
+
+
+class _FakeBuilderClient(_FakeClient):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.builder = _FakeBuilder(self)
+
+    def post_order(self, order):
+        self.calls.append(("post_order", order))
+        return self._submit_response
+
+
 def _dry_client(**kwargs) -> LiveWriteClient:
     return LiveWriteClient(_FakeClient(**kwargs), dry_run=True)
 
@@ -230,6 +249,16 @@ class TestSubmitOrderLive(unittest.TestCase):
         self.assertEqual(result.order_id, "fake-order-123")
         self.assertEqual(len(order_calls), 2)
         self.assertFalse(order_calls[1][2].neg_risk)
+
+    def test_builder_path_preserves_false_neg_risk(self) -> None:
+        fake = _FakeBuilderClient(neg_risk=False)
+        client = LiveWriteClient(fake, dry_run=False)
+
+        result = client.submit_order("tok", "BUY", 0.50, 10.0, neg_risk=True)
+
+        builder_call = next(call for call in fake.calls if call[0] == "builder.create_order")
+        self.assertEqual(result.order_id, "fake-order-123")
+        self.assertFalse(builder_call[2].neg_risk)
 
     def test_normalizes_exception_to_live_client_error(self) -> None:
         fake = _FakeClient(raises=RuntimeError("CLOB unavailable"))
