@@ -63,7 +63,8 @@ class _LiveLifecycleOrderManager(RewardOrderManager):
         self.quote_calls += 1
         bid_id = market.bid_order_id
         ask_id = market.ask_order_id
-        if bid_id is None and market.inventory_shares <= 1e-9:
+        allow_bid_with_inventory = bool(getattr(market, "allow_bid_with_inventory", False))
+        if bid_id is None and (market.inventory_shares <= 1e-9 or allow_bid_with_inventory):
             bid_id = f"live-bid-{self.quote_calls}"
             self.submitted.append(("bid", bid_id, candidate.quote_bid, candidate.quote_size))
             self.statuses.setdefault(
@@ -76,7 +77,7 @@ class _LiveLifecycleOrderManager(RewardOrderManager):
                     avg_price=None,
                 ),
             )
-        if bid_id is not None and market.inventory_shares > 1e-9:
+        if bid_id is not None and market.inventory_shares > 1e-9 and not allow_bid_with_inventory:
             self.cancel_order(bid_id)
             bid_id = None
         if ask_id is None and market.inventory_shares > 0.0:
@@ -1589,6 +1590,41 @@ class RewardProfitSessionEngineTests(unittest.TestCase):
             self.assertIsNotNone(market.ask_order_id)
             self.assertEqual([row[0] for row in manager.submitted], ["ask"])
             self.assertAlmostEqual(market.sell_cover_size, 11.9999, places=6)
+
+    def test_balanced_inventory_policy_treats_existing_inventory_as_selected_market(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manager = _LiveLifecycleOrderManager()
+            config = RewardProfitConfig(
+                out_dir=tmpdir,
+                state_path=str(Path(tmpdir) / "s.json"),
+                pnl_path=str(Path(tmpdir) / "p.json"),
+                max_entry_cost_usdc=10.0,
+                max_entry_cost_pct=1.0,
+                max_break_even_hours=100.0,
+                entry_mode="maker_first",
+                live=True,
+                inventory_policy="balanced",
+                max_inventory_shares_per_market=100.0,
+                max_inventory_usdc_per_market=100.0,
+            )
+            engine = RewardProfitSessionEngine(
+                config,
+                reward_client_factory=lambda dry_run: None,
+                order_manager=manager,
+                registry_provider=lambda cfg: {"events": []},
+            )
+            cand = _candidate(market_slug="m1", quote_size=10.0, best_bid=0.35, best_ask=0.40, spread_capture_hour=1.0)
+            manager.token_balances[cand.token_id] = 50.0
+
+            state = engine.run_cycle(scanned_candidates=[cand], cycle_ts=datetime(2026, 4, 24, tzinfo=timezone.utc))
+            market = state.markets["m1"]
+
+            self.assertEqual(market.inventory_mode, "balanced")
+            self.assertTrue(market.allow_bid_with_inventory)
+            self.assertIsNone(market.buy_block_reason)
+            self.assertIsNotNone(market.bid_order_id)
+            self.assertIsNotNone(market.ask_order_id)
+            self.assertEqual([row[0] for row in manager.submitted], ["bid", "ask"])
 
     def test_dry_run_does_not_call_live_account_sync(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

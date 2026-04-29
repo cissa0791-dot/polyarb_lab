@@ -143,6 +143,7 @@ class RewardProfitConfig:
     max_inventory_shares_per_market: float = 0.0
     max_inventory_usdc_per_market: float = 0.0
     inventory_dust_shares: float = 0.0001
+    inventory_policy: str = "sell_only"
     event_limit: int = 200
     market_limit: int = 400
     cycles: int = 1
@@ -237,6 +238,7 @@ class RewardMarketState:
     live_sync_ts: str | None = None
     inventory_mode: str = "normal"
     buy_block_reason: str | None = None
+    allow_bid_with_inventory: bool = False
     sell_cover_size: float = 0.0
     external_order_sync_count: int = 0
     finish_action: str | None = None
@@ -312,13 +314,14 @@ class RewardOrderManager:
         bid_order_id = market.bid_order_id
         ask_order_id = market.ask_order_id
 
-        if market.inventory_shares > 1e-9:
+        allow_bid_with_inventory = bool(getattr(market, "allow_bid_with_inventory", False))
+        if market.inventory_shares > 1e-9 and not allow_bid_with_inventory:
             if bid_order_id:
                 self.cancel_order(bid_order_id)
                 bid_order_id = None
                 market.buy_block_reason = "INVENTORY_PRESENT_CANCEL_BUY"
             market.inventory_mode = "sell_only"
-        if not bid_order_id and market.inventory_shares <= 1e-9:
+        if not bid_order_id and (market.inventory_shares <= 1e-9 or allow_bid_with_inventory):
             bid_intent = _make_order_intent(
                 candidate_id=f"reward_profit:{candidate.market_slug}:bid",
                 market_slug=candidate.market_slug,
@@ -1362,6 +1365,7 @@ class RewardProfitSessionEngine:
         market_state.live_synced_inventory_shares = round(balance, 6)
         dust = max(0.0, float(self.config.inventory_dust_shares))
         has_inventory = balance > dust + 1e-9
+        balanced_inventory = self.config.inventory_policy == "balanced"
         if has_inventory:
             previous_inventory_value = market_state.inventory_shares * market_state.avg_inventory_cost
             external_delta = max(0.0, balance - market_state.inventory_shares)
@@ -1371,12 +1375,14 @@ class RewardProfitSessionEngine:
                 total_cost = previous_inventory_value + external_delta * candidate.quote_bid
                 market_state.avg_inventory_cost = round(total_cost / balance, 6)
             market_state.inventory_shares = round(balance, 6)
-            market_state.inventory_mode = "sell_only"
-            market_state.buy_block_reason = "INVENTORY_PRESENT"
+            market_state.inventory_mode = "balanced" if balanced_inventory else "sell_only"
+            market_state.buy_block_reason = None if balanced_inventory else "INVENTORY_PRESENT"
+            market_state.allow_bid_with_inventory = balanced_inventory
         else:
             market_state.inventory_shares = 0.0
             market_state.inventory_mode = "normal"
             market_state.buy_block_reason = None
+            market_state.allow_bid_with_inventory = False
 
         buys = [order for order in open_orders if order.side == "BUY" and order.size_remaining > 1e-9]
         sells = [order for order in open_orders if order.side == "SELL" and order.size_remaining > 1e-9]
@@ -1385,16 +1391,21 @@ class RewardProfitSessionEngine:
         market_state.external_order_sync_count += len(open_orders)
 
         if market_state.inventory_shares > dust + 1e-9:
-            for order in buys:
-                if self.order_manager.cancel_order(order.order_id):
-                    market_state.cancel_count += 1
-                    market_state.canceled_buy_count += 1
-                    market_state.last_cancel_reason = "INVENTORY_PRESENT_CANCEL_BUY"
-            market_state.bid_order_id = None
-            market_state.buy_block_reason = "INVENTORY_PRESENT_CANCEL_BUY" if buys else "INVENTORY_PRESENT"
-
-            if self._inventory_limit_reached(market_state, candidate):
+            limit_reached = self._inventory_limit_reached(market_state, candidate)
+            if not balanced_inventory or limit_reached:
+                for order in buys:
+                    if self.order_manager.cancel_order(order.order_id):
+                        market_state.cancel_count += 1
+                        market_state.canceled_buy_count += 1
+                        market_state.last_cancel_reason = "INVENTORY_PRESENT_CANCEL_BUY"
+                market_state.bid_order_id = None
+                market_state.allow_bid_with_inventory = False
+                market_state.inventory_mode = "sell_only"
+                market_state.buy_block_reason = "INVENTORY_PRESENT_CANCEL_BUY" if buys else "INVENTORY_PRESENT"
+            if limit_reached:
                 market_state.buy_block_reason = "INVENTORY_LIMIT"
+                market_state.inventory_mode = "sell_only"
+                market_state.allow_bid_with_inventory = False
 
             sellable = _sellable_token_size(market_state.inventory_shares, dust_shares=dust)
             rebuild_sell = len(sells) > 1
@@ -1416,16 +1427,18 @@ class RewardProfitSessionEngine:
             else:
                 market_state.ask_order_id = None
                 market_state.sell_cover_size = round(sellable, 6)
-            return
+            if not balanced_inventory or limit_reached:
+                return
 
-        if sells:
-            for order in sells:
-                if self.order_manager.cancel_order(order.order_id):
-                    market_state.cancel_count += 1
-                    market_state.last_cancel_reason = "CANCEL_SELL_NO_INVENTORY"
-            self._clear_side_order(market_state, "ask", keep_status=False)
-        else:
-            market_state.ask_order_id = None
+        if market_state.inventory_shares <= dust + 1e-9:
+            if sells:
+                for order in sells:
+                    if self.order_manager.cancel_order(order.order_id):
+                        market_state.cancel_count += 1
+                        market_state.last_cancel_reason = "CANCEL_SELL_NO_INVENTORY"
+                self._clear_side_order(market_state, "ask", keep_status=False)
+            else:
+                market_state.ask_order_id = None
         if len(buys) > 1:
             for order in buys[1:]:
                 if self.order_manager.cancel_order(order.order_id):
@@ -1469,6 +1482,7 @@ class RewardProfitSessionEngine:
         if self.config.entry_mode != "maker_first":
             return self.order_manager.ensure_quote_orders(market_state, candidate)
         if self.config.live and self._inventory_limit_reached(market_state, candidate):
+            market_state.allow_bid_with_inventory = False
             if market_state.bid_order_id:
                 self._cancel_side_order(
                     market_state,
@@ -2304,6 +2318,7 @@ class RewardProfitSessionEngine:
                 "live_sync_ts": market.live_sync_ts,
                 "inventory_mode": market.inventory_mode,
                 "buy_block_reason": market.buy_block_reason,
+                "allow_bid_with_inventory": market.allow_bid_with_inventory,
                 "sell_cover_size": round(market.sell_cover_size, 6),
                 "external_order_sync_count": market.external_order_sync_count,
                 "finish_action": market.finish_action,
@@ -2353,7 +2368,14 @@ class RewardProfitSessionEngine:
                 "live_synced_inventory_shares": round(live_synced_inventory, 6),
                 "live_open_buy_order_count": live_open_buy_orders,
                 "live_open_sell_order_count": live_open_sell_orders,
-                "inventory_mode": "sell_only" if "sell_only" in inventory_modes else "normal",
+                "inventory_mode": (
+                    "sell_only"
+                    if "sell_only" in inventory_modes
+                    else "balanced"
+                    if "balanced" in inventory_modes
+                    else "normal"
+                ),
+                "inventory_policy": self.config.inventory_policy,
                 "finish_action": next((market.finish_action for market in state.markets.values() if market.finish_action), None),
                 "protected_sell_order_id": next((market.protected_sell_order_id for market in state.markets.values() if market.protected_sell_order_id), None),
                 "canceled_buy_count": sum(market.canceled_buy_count for market in state.markets.values()),

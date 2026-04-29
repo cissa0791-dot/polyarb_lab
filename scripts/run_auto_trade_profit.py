@@ -80,6 +80,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-inventory-shares-per-market", type=float, default=None)
     parser.add_argument("--max-inventory-usdc-per-market", type=float, default=None)
     parser.add_argument("--inventory-dust-shares", type=float, default=0.0001)
+    parser.add_argument(
+        "--inventory-policy",
+        choices=["sell_only", "balanced"],
+        default="sell_only",
+        help="Live inventory handling. sell_only blocks new buys while inventory exists; balanced allows two-sided quoting until inventory limits are hit.",
+    )
     parser.add_argument("--event-limit", type=int, default=200)
     parser.add_argument("--market-limit", type=int, default=400)
     parser.add_argument("--cycles", type=int, default=1)
@@ -161,6 +167,7 @@ def main() -> None:
         max_inventory_shares_per_market=max_inventory_shares,
         max_inventory_usdc_per_market=max_inventory_usdc,
         inventory_dust_shares=args.inventory_dust_shares,
+        inventory_policy=args.inventory_policy,
         event_limit=args.event_limit,
         market_limit=args.market_limit,
         cycles=args.cycles,
