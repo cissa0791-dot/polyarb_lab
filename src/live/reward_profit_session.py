@@ -331,7 +331,10 @@ class RewardOrderManager:
             )
             bid_report = self.broker.submit_limit_order(bid_intent)
             if bid_report.metadata.get("error"):
-                print(f"[BROKER] bid REJECTED for {candidate.market_slug}: {bid_report.metadata['error']}", flush=True)
+                error = str(bid_report.metadata["error"])
+                market.last_order_error = error
+                print(f"[BROKER] bid REJECTED for {candidate.market_slug}: {error}", flush=True)
+                return None, ask_order_id
             bid_order_id = str(bid_report.metadata.get("live_order_id") or "")
 
         if not ask_order_id and market.inventory_shares > 0.0:
@@ -347,6 +350,11 @@ class RewardOrderManager:
                 tick_size=candidate.tick_size,
             )
             ask_report = self.broker.submit_limit_order(ask_intent)
+            if ask_report.metadata.get("error"):
+                error = str(ask_report.metadata["error"])
+                market.last_order_error = error
+                print(f"[BROKER] ask REJECTED for {candidate.market_slug}: {error}", flush=True)
+                return bid_order_id, None
             ask_order_id = str(ask_report.metadata.get("live_order_id") or "")
             market.sell_cover_size = round(sell_size, 6)
 
@@ -1212,10 +1220,20 @@ class RewardProfitSessionEngine:
 
         previous_bid_id = market_state.bid_order_id
         previous_ask_id = market_state.ask_order_id
+        market_state.last_order_error = None
         bid_order_id, ask_order_id = self._ensure_quote_orders(market_state, candidate, now)
         market_state.bid_order_id = bid_order_id
         market_state.ask_order_id = ask_order_id
         self._record_new_order_metadata(market_state, candidate, now, previous_bid_id, previous_ask_id)
+        if self.config.live and self._is_order_version_mismatch(market_state.last_order_error):
+            self._pause_market(
+                market_state,
+                reason="ORDER_VERSION_MISMATCH",
+                state=state,
+                now=now,
+                cooldown_minutes=self.config.no_fill_cooldown_minutes,
+            )
+            return
         if market_state.inventory_shares > 0.0 and market_state.ask_order_id:
             market_state.status = RewardMarketStatus.QUOTING.value
 
@@ -1228,10 +1246,20 @@ class RewardProfitSessionEngine:
         ):
             previous_bid_id = market_state.bid_order_id
             previous_ask_id = market_state.ask_order_id
+            market_state.last_order_error = None
             bid_order_id, ask_order_id = self._ensure_quote_orders(market_state, candidate, now)
             market_state.bid_order_id = bid_order_id
             market_state.ask_order_id = ask_order_id
             self._record_new_order_metadata(market_state, candidate, now, previous_bid_id, previous_ask_id)
+            if self.config.live and self._is_order_version_mismatch(market_state.last_order_error):
+                self._pause_market(
+                    market_state,
+                    reason="ORDER_VERSION_MISMATCH",
+                    state=state,
+                    now=now,
+                    cooldown_minutes=self.config.no_fill_cooldown_minutes,
+                )
+                return
             self._refresh_live_order_marks(market_state, now)
         self._simulate_dry_run_fills(market_state, candidate, dt_hours)
         if self.config.entry_mode == "maker_first" and market_state.inventory_shares > 0.0 and market_state.ask_order_id is None:
@@ -1953,6 +1981,11 @@ class RewardProfitSessionEngine:
             return RewardProfitCandidate(**payload)
         except TypeError:
             return None
+
+    @staticmethod
+    def _is_order_version_mismatch(error: str | None) -> bool:
+        text = str(error or "").lower()
+        return "order version mismatch" in text or "order_version_mismatch" in text
 
     def _pause_market(
         self,

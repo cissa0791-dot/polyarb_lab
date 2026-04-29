@@ -112,6 +112,28 @@ class _LiveLifecycleOrderManager(RewardOrderManager):
         return list(self.open_orders.get(token_id, []))
 
 
+class _OrderVersionMismatchManager(RewardOrderManager):
+    def __init__(self):
+        super().__init__(live=True)
+        self.quote_calls = 0
+        self.cancel_calls: list[str | None] = []
+
+    def ensure_quote_orders(self, market, candidate):
+        self.quote_calls += 1
+        market.last_order_error = "submit_order failed: PolyApiException[error_message={'error': 'order_version_mismatch'}]"
+        return None, None
+
+    def cancel_order(self, order_id):
+        self.cancel_calls.append(order_id)
+        return True
+
+    def get_token_balance(self, token_id):
+        return 0.0
+
+    def get_open_orders(self, token_id):
+        return []
+
+
 def _candidate(
     *,
     market_slug: str,
@@ -1460,6 +1482,40 @@ class RewardProfitSessionEngineTests(unittest.TestCase):
             self.assertIn(old_bid_id, manager.cancel_calls)
             self.assertEqual(market.status, RewardMarketStatus.PAUSED.value)
             self.assertEqual(market.last_exit_reason, "NO_FILL_REQUOTE_LIMIT")
+            self.assertIsNotNone(market.cooldown_until_ts)
+
+    def test_live_order_version_mismatch_pauses_market(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manager = _OrderVersionMismatchManager()
+            config = RewardProfitConfig(
+                out_dir=tmpdir,
+                state_path=str(Path(tmpdir) / "s.json"),
+                pnl_path=str(Path(tmpdir) / "p.json"),
+                max_entry_cost_usdc=10.0,
+                max_entry_cost_pct=1.0,
+                max_break_even_hours=100.0,
+                entry_mode="maker_first",
+                live=True,
+                no_fill_cooldown_minutes=30.0,
+            )
+            engine = RewardProfitSessionEngine(
+                config,
+                reward_client_factory=lambda dry_run: None,
+                order_manager=manager,
+                registry_provider=lambda cfg: {"events": []},
+            )
+            cycle_ts = datetime(2026, 4, 24, tzinfo=timezone.utc)
+
+            state = engine.run_cycle(
+                scanned_candidates=[_candidate(market_slug="m1", spread_capture_hour=1.0)],
+                cycle_ts=cycle_ts,
+            )
+            market = state.markets["m1"]
+
+            self.assertEqual(manager.quote_calls, 1)
+            self.assertIsNone(market.bid_order_id)
+            self.assertEqual(market.status, RewardMarketStatus.PAUSED.value)
+            self.assertEqual(market.last_exit_reason, "ORDER_VERSION_MISMATCH")
             self.assertIsNotNone(market.cooldown_until_ts)
 
     def test_finish_keeps_ask_when_inventory_exists(self) -> None:
