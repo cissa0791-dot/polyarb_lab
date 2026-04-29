@@ -231,7 +231,8 @@ class LiveWriteClient:
                 neg_risk=neg_risk,
             )
         except Exception as exc:
-            if "order version mismatch" in str(exc).lower():
+            error_text = str(exc).lower()
+            if "order version mismatch" in error_text or "order_version_mismatch" in error_text:
                 try:
                     raw = self._create_and_post_order(
                         order_args,

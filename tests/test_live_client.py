@@ -214,6 +214,23 @@ class TestSubmitOrderLive(unittest.TestCase):
         self.assertTrue(order_calls[0][2].neg_risk)
         self.assertFalse(order_calls[1][2].neg_risk)
 
+    def test_retries_order_version_mismatch_with_underscore_error(self) -> None:
+        fake = _FakeClient(
+            submit_raises=[
+                RuntimeError("PolyApiException[status_code=400, error_message={'error': 'order_version_mismatch'}]"),
+                None,
+            ],
+            neg_risk=True,
+        )
+        client = LiveWriteClient(fake, dry_run=False)
+
+        result = client.submit_order("tok", "BUY", 0.50, 10.0)
+
+        order_calls = [call for call in fake.calls if call[0] == "create_and_post_order"]
+        self.assertEqual(result.order_id, "fake-order-123")
+        self.assertEqual(len(order_calls), 2)
+        self.assertFalse(order_calls[1][2].neg_risk)
+
     def test_normalizes_exception_to_live_client_error(self) -> None:
         fake = _FakeClient(raises=RuntimeError("CLOB unavailable"))
         client = LiveWriteClient(fake, dry_run=False)
