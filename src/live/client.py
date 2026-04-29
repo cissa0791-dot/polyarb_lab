@@ -212,11 +212,10 @@ class LiveWriteClient:
                 tick_size = self._client.get_tick_size(token_id)
             except Exception:
                 tick_size = None
-        if not neg_risk:
-            try:
-                neg_risk = bool(self._client.get_neg_risk(token_id))
-            except Exception:
-                neg_risk = False
+        try:
+            neg_risk = bool(self._client.get_neg_risk(token_id))
+        except Exception:
+            neg_risk = bool(neg_risk)
 
         order_args = OrderArgs(
             token_id=token_id,
@@ -225,17 +224,30 @@ class LiveWriteClient:
             side=side,
             fee_rate_bps=fee_rate_bps,
         )
-        options = PartialCreateOrderOptions(
-            tick_size=tick_size,
-            neg_risk=neg_risk,
-        )
         try:
-            raw: dict[str, Any] = self._client.create_and_post_order(order_args, options)
+            raw: dict[str, Any] = self._create_and_post_order(
+                order_args,
+                tick_size=tick_size,
+                neg_risk=neg_risk,
+            )
         except Exception as exc:
-            raise LiveClientError(
-                f"submit_order failed for token={token_id!r} side={side} "
-                f"price={price} size={size}: {exc}"
-            ) from exc
+            if "order version mismatch" in str(exc).lower():
+                try:
+                    raw = self._create_and_post_order(
+                        order_args,
+                        tick_size=tick_size,
+                        neg_risk=not neg_risk,
+                    )
+                except Exception as retry_exc:
+                    raise LiveClientError(
+                        f"submit_order failed for token={token_id!r} side={side} "
+                        f"price={price} size={size}: {retry_exc}"
+                    ) from retry_exc
+            else:
+                raise LiveClientError(
+                    f"submit_order failed for token={token_id!r} side={side} "
+                    f"price={price} size={size}: {exc}"
+                ) from exc
 
         raw_avg = raw.get("avg_price") or raw.get("avgPrice")
         return LiveOrderResult(
@@ -244,6 +256,19 @@ class LiveWriteClient:
             size_matched=float(raw.get("size_matched") or 0.0),
             avg_price=float(raw_avg) if raw_avg is not None else None,
         )
+
+    def _create_and_post_order(
+        self,
+        order_args: OrderArgs,
+        *,
+        tick_size: str | None,
+        neg_risk: bool,
+    ) -> dict[str, Any]:
+        options = PartialCreateOrderOptions(
+            tick_size=tick_size,
+            neg_risk=neg_risk,
+        )
+        return self._client.create_and_post_order(order_args, options)
 
     # ------------------------------------------------------------------
     # Order cancellation

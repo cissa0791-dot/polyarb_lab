@@ -39,6 +39,8 @@ class _FakeClient:
         submit_response: dict | None = None,
         order_response: object | None = None,
         raises: Exception | None = None,
+        submit_raises: list[Exception | None] | None = None,
+        neg_risk: bool = False,
     ):
         self.calls: list[tuple] = []
         self._submit_response = submit_response or {
@@ -48,9 +50,15 @@ class _FakeClient:
         }
         self._order_response = order_response or _FakeOrder()
         self._raises = raises
+        self._submit_raises = list(submit_raises or [])
+        self._neg_risk = neg_risk
 
     def create_and_post_order(self, order_args, options):
         self.calls.append(("create_and_post_order", order_args, options))
+        if self._submit_raises:
+            exc = self._submit_raises.pop(0)
+            if exc is not None:
+                raise exc
         if self._raises:
             raise self._raises
         return self._submit_response
@@ -61,7 +69,7 @@ class _FakeClient:
 
     def get_neg_risk(self, token_id):
         self.calls.append(("get_neg_risk", token_id))
-        return False
+        return self._neg_risk
 
     def cancel(self, order_id):
         self.calls.append(("cancel", order_id))
@@ -179,6 +187,32 @@ class TestSubmitOrderLive(unittest.TestCase):
         client = LiveWriteClient(fake, dry_run=False)
         result = client.submit_order("tok", "BUY", 0.50, 10.0)
         self.assertEqual(result.size_matched, 0.0)
+
+    def test_uses_clob_neg_risk_over_caller_hint(self) -> None:
+        fake = _FakeClient(neg_risk=False)
+        client = LiveWriteClient(fake, dry_run=False)
+        client.submit_order("tok", "BUY", 0.50, 10.0, neg_risk=True)
+        order_call = fake.calls[-1]
+        self.assertEqual(order_call[0], "create_and_post_order")
+        self.assertFalse(order_call[2].neg_risk)
+
+    def test_retries_order_version_mismatch_with_opposite_neg_risk(self) -> None:
+        fake = _FakeClient(
+            submit_raises=[
+                RuntimeError("PolyApiException[status_code=400, error_message={'error': 'order version mismatch'}]"),
+                None,
+            ],
+            neg_risk=True,
+        )
+        client = LiveWriteClient(fake, dry_run=False)
+
+        result = client.submit_order("tok", "BUY", 0.50, 10.0)
+
+        order_calls = [call for call in fake.calls if call[0] == "create_and_post_order"]
+        self.assertEqual(result.order_id, "fake-order-123")
+        self.assertEqual(len(order_calls), 2)
+        self.assertTrue(order_calls[0][2].neg_risk)
+        self.assertFalse(order_calls[1][2].neg_risk)
 
     def test_normalizes_exception_to_live_client_error(self) -> None:
         fake = _FakeClient(raises=RuntimeError("CLOB unavailable"))
