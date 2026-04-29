@@ -277,13 +277,11 @@ class LiveWriteClient:
             resolve_fee_rate = getattr(self._client, "_ClobClient__resolve_fee_rate", None)
             if callable(resolve_fee_rate) and hasattr(order_args, "fee_rate_bps"):
                 order_args.fee_rate_bps = resolve_fee_rate(order_args.token_id, order_args.fee_rate_bps)
-            order = builder.create_order(
-                order_args,
-                CreateOrderOptions(
-                    tick_size=tick_size,
-                    neg_risk=bool(neg_risk),
-                ),
-            )
+            options = CreateOrderOptions(tick_size=tick_size, neg_risk=bool(neg_risk))
+            if hasattr(builder, "build_order"):
+                order = builder.build_order(order_args, options)
+            else:
+                order = builder.create_order(order_args, options)
             return post_order(order)
         options = PartialCreateOrderOptions(
             tick_size=tick_size,
