@@ -43,11 +43,10 @@ from src.domain.models import (
     OrderType,
     PositionState,
 )
-from py_clob_client.clob_types import AssetType, BalanceAllowanceParams
-
 from src.live.auth import build_authenticated_client, load_live_credentials
 from src.live.broker import LiveBroker
 from src.live.client import LiveWriteClient
+from src.live.clob_compat import AssetType, BalanceAllowanceParams
 from src.paper.ledger import Ledger
 from src.storage.event_store import ResearchStore
 

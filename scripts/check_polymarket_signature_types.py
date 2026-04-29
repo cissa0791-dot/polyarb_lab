@@ -7,9 +7,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from py_clob_client.client import ClobClient
-from py_clob_client.clob_types import ApiCreds
-
+from src.live.clob_compat import ApiCreds, ClobClient
 from src.live.auth import load_live_credentials
 
 

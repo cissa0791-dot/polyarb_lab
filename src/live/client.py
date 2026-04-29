@@ -35,13 +35,15 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from py_clob_client.client import ClobClient
-from py_clob_client.clob_types import (
+from src.live.clob_compat import (
     AssetType,
     BalanceAllowanceParams,
+    ClobClient,
     CreateOrderOptions,
     OpenOrderParams,
     OrderArgs,
+    OrderMarketCancelParams,
+    OrderPayload,
     PartialCreateOrderOptions,
 )
 
@@ -218,13 +220,16 @@ class LiveWriteClient:
         except Exception:
             neg_risk = bool(neg_risk)
 
-        order_args = OrderArgs(
-            token_id=token_id,
-            price=price,
-            size=size,
-            side=side,
-            fee_rate_bps=fee_rate_bps,
-        )
+        order_payload: dict[str, Any] = {
+            "token_id": token_id,
+            "price": price,
+            "size": size,
+            "side": side,
+        }
+        try:
+            order_args = OrderArgs(**order_payload, fee_rate_bps=fee_rate_bps)
+        except TypeError:
+            order_args = OrderArgs(**order_payload)
         try:
             raw: dict[str, Any] = self._create_and_post_order(
                 order_args,
@@ -270,7 +275,7 @@ class LiveWriteClient:
         post_order = getattr(self._client, "post_order", None)
         if builder is not None and post_order is not None and tick_size is not None:
             resolve_fee_rate = getattr(self._client, "_ClobClient__resolve_fee_rate", None)
-            if callable(resolve_fee_rate):
+            if callable(resolve_fee_rate) and hasattr(order_args, "fee_rate_bps"):
                 order_args.fee_rate_bps = resolve_fee_rate(order_args.token_id, order_args.fee_rate_bps)
             order = builder.create_order(
                 order_args,
@@ -305,7 +310,10 @@ class LiveWriteClient:
             return True
 
         try:
-            self._client.cancel(order_id)
+            if hasattr(self._client, "cancel_order"):
+                self._client.cancel_order(OrderPayload(orderID=order_id))
+            else:
+                self._client.cancel(order_id)
             return True
         except Exception as exc:
             raise LiveClientError(
@@ -317,7 +325,10 @@ class LiveWriteClient:
         if self.dry_run:
             return {"dry_run": True, "asset_id": token_id}
         try:
-            return self._client.cancel_market_orders(asset_id=token_id)
+            try:
+                return self._client.cancel_market_orders(OrderMarketCancelParams(asset_id=token_id))
+            except TypeError:
+                return self._client.cancel_market_orders(asset_id=token_id)
         except Exception as exc:
             raise LiveClientError(
                 f"cancel_market_orders failed for token_id={token_id!r}: {exc}"
@@ -350,7 +361,11 @@ class LiveWriteClient:
         if self.dry_run:
             return []
         try:
-            raw = self._client.get_orders(OpenOrderParams(asset_id=token_id))
+            params = OpenOrderParams(asset_id=token_id)
+            if hasattr(self._client, "get_open_orders"):
+                raw = self._client.get_open_orders(params)
+            else:
+                raw = self._client.get_orders(params)
         except Exception as exc:
             raise LiveClientError(
                 f"get_open_orders failed for token_id={token_id!r}: {exc}"

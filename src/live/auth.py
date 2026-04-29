@@ -27,8 +27,7 @@ import os
 from dataclasses import dataclass
 from importlib import metadata
 
-from py_clob_client.client import ClobClient
-from py_clob_client.clob_types import ApiCreds
+from src.live.clob_compat import ApiCreds, ClobClient
 
 
 # ---------------------------------------------------------------------------
@@ -45,8 +44,8 @@ def assert_clob_v2_available() -> None:
     Polymarket CLOB V2 uses a new EIP-712 exchange domain.  The old
     ``py-clob-client`` package can still authenticate Level-2 requests, but
     orders signed with it are rejected by the matching engine with
-    ``order_version_mismatch``.  The V2 wheel keeps the same import namespace
-    (``py_clob_client``), so package metadata is the reliable runtime guard.
+    ``order_version_mismatch``.  The V2 wheel uses the ``py_clob_client_v2``
+    import namespace, so package metadata is the reliable runtime guard.
     """
     try:
         metadata.version("py-clob-client-v2")

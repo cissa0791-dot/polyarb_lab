@@ -17,9 +17,7 @@ from urllib.request import Request, urlopen
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from py_clob_client.client import ClobClient
-from py_clob_client.clob_types import ApiCreds
-
+from src.live.clob_compat import ApiCreds, ClobClient
 from src.live.auth import CredentialError, assert_clob_v2_available, load_live_credentials
 
 

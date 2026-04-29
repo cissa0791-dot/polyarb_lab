@@ -8,10 +8,9 @@ from math import isfinite
 from typing import Any, Dict, Iterable, List, Optional
 
 import httpx
-from py_clob_client.client import ClobClient
-from py_clob_client.clob_types import BookParams
 
 from src.core.models import BookLevel, OrderBook
+from src.live.clob_compat import BookParams, ClobClient
 
 logger = logging.getLogger(__name__)
 

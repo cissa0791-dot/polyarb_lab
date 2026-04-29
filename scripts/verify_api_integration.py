@@ -172,7 +172,7 @@ def step1b_validate_api_key_pairing(creds: LiveCredentials) -> bool:
     """
     _step("1b", "API key pairing — derive canonical key for this private key (L1)")
     try:
-        from py_clob_client.client import ClobClient as _ClobClient
+        from src.live.clob_compat import ClobClient as _ClobClient
         # Level-1 client: private key only, no ApiCreds.
         l1_client = _ClobClient(
             host=_CLOB_HOST,
