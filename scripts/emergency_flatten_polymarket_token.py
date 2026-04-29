@@ -12,7 +12,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from src.live.auth import build_authenticated_client, load_live_credentials
+from src.live.auth import load_live_credentials
 from src.live.client import LiveWriteClient
 
 
@@ -65,13 +65,7 @@ def main() -> int:
         if dry_run:
             print("Cancel:  dry-run, would cancel all open orders for token")
         else:
-            raw_client = build_authenticated_client(
-                creds,
-                "https://clob.polymarket.com",
-                signature_type=signature_type,
-                funder=funder,
-            )
-            cancel_result = raw_client.cancel_market_orders(asset_id=args.token_id)
+            cancel_result = client.cancel_market_orders(args.token_id)
             print(f"Cancel:  {cancel_result}")
 
     result = client.submit_order(
