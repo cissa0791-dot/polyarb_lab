@@ -171,6 +171,7 @@ class RewardProfitConfig:
     actual_reward_warmup_minutes: float = 0.0
     inventory_dust_shares: float = 0.0001
     inventory_policy: str = "sell_only"
+    min_live_order_size_shares: float = 5.0
     event_limit: int = 200
     market_limit: int = 400
     cycles: int = 1
@@ -272,6 +273,8 @@ class RewardMarketState:
     protected_sell_order_id: str | None = None
     canceled_buy_count: int = 0
     preserved_sell_count: int = 0
+    inventory_dust_shares: float = 0.0001
+    min_order_size_shares: float = 0.0
     action: str = "HOLD"
     action_score: float = 0.0
     quote_bid_reason: str = "LEGACY_QUOTE"
@@ -364,13 +367,23 @@ class RewardOrderManager:
         ask_order_id = market.ask_order_id
 
         allow_bid_with_inventory = bool(getattr(market, "allow_bid_with_inventory", False))
-        if market.inventory_shares > 1e-9 and not allow_bid_with_inventory:
+        dust = float(getattr(market, "inventory_dust_shares", 0.0001) or 0.0001)
+        min_size = float(getattr(market, "min_order_size_shares", 0.0) or 0.0)
+        sell_size = _sellable_token_size(
+            market.inventory_shares,
+            dust_shares=dust,
+            min_order_size_shares=min_size,
+        )
+        has_tradeable_inventory = sell_size > 0.0
+        if market.inventory_shares > 1e-9 and not allow_bid_with_inventory and has_tradeable_inventory:
             if bid_order_id:
                 self.cancel_order(bid_order_id)
                 bid_order_id = None
                 market.buy_block_reason = "INVENTORY_PRESENT_CANCEL_BUY"
             market.inventory_mode = "sell_only"
-        if not bid_order_id and (market.inventory_shares <= 1e-9 or allow_bid_with_inventory):
+        if not bid_order_id and (
+            market.inventory_shares <= 1e-9 or allow_bid_with_inventory or not has_tradeable_inventory
+        ):
             bid_intent = _make_order_intent(
                 candidate_id=f"reward_profit:{candidate.market_slug}:bid",
                 market_slug=candidate.market_slug,
@@ -389,8 +402,7 @@ class RewardOrderManager:
                 return None, ask_order_id
             bid_order_id = str(bid_report.metadata.get("live_order_id") or "")
 
-        if not ask_order_id and market.inventory_shares > 0.0:
-            sell_size = _sellable_token_size(market.inventory_shares)
+        if not ask_order_id and has_tradeable_inventory:
             ask_intent = _make_order_intent(
                 candidate_id=f"reward_profit:{candidate.market_slug}:ask",
                 market_slug=candidate.market_slug,
@@ -447,10 +459,18 @@ class RewardOrderManager:
         return self.write_client.cancel_market_orders(token_id)
 
 
-def _sellable_token_size(balance: float, *, dust_shares: float = 0.0001) -> float:
+def _sellable_token_size(
+    balance: float,
+    *,
+    dust_shares: float = 0.0001,
+    min_order_size_shares: float = 0.0,
+) -> float:
     raw_units = int(max(0.0, balance) * 1_000_000)
     dust_units = int(max(0.0, dust_shares) * 1_000_000)
-    return round(max(0, raw_units - dust_units) / 1_000_000.0, 6)
+    sellable = round(max(0, raw_units - dust_units) / 1_000_000.0, 6)
+    if min_order_size_shares > 0.0 and sellable < min_order_size_shares - 1e-9:
+        return 0.0
+    return sellable
 
 
 def _tick_size_value(raw_tick: str | None) -> float:
@@ -1474,9 +1494,18 @@ class RewardProfitSessionEngine:
         market_state.live_sync_ts = now.isoformat()
         market_state.live_synced_inventory_shares = round(balance, 6)
         dust = max(0.0, float(self.config.inventory_dust_shares))
-        has_inventory = balance > dust + 1e-9
+        min_size = max(0.0, float(self.config.min_live_order_size_shares))
+        market_state.inventory_dust_shares = dust
+        market_state.min_order_size_shares = min_size
+        sellable = _sellable_token_size(
+            balance,
+            dust_shares=dust,
+            min_order_size_shares=min_size,
+        )
+        has_balance = balance > dust + 1e-9
+        has_inventory = sellable > 0.0
         balanced_inventory = self.config.inventory_policy == "balanced"
-        if has_inventory:
+        if has_balance:
             previous_inventory_value = market_state.inventory_shares * market_state.avg_inventory_cost
             external_delta = max(0.0, balance - market_state.inventory_shares)
             if external_delta > 1e-9 and market_state.avg_inventory_cost <= 0.0:
@@ -1485,9 +1514,15 @@ class RewardProfitSessionEngine:
                 total_cost = previous_inventory_value + external_delta * candidate.quote_bid
                 market_state.avg_inventory_cost = round(total_cost / balance, 6)
             market_state.inventory_shares = round(balance, 6)
-            market_state.inventory_mode = "balanced" if balanced_inventory else "sell_only"
-            market_state.buy_block_reason = None if balanced_inventory else "INVENTORY_PRESENT"
-            market_state.allow_bid_with_inventory = balanced_inventory
+            if has_inventory:
+                market_state.inventory_mode = "balanced" if balanced_inventory else "sell_only"
+                market_state.buy_block_reason = None if balanced_inventory else "INVENTORY_PRESENT"
+                market_state.allow_bid_with_inventory = balanced_inventory
+            else:
+                market_state.inventory_mode = "normal"
+                market_state.buy_block_reason = None
+                market_state.allow_bid_with_inventory = True
+                market_state.sell_cover_size = 0.0
         else:
             market_state.inventory_shares = 0.0
             market_state.inventory_mode = "normal"
@@ -1500,7 +1535,7 @@ class RewardProfitSessionEngine:
         market_state.live_open_sell_order_count = len(sells)
         market_state.external_order_sync_count += len(open_orders)
 
-        if market_state.inventory_shares > dust + 1e-9:
+        if has_inventory:
             limit_reached = self._inventory_limit_reached(market_state, candidate)
             if not balanced_inventory or limit_reached:
                 for order in buys:
@@ -1517,7 +1552,6 @@ class RewardProfitSessionEngine:
                 market_state.inventory_mode = "sell_only"
                 market_state.allow_bid_with_inventory = False
 
-            sellable = _sellable_token_size(market_state.inventory_shares, dust_shares=dust)
             rebuild_sell = len(sells) > 1
             if len(sells) == 1 and sells[0].size_remaining < sellable - 1e-6:
                 rebuild_sell = True
@@ -1732,8 +1766,17 @@ class RewardProfitSessionEngine:
         candidate: RewardProfitCandidate,
         now: datetime,
     ) -> tuple[str | None, str | None]:
+        market_state.inventory_dust_shares = max(0.0, float(self.config.inventory_dust_shares))
+        market_state.min_order_size_shares = max(0.0, float(self.config.min_live_order_size_shares))
+        self._enforce_live_synced_inventory_floor(market_state)
+        sellable_inventory = _sellable_token_size(
+            market_state.inventory_shares,
+            dust_shares=market_state.inventory_dust_shares,
+            min_order_size_shares=market_state.min_order_size_shares,
+        )
+        has_tradeable_inventory = sellable_inventory > 0.0
         if str(self.config.action_mode or "legacy").lower() == "optimal":
-            if candidate.action in {"SKIP", "HOLD"} and market_state.inventory_shares <= self.config.inventory_dust_shares + 1e-9:
+            if candidate.action in {"SKIP", "HOLD"} and not has_tradeable_inventory:
                 if market_state.bid_order_id:
                     self._cancel_side_order(market_state, "bid", "ACTION_CANCEL_BUY", count_requote=False)
                     market_state.canceled_buy_count += 1
@@ -1757,13 +1800,12 @@ class RewardProfitSessionEngine:
                 market_state.canceled_buy_count += 1
             market_state.inventory_mode = "sell_only"
             market_state.buy_block_reason = "INVENTORY_LIMIT"
-            if market_state.inventory_shares <= self.config.inventory_dust_shares + 1e-9:
+            if not has_tradeable_inventory:
                 return None, None
-        self._enforce_live_synced_inventory_floor(market_state)
         if self.config.live:
             if (
                 market_state.live_sync_ts
-                and market_state.live_synced_inventory_shares <= self.config.inventory_dust_shares + 1e-9
+                and not has_tradeable_inventory
             ):
                 if market_state.bid_order_id is None:
                     return self.order_manager.ensure_quote_orders(market_state, candidate)
@@ -1932,8 +1974,15 @@ class RewardProfitSessionEngine:
             return candidate
 
         dust = max(0.0, float(self.config.inventory_dust_shares))
+        min_size = max(0.0, float(self.config.min_live_order_size_shares))
         price = max(0.000001, float(candidate.quote_bid or candidate.best_bid))
-        inventory_shares = max(0.0, market_state.inventory_shares)
+        raw_inventory_shares = max(0.0, market_state.inventory_shares)
+        sellable_inventory = _sellable_token_size(
+            raw_inventory_shares,
+            dust_shares=dust,
+            min_order_size_shares=min_size,
+        )
+        inventory_shares = raw_inventory_shares if sellable_inventory > 0.0 else 0.0
         inventory_usdc = inventory_shares * price
         target_usdc = float(self.config.target_inventory_usdc_per_market or 0.0)
         if target_usdc <= 0.0:
@@ -2172,7 +2221,11 @@ class RewardProfitSessionEngine:
             if previous_bid_id is not None:
                 market_state.requote_count += 1
         if market_state.ask_order_id and market_state.ask_order_id != previous_ask_id:
-            ask_size = market_state.sell_cover_size or _sellable_token_size(market_state.inventory_shares)
+            ask_size = market_state.sell_cover_size or _sellable_token_size(
+                market_state.inventory_shares,
+                dust_shares=market_state.inventory_dust_shares,
+                min_order_size_shares=market_state.min_order_size_shares,
+            )
             market_state.ask_order_created_ts = now.isoformat()
             market_state.ask_order_price = round(candidate.quote_ask, 6)
             market_state.ask_order_size = round(ask_size, 6)
@@ -2440,7 +2493,13 @@ class RewardProfitSessionEngine:
             if candidate is not None:
                 self._sync_live_market_state(market_state, candidate, _utc_now())
             had_open_order = bool(market_state.bid_order_id or market_state.ask_order_id)
-            has_inventory = market_state.inventory_shares > self.config.inventory_dust_shares + 1e-9
+            market_state.inventory_dust_shares = max(0.0, float(self.config.inventory_dust_shares))
+            market_state.min_order_size_shares = max(0.0, float(self.config.min_live_order_size_shares))
+            has_inventory = _sellable_token_size(
+                market_state.inventory_shares,
+                dust_shares=market_state.inventory_dust_shares,
+                min_order_size_shares=market_state.min_order_size_shares,
+            ) > 0.0
             if not had_open_order and not has_inventory:
                 market_state.finish_action = "NO_OPEN_ORDERS"
                 continue
@@ -2503,7 +2562,12 @@ class RewardProfitSessionEngine:
         cooldown_minutes: float | None = None,
     ) -> None:
         self._cancel_side_order(market_state, "bid", reason, count_requote=False)
-        if self.config.live and market_state.inventory_shares > 1e-9:
+        has_tradeable_inventory = _sellable_token_size(
+            market_state.inventory_shares,
+            dust_shares=max(0.0, float(self.config.inventory_dust_shares)),
+            min_order_size_shares=max(0.0, float(self.config.min_live_order_size_shares)),
+        ) > 0.0
+        if self.config.live and has_tradeable_inventory:
             market_state.status = RewardMarketStatus.EXITING.value
             market_state.inventory_mode = "sell_only"
             market_state.buy_block_reason = "INVENTORY_PRESENT"
@@ -2548,7 +2612,12 @@ class RewardProfitSessionEngine:
         now: datetime | None = None,
     ) -> None:
         self._cancel_side_order(market_state, "bid", reason, count_requote=False)
-        if self.config.live and market_state.inventory_shares > 1e-9:
+        has_tradeable_inventory = _sellable_token_size(
+            market_state.inventory_shares,
+            dust_shares=max(0.0, float(self.config.inventory_dust_shares)),
+            min_order_size_shares=max(0.0, float(self.config.min_live_order_size_shares)),
+        ) > 0.0
+        if self.config.live and has_tradeable_inventory:
             market_state.status = RewardMarketStatus.EXITING.value
             market_state.inventory_mode = "sell_only"
             market_state.buy_block_reason = "INVENTORY_PRESENT"

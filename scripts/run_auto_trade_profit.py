@@ -91,6 +91,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-inventory-usdc-per-market", type=float, default=None)
     parser.add_argument("--inventory-dust-shares", type=float, default=0.0001)
     parser.add_argument(
+        "--min-live-order-size-shares",
+        type=float,
+        default=5.0,
+        help="Minimum live order size in shares. Balances below this after dust are treated as non-tradeable residue.",
+    )
+    parser.add_argument(
         "--inventory-policy",
         choices=["sell_only", "balanced"],
         default="sell_only",
@@ -192,6 +198,7 @@ def main() -> None:
         max_inventory_shares_per_market=max_inventory_shares,
         max_inventory_usdc_per_market=max_inventory_usdc,
         inventory_dust_shares=args.inventory_dust_shares,
+        min_live_order_size_shares=args.min_live_order_size_shares,
         inventory_policy=args.inventory_policy,
         event_limit=args.event_limit,
         market_limit=args.market_limit,
