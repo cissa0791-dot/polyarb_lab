@@ -2852,6 +2852,12 @@ class RewardProfitSessionEngine:
             state.markets[slug] for slug in state.selected_market_slugs if slug in state.markets
         ]
         top_market = max(selected_market_rows, key=lambda market: market.action_score, default=None)
+        if not inventory_modes:
+            summary_inventory_mode = "normal"
+        elif len(inventory_modes) == 1:
+            summary_inventory_mode = next(iter(inventory_modes))
+        else:
+            summary_inventory_mode = "mixed:" + ",".join(sorted(inventory_modes))
         return {
             "report_type": "reward_profit_pnl",
             "session_id": state.session_id,
@@ -2890,13 +2896,7 @@ class RewardProfitSessionEngine:
                 "live_synced_inventory_shares": round(live_synced_inventory, 6),
                 "live_open_buy_order_count": live_open_buy_orders,
                 "live_open_sell_order_count": live_open_sell_orders,
-                "inventory_mode": (
-                    "sell_only"
-                    if "sell_only" in inventory_modes
-                    else "balanced"
-                    if "balanced" in inventory_modes
-                    else "normal"
-                ),
+                "inventory_mode": summary_inventory_mode,
                 "inventory_policy": self.config.inventory_policy,
                 "finish_action": next((market.finish_action for market in state.markets.values() if market.finish_action), None),
                 "protected_sell_order_id": next((market.protected_sell_order_id for market in state.markets.values() if market.protected_sell_order_id), None),
