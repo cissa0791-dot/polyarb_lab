@@ -1219,6 +1219,7 @@ class RewardProfitSessionEngine:
         market_state.quote_decision_reason = candidate.quote_decision_reason
 
         self._refresh_live_order_marks(market_state, now)
+        self._enforce_live_synced_inventory_floor(market_state)
         self._manage_live_order_lifecycle(state, market_state, candidate, now)
 
         if market_state.inventory_shares <= 0.0 and self.config.entry_mode == "inventory_first":
@@ -1252,6 +1253,7 @@ class RewardProfitSessionEngine:
             market_state.status = RewardMarketStatus.QUOTING.value
 
         self._refresh_live_order_marks(market_state, now)
+        self._enforce_live_synced_inventory_floor(market_state)
         if (
             self.config.live
             and self.config.entry_mode == "maker_first"
@@ -1275,6 +1277,7 @@ class RewardProfitSessionEngine:
                 )
                 return
             self._refresh_live_order_marks(market_state, now)
+            self._enforce_live_synced_inventory_floor(market_state)
         self._simulate_dry_run_fills(market_state, candidate, dt_hours)
         if self.config.entry_mode == "maker_first" and market_state.inventory_shares > 0.0 and market_state.ask_order_id is None:
             market_state.ask_order_id = f"dry-ask-{uuid.uuid4().hex[:10]}" if not self.config.live else None
@@ -1460,6 +1463,25 @@ class RewardProfitSessionEngine:
         else:
             market_state.bid_order_id = None
 
+    def _enforce_live_synced_inventory_floor(self, market_state: RewardMarketState) -> None:
+        if not self.config.live or not market_state.live_sync_ts:
+            return
+        dust = max(0.0, float(self.config.inventory_dust_shares))
+        if market_state.live_synced_inventory_shares > dust + 1e-9:
+            market_state.inventory_shares = round(market_state.live_synced_inventory_shares, 6)
+            return
+        market_state.inventory_shares = 0.0
+        market_state.avg_inventory_cost = 0.0
+        market_state.inventory_mode = "normal"
+        market_state.buy_block_reason = None
+        market_state.allow_bid_with_inventory = False
+        market_state.sell_cover_size = 0.0
+        market_state.ask_order_id = None
+        market_state.ask_order_created_ts = None
+        market_state.ask_order_price = None
+        market_state.ask_order_size = 0.0
+        market_state.ask_order_remaining_size = 0.0
+
     def _bind_live_open_order(
         self,
         market_state: RewardMarketState,
@@ -1557,7 +1579,15 @@ class RewardProfitSessionEngine:
             market_state.buy_block_reason = "INVENTORY_LIMIT"
             if market_state.inventory_shares <= self.config.inventory_dust_shares + 1e-9:
                 return None, None
+        self._enforce_live_synced_inventory_floor(market_state)
         if self.config.live:
+            if (
+                market_state.live_sync_ts
+                and market_state.live_synced_inventory_shares <= self.config.inventory_dust_shares + 1e-9
+            ):
+                if market_state.bid_order_id is None:
+                    return self.order_manager.ensure_quote_orders(market_state, candidate)
+                return market_state.bid_order_id, None
             return self.order_manager.ensure_quote_orders(market_state, candidate)
 
         bid_order_id = market_state.bid_order_id or f"dry-bid-{uuid.uuid4().hex[:10]}"
@@ -1860,6 +1890,19 @@ class RewardProfitSessionEngine:
         if side == "bid":
             market_state.bid_order_status = status_text
             market_state.bid_order_remaining_size = round(status.size_remaining, 6)
+            if (
+                self.config.live
+                and market_state.live_sync_ts
+                and market_state.live_synced_inventory_shares <= self.config.inventory_dust_shares + 1e-9
+            ):
+                market_state.bid_order_filled_size = round(status.size_matched, 6)
+                market_state.bid_filled_delta = 0.0
+                market_state.inventory_shares = 0.0
+                market_state.avg_inventory_cost = 0.0
+                market_state.sell_cover_size = 0.0
+                if status_text.lower() in terminal_statuses:
+                    self._clear_side_order(market_state, "bid", keep_status=True)
+                return
             delta = max(0.0, status.size_matched - market_state.bid_order_filled_size)
             if delta > 0.0:
                 market_state.no_fill_requote_count = 0

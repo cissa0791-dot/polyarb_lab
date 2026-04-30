@@ -1349,6 +1349,50 @@ class RewardProfitSessionEngineTests(unittest.TestCase):
             self.assertEqual(market.bid_filled_delta, 4.0)
             self.assertIsNotNone(market.ask_order_id)
 
+    def test_live_synced_dust_balance_ignores_stale_bid_fill(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manager = _LiveLifecycleOrderManager()
+            config = RewardProfitConfig(
+                out_dir=tmpdir,
+                state_path=str(Path(tmpdir) / "s.json"),
+                pnl_path=str(Path(tmpdir) / "p.json"),
+                max_entry_cost_usdc=10.0,
+                max_entry_cost_pct=1.0,
+                max_break_even_hours=100.0,
+                entry_mode="maker_first",
+                live=True,
+                inventory_dust_shares=0.01,
+            )
+            engine = RewardProfitSessionEngine(
+                config,
+                reward_client_factory=lambda dry_run: None,
+                order_manager=manager,
+                registry_provider=lambda cfg: {"events": []},
+            )
+            cycle_ts = datetime(2026, 4, 24, tzinfo=timezone.utc)
+            cand = _candidate(market_slug="m1", best_bid=0.35, best_ask=0.40, spread_capture_hour=1.0)
+            manager.token_balances[cand.token_id] = 0.006811
+
+            state = engine.run_cycle(scanned_candidates=[cand], cycle_ts=cycle_ts)
+            bid_id = state.markets["m1"].bid_order_id
+            self.assertIsNotNone(bid_id)
+
+            manager.statuses[bid_id or ""] = LiveOrderStatus(
+                order_id=bid_id or "",
+                status="open",
+                size_matched=50.0,
+                size_remaining=0.0,
+                avg_price=0.35,
+            )
+            state = engine.run_cycle(state, scanned_candidates=[cand], cycle_ts=cycle_ts + timedelta(seconds=30))
+            market = state.markets["m1"]
+
+            self.assertEqual(market.inventory_shares, 0.0)
+            self.assertEqual(market.avg_inventory_cost, 0.0)
+            self.assertEqual(market.bid_filled_delta, 0.0)
+            self.assertIsNone(market.ask_order_id)
+            self.assertNotIn("ask", [side for side, *_ in manager.submitted])
+
     def test_live_ask_fill_realizes_spread(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             manager = _LiveLifecycleOrderManager()
