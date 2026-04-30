@@ -58,6 +58,7 @@ class _LiveLifecycleOrderManager(RewardOrderManager):
         self.submitted: list[tuple[str, str, float, float]] = []
         self.token_balances: dict[str, float] = {}
         self.open_orders: dict[str, list[LiveOpenOrder]] = {}
+        self.all_open_orders: list[LiveOpenOrder] = []
 
     def ensure_quote_orders(self, market, candidate):
         self.quote_calls += 1
@@ -111,6 +112,9 @@ class _LiveLifecycleOrderManager(RewardOrderManager):
 
     def get_open_orders(self, token_id):
         return list(self.open_orders.get(token_id, []))
+
+    def get_all_open_orders(self):
+        return list(self.all_open_orders)
 
 
 class _OrderVersionMismatchManager(RewardOrderManager):
@@ -1655,6 +1659,42 @@ class RewardProfitSessionEngineTests(unittest.TestCase):
             self.assertEqual(manager.quote_calls, 0)
             self.assertEqual(pnl["summary"]["account_sync_enabled"], False)
             self.assertEqual(pnl["summary"]["account_sync_mode"], "dry_run_disabled")
+
+    def test_live_cancels_account_buy_orders_outside_selected_tokens(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manager = _LiveLifecycleOrderManager()
+            config = RewardProfitConfig(
+                out_dir=tmpdir,
+                state_path=str(Path(tmpdir) / "s.json"),
+                pnl_path=str(Path(tmpdir) / "p.json"),
+                max_entry_cost_usdc=10.0,
+                max_entry_cost_pct=1.0,
+                max_break_even_hours=100.0,
+                entry_mode="maker_first",
+                live=True,
+            )
+            engine = RewardProfitSessionEngine(
+                config,
+                reward_client_factory=lambda dry_run: None,
+                order_manager=manager,
+                registry_provider=lambda cfg: {"events": []},
+            )
+            cand = _candidate(market_slug="m1", best_bid=0.35, best_ask=0.40, spread_capture_hour=1.0)
+            manager.token_balances[cand.token_id] = 0.0
+            manager.all_open_orders = [
+                LiveOpenOrder("old-buy", "BUY", 0.41, 50.0, 0.0, 50.0, "open", token_id="tok-old"),
+                LiveOpenOrder("selected-buy", "BUY", 0.35, 50.0, 0.0, 50.0, "open", token_id=cand.token_id),
+                LiveOpenOrder("other-sell", "SELL", 0.50, 50.0, 0.0, 50.0, "open", token_id="tok-other"),
+            ]
+
+            state = engine.run_cycle(scanned_candidates=[cand], cycle_ts=datetime(2026, 4, 24, tzinfo=timezone.utc))
+            pnl = engine._build_pnl_report(state)
+
+            self.assertIn("old-buy", manager.cancel_calls)
+            self.assertNotIn("selected-buy", manager.cancel_calls)
+            self.assertEqual(state.account_canceled_unselected_buy_count, 1)
+            self.assertEqual(pnl["summary"]["account_canceled_unselected_buy_count"], 1)
+            self.assertEqual(pnl["summary"]["account_open_sell_order_count"], 1)
 
     def test_live_sync_cancels_open_buy_when_inventory_exists(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

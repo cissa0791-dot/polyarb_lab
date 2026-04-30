@@ -12,6 +12,7 @@ import unittest
 
 from src.live.client import (
     LiveClientError,
+    LiveOpenOrder,
     LiveOrderResult,
     LiveOrderStatus,
     LiveWriteClient,
@@ -41,6 +42,7 @@ class _FakeClient:
         raises: Exception | None = None,
         submit_raises: list[Exception | None] | None = None,
         neg_risk: bool = False,
+        open_orders_response: object | None = None,
     ):
         self.calls: list[tuple] = []
         self._submit_response = submit_response or {
@@ -52,6 +54,7 @@ class _FakeClient:
         self._raises = raises
         self._submit_raises = list(submit_raises or [])
         self._neg_risk = neg_risk
+        self._open_orders_response = open_orders_response if open_orders_response is not None else []
 
     def create_and_post_order(self, order_args, options):
         self.calls.append(("create_and_post_order", order_args, options))
@@ -82,6 +85,12 @@ class _FakeClient:
         if self._raises:
             raise self._raises
         return self._order_response
+
+    def get_open_orders(self, *args):
+        self.calls.append(("get_open_orders", args))
+        if self._raises:
+            raise self._raises
+        return self._open_orders_response
 
 
 class _FakeBuilder:
@@ -390,6 +399,44 @@ class TestGetOrderStatusLive(unittest.TestCase):
         with self.assertRaises(LiveClientError) as ctx:
             client.get_order_status("ord-fail")
         self.assertIn("get_order_status failed", str(ctx.exception))
+
+
+# ---------------------------------------------------------------------------
+# get_all_open_orders — live mode
+# ---------------------------------------------------------------------------
+
+class TestGetAllOpenOrdersLive(unittest.TestCase):
+
+    def test_returns_normalized_account_open_orders_with_token_ids(self) -> None:
+        fake = _FakeClient(open_orders_response=[
+            {
+                "id": "ord-1",
+                "side": "BUY",
+                "price": "0.41",
+                "size": "50",
+                "size_matched": "0",
+                "asset_id": "tok-1",
+                "status": "open",
+            },
+            {
+                "orderID": "ord-2",
+                "side": "SELL",
+                "price": "0.50",
+                "originalSize": "25",
+                "sizeMatched": "5",
+                "assetId": "tok-2",
+            },
+        ])
+        client = LiveWriteClient(fake, dry_run=False)
+
+        orders = client.get_all_open_orders()
+
+        self.assertEqual(len(orders), 2)
+        self.assertIsInstance(orders[0], LiveOpenOrder)
+        self.assertEqual(orders[0].token_id, "tok-1")
+        self.assertEqual(orders[0].side, "BUY")
+        self.assertAlmostEqual(orders[1].size_remaining, 20.0)
+        self.assertEqual(fake.calls[0], ("get_open_orders", ()))
 
 
 # ---------------------------------------------------------------------------

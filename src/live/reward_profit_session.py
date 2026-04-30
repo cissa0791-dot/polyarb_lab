@@ -270,6 +270,10 @@ class RewardProfitSessionState:
     actual_reward_baseline_usdc: float = 0.0
     actual_reward_latest_usdc: float = 0.0
     reward_epoch_id: str | None = None
+    account_open_buy_order_count: int = 0
+    account_open_sell_order_count: int = 0
+    account_canceled_unselected_buy_count: int = 0
+    account_order_sync_error: str | None = None
     selected_market_slugs: list[str] = field(default_factory=list)
     markets: dict[str, RewardMarketState] = field(default_factory=dict)
     cycle_history: list[dict[str, Any]] = field(default_factory=list)
@@ -386,6 +390,11 @@ class RewardOrderManager:
         if not self.live or self.write_client is None:
             return []
         return self.write_client.get_open_orders(token_id)
+
+    def get_all_open_orders(self) -> list[LiveOpenOrder]:
+        if not self.live or self.write_client is None:
+            return []
+        return self.write_client.get_all_open_orders()
 
     def cancel_market_orders(self, token_id: str) -> Any:
         if not self.live or self.write_client is None:
@@ -983,6 +992,7 @@ class RewardProfitSessionEngine:
             f"fill b{summary['bid_order_filled_shares']:.4f}/a{summary['ask_order_filled_shares']:.4f} | "
             f"inv {summary['live_synced_inventory_shares']:.4f} | "
             f"live buy {summary['live_open_buy_order_count']} sell {summary['live_open_sell_order_count']} | "
+            f"acct buy {summary['account_open_buy_order_count']} sell {summary['account_open_sell_order_count']} | "
             f"mode {summary['inventory_mode']} | "
             f"reward ${summary['reward_accrued_estimate_usdc'] + summary['reward_accrued_actual_usdc']:.4f} | "
             f"spread ${summary['spread_realized_usdc']:.4f} | "
@@ -1145,6 +1155,7 @@ class RewardProfitSessionEngine:
         selected_by_slug = {item.market_slug: item for item in selected}
         state.selected_market_slugs = [item.market_slug for item in selected]
 
+        self._cancel_unselected_live_buy_orders(state, selected)
         self._refresh_actual_reward(state)
 
         for market_slug, market_state in list(state.markets.items()):
@@ -1472,6 +1483,57 @@ class RewardProfitSessionEngine:
         market_state.ask_order_filled_size = round(order.size_matched, 6)
         market_state.ask_order_remaining_size = round(order.size_remaining, 6)
         market_state.ask_order_status = order.status
+
+    def _cancel_unselected_live_buy_orders(
+        self,
+        state: RewardProfitSessionState,
+        selected: list[RewardProfitCandidate],
+    ) -> None:
+        if not self.config.live:
+            state.account_open_buy_order_count = 0
+            state.account_open_sell_order_count = 0
+            state.account_canceled_unselected_buy_count = 0
+            state.account_order_sync_error = None
+            return
+        selected_token_ids = {item.token_id for item in selected}
+        try:
+            open_orders = self.order_manager.get_all_open_orders()
+        except Exception as exc:
+            state.account_order_sync_error = f"account open order sync failed: {exc}"
+            state.last_scan_diagnostics["account_order_sync_error"] = state.account_order_sync_error
+            return
+
+        dust = max(0.0, float(self.config.inventory_dust_shares))
+        buy_orders = [
+            order
+            for order in open_orders
+            if order.side == "BUY" and order.size_remaining > dust + 1e-9
+        ]
+        sell_orders = [
+            order
+            for order in open_orders
+            if order.side == "SELL" and order.size_remaining > dust + 1e-9
+        ]
+        canceled = 0
+        skipped_unknown_token = 0
+        for order in buy_orders:
+            if order.token_id is None:
+                skipped_unknown_token += 1
+                continue
+            if order.token_id in selected_token_ids:
+                continue
+            if self.order_manager.cancel_order(order.order_id):
+                canceled += 1
+
+        state.account_open_buy_order_count = max(0, len(buy_orders) - canceled)
+        state.account_open_sell_order_count = len(sell_orders)
+        state.account_canceled_unselected_buy_count = canceled
+        state.account_order_sync_error = None
+        state.last_scan_diagnostics["account_open_buy_orders_seen"] = len(buy_orders)
+        state.last_scan_diagnostics["account_open_sell_orders_seen"] = len(sell_orders)
+        state.last_scan_diagnostics["account_canceled_unselected_buy_orders"] = canceled
+        if skipped_unknown_token:
+            state.last_scan_diagnostics["account_open_buy_orders_without_token_id"] = skipped_unknown_token
 
     def _ensure_quote_orders(
         self,
@@ -2359,6 +2421,10 @@ class RewardProfitSessionEngine:
                 "warnings": warnings,
                 "account_sync_enabled": bool(self.config.live),
                 "account_sync_mode": "live_enabled" if self.config.live else "dry_run_disabled",
+                "account_open_buy_order_count": state.account_open_buy_order_count,
+                "account_open_sell_order_count": state.account_open_sell_order_count,
+                "account_canceled_unselected_buy_count": state.account_canceled_unselected_buy_count,
+                "account_order_sync_error": state.account_order_sync_error,
                 "capital_limit_usdc": round(state.capital_limit_usdc, 6),
                 "capital_in_use_usdc": round(total_capital, 6),
                 "active_quote_market_count": active_quote_count,

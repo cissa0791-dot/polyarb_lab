@@ -113,6 +113,7 @@ class LiveOpenOrder:
     size_matched: float
     size_remaining: float
     status: str
+    token_id: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -369,6 +370,44 @@ class LiveWriteClient:
                 f"get_open_orders failed for token_id={token_id!r}: {exc}"
             ) from exc
 
+        return self._normalise_open_orders(raw, fallback_token_id=token_id)
+
+    def get_all_open_orders(self) -> list[LiveOpenOrder]:
+        """Return all open CLOB orders for the authenticated maker."""
+        if self.dry_run:
+            return []
+
+        errors: list[str] = []
+        for method_name in ("get_open_orders", "get_orders"):
+            method = getattr(self._client, method_name, None)
+            if method is None:
+                continue
+            attempts: list[tuple[Any, ...]] = [()]
+            try:
+                attempts.append((OpenOrderParams(),))
+            except TypeError:
+                pass
+            for args in attempts:
+                try:
+                    raw = method(*args)
+                    return self._normalise_open_orders(raw)
+                except TypeError as exc:
+                    errors.append(f"{method_name}{args}: {exc}")
+                    continue
+                except Exception as exc:
+                    raise LiveClientError(
+                        f"get_all_open_orders failed via {method_name}: {exc}"
+                    ) from exc
+
+        joined = "; ".join(errors) if errors else "no get_open_orders/get_orders method"
+        raise LiveClientError(f"get_all_open_orders failed: {joined}")
+
+    @staticmethod
+    def _normalise_open_orders(
+        raw: Any,
+        *,
+        fallback_token_id: str | None = None,
+    ) -> list[LiveOpenOrder]:
         rows = raw
         if isinstance(raw, dict):
             rows = raw.get("data") or raw.get("orders") or raw.get("results") or []
@@ -383,6 +422,16 @@ class LiveWriteClient:
             total_size = float(get("size") or get("original_size") or get("originalSize") or 0.0)
             matched = float(get("size_matched") or get("sizeMatched") or get("matched_size") or 0.0)
             remaining = float(get("size_remaining") or get("remaining_size") or get("sizeRemaining") or 0.0)
+            token_id = str(
+                get("asset_id")
+                or get("assetId")
+                or get("token_id")
+                or get("tokenID")
+                or get("makerAssetId")
+                or get("maker_asset_id")
+                or fallback_token_id
+                or ""
+            ) or None
             if remaining <= 0.0 and total_size > 0.0:
                 remaining = max(0.0, total_size - matched)
             orders.append(
@@ -394,6 +443,7 @@ class LiveWriteClient:
                     size_matched=matched,
                     size_remaining=remaining,
                     status=str(get("status") or "open"),
+                    token_id=token_id,
                 )
             )
         return orders
