@@ -8,6 +8,7 @@ from pathlib import Path
 
 from src.live.reward_profit_session import (
     RewardMarketStatus,
+    RewardMarketState,
     RewardOrderManager,
     RewardProfitCandidate,
     RewardProfitConfig,
@@ -1978,6 +1979,93 @@ class RewardProfitSessionEngineTests(unittest.TestCase):
             pnl = engine._build_pnl_report(state)
 
             self.assertIn("LOW_SCANNED_CANDIDATE_COUNT", pnl["summary"]["warnings"])
+
+    def test_best_ev_quote_search_can_choose_more_than_fixed_tick(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = RewardProfitConfig(
+                out_dir=tmpdir,
+                state_path=str(Path(tmpdir) / "state.json"),
+                pnl_path=str(Path(tmpdir) / "pnl.json"),
+                quote_search_mode="best_ev",
+                quote_improvement_cents=0.1,
+            )
+            engine = RewardProfitSessionEngine(
+                config,
+                reward_client_factory=lambda dry_run: None,
+                order_manager=_CountingOrderManager(),
+                registry_provider=lambda cfg: {"events": []},
+            )
+            market = RewardMarketState(
+                event_slug="event-1",
+                event_title="event-1",
+                market_slug="m1",
+                question="m1",
+                token_id="tok-m1",
+            )
+            candidate = _candidate(
+                market_slug="m1",
+                quote_size=10.0,
+                best_bid=0.35,
+                best_ask=0.40,
+                reward_hour=10.0,
+                drawdown_hour=0.0,
+                spread_capture_hour=10.0,
+                tick_size="0.01",
+            )
+
+            priced = engine._candidate_with_execution_quote(market, candidate)
+
+            self.assertGreater(priced.quote_bid, 0.351)
+            self.assertLess(priced.quote_bid, candidate.best_ask)
+            self.assertEqual(priced.quote_mode, "best_ev")
+
+    def test_optimal_action_respects_account_open_buy_order_cap(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manager = _LiveLifecycleOrderManager()
+            manager.all_open_orders = [
+                LiveOpenOrder(
+                    order_id="buy-1",
+                    side="BUY",
+                    price=0.35,
+                    size=50.0,
+                    size_matched=0.0,
+                    size_remaining=50.0,
+                    status="open",
+                    token_id="tok-other",
+                )
+            ]
+            config = RewardProfitConfig(
+                out_dir=tmpdir,
+                state_path=str(Path(tmpdir) / "state.json"),
+                pnl_path=str(Path(tmpdir) / "pnl.json"),
+                live=True,
+                action_mode="optimal",
+                quote_search_mode="best_ev",
+                max_account_open_buy_orders=1,
+                max_markets=1,
+                max_entry_cost_usdc=100.0,
+                max_entry_cost_pct=1.0,
+                max_break_even_hours=100.0,
+            )
+            engine = RewardProfitSessionEngine(
+                config,
+                reward_client_factory=lambda dry_run: None,
+                order_manager=manager,
+                registry_provider=lambda cfg: {"events": []},
+            )
+
+            state = engine._load_state()
+            engine._sync_account_order_summary(state)
+            reason = engine._candidate_filter_reason(
+                _candidate(market_slug="m1", spread_capture_hour=1.0),
+                state=state,
+                now=datetime(2026, 4, 24, tzinfo=timezone.utc),
+                horizon=1.0,
+                max_true_be=0.0,
+            )
+
+            self.assertEqual(state.account_open_buy_order_count, 1)
+            self.assertEqual(reason, "ACCOUNT_OPEN_BUY_COUNT")
 
 
 if __name__ == "__main__":

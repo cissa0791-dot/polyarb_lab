@@ -41,7 +41,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--reward-calibration-factor", type=float, default=1.0)
     parser.add_argument("--use-kelly-sizing", action="store_true")
     parser.add_argument("--kelly-fraction-scale", type=float, default=0.25)
+    parser.add_argument("--kelly-multiplier", type=float, default=None)
     parser.add_argument("--kelly-horizon-hours", type=float, default=1.0)
+    parser.add_argument("--action-mode", choices=["legacy", "optimal"], default="legacy")
+    parser.add_argument("--quote-search-mode", choices=["legacy", "best_ev"], default="legacy")
+    parser.add_argument("--target-inventory-usdc-per-market", type=float, default=0.0)
+    parser.add_argument("--max-total-inventory-usdc", type=float, default=0.0)
+    parser.add_argument("--max-total-open-buy-usdc", type=float, default=0.0)
+    parser.add_argument("--max-account-open-buy-orders", type=int, default=0)
+    parser.add_argument("--min-action-edge-usdc", type=float, default=0.0)
+    parser.add_argument("--profit-evidence-mode", choices=["off", "strict"], default="off")
+    parser.add_argument("--actual-reward-warmup-minutes", type=float, default=0.0)
     parser.add_argument("--entry-mode", choices=["maker_first", "inventory_first"], default="maker_first")
     parser.add_argument("--exit-cooldown-minutes", type=float, default=45.0)
     parser.add_argument("--repeat-exit-cooldown-minutes", type=float, default=90.0)
@@ -100,6 +110,7 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    kelly_fraction_scale = args.kelly_multiplier if args.kelly_multiplier is not None else args.kelly_fraction_scale
     max_inventory_shares = (
         float(args.max_inventory_shares_per_market)
         if args.max_inventory_shares_per_market is not None
@@ -110,6 +121,11 @@ def main() -> None:
         if args.max_inventory_usdc_per_market is not None
         else (min(float(args.per_market_cap), 25.0) if args.live else 0.0)
     )
+    optimal_live = bool(args.live and args.action_mode == "optimal")
+    target_inventory_usdc = args.target_inventory_usdc_per_market or (40.0 if optimal_live else 0.0)
+    max_total_inventory_usdc = args.max_total_inventory_usdc or (160.0 if optimal_live else 0.0)
+    max_total_open_buy_usdc = args.max_total_open_buy_usdc or (80.0 if optimal_live else 0.0)
+    max_account_open_buy_orders = args.max_account_open_buy_orders or (2 if optimal_live else 0)
     config = RewardProfitConfig(
         out_dir=str(ROOT / "data" / "reports"),
         state_path=str(ROOT / "data" / "reports" / "auto_trade_profit_state_latest.json"),
@@ -137,8 +153,17 @@ def main() -> None:
         drawdown_factor_per_day=args.drawdown_factor_per_day,
         reward_calibration_factor=args.reward_calibration_factor,
         use_kelly_sizing=args.use_kelly_sizing,
-        kelly_fraction_scale=args.kelly_fraction_scale,
+        kelly_fraction_scale=kelly_fraction_scale,
         kelly_horizon_hours=args.kelly_horizon_hours,
+        action_mode=args.action_mode,
+        quote_search_mode=args.quote_search_mode,
+        target_inventory_usdc_per_market=target_inventory_usdc,
+        max_total_inventory_usdc=max_total_inventory_usdc,
+        max_total_open_buy_usdc=max_total_open_buy_usdc,
+        max_account_open_buy_orders=max_account_open_buy_orders,
+        min_action_edge_usdc=args.min_action_edge_usdc,
+        profit_evidence_mode=args.profit_evidence_mode,
+        actual_reward_warmup_minutes=args.actual_reward_warmup_minutes,
         entry_mode=args.entry_mode,
         exit_cooldown_minutes=args.exit_cooldown_minutes,
         repeat_exit_cooldown_minutes=args.repeat_exit_cooldown_minutes,

@@ -80,6 +80,24 @@ class RewardProfitCandidate:
     profit_score: float = 0.0
     fill_probability_score: float = 0.0
     total_score: float = 0.0
+    action: str = "PLACE_BID"
+    action_score: float = 0.0
+    quote_bid_reason: str = "LEGACY_QUOTE"
+    quote_ask_reason: str = "LEGACY_QUOTE"
+    maker_rebate_estimate_per_hour: float = 0.0
+    inventory_risk_per_hour: float = 0.0
+    adverse_move_risk_per_hour: float = 0.0
+    stale_order_penalty_per_hour: float = 0.0
+    kelly_size: float = 0.0
+    final_order_size: float = 0.0
+    target_inventory_usdc: float = 0.0
+    account_inventory_usdc: float = 0.0
+    account_open_buy_usdc: float = 0.0
+    profit_gate_status: str = "PROBATION"
+    profit_gate_reason: str = "NO_LIVE_EVIDENCE_YET"
+    actual_reward_window_usdc: float = 0.0
+    verified_net_window_usdc: float = 0.0
+    fill_rate_window: float = 0.0
 
 
 @dataclass
@@ -135,6 +153,8 @@ class RewardProfitConfig:
     live_order_max_age_sec: float = 120.0
     live_requote_price_move_cents: float = 1.0
     quote_mode: str = "adaptive"
+    action_mode: str = "legacy"
+    quote_search_mode: str = "legacy"
     quote_improvement_cents: float = 0.0
     max_quote_improvement_cents: float = 0.3
     max_quote_improvement_cost_usdc: float = 0.25
@@ -142,6 +162,13 @@ class RewardProfitConfig:
     no_fill_cooldown_minutes: float = 30.0
     max_inventory_shares_per_market: float = 0.0
     max_inventory_usdc_per_market: float = 0.0
+    target_inventory_usdc_per_market: float = 0.0
+    max_total_inventory_usdc: float = 0.0
+    max_total_open_buy_usdc: float = 0.0
+    max_account_open_buy_orders: int = 0
+    min_action_edge_usdc: float = 0.0
+    profit_evidence_mode: str = "off"
+    actual_reward_warmup_minutes: float = 0.0
     inventory_dust_shares: float = 0.0001
     inventory_policy: str = "sell_only"
     event_limit: int = 200
@@ -245,6 +272,20 @@ class RewardMarketState:
     protected_sell_order_id: str | None = None
     canceled_buy_count: int = 0
     preserved_sell_count: int = 0
+    action: str = "HOLD"
+    action_score: float = 0.0
+    quote_bid_reason: str = "LEGACY_QUOTE"
+    quote_ask_reason: str = "LEGACY_QUOTE"
+    kelly_size: float = 0.0
+    final_order_size: float = 0.0
+    target_inventory_usdc: float = 0.0
+    account_inventory_usdc: float = 0.0
+    account_open_buy_usdc: float = 0.0
+    profit_gate_status: str = "PROBATION"
+    profit_gate_reason: str = "NO_LIVE_EVIDENCE_YET"
+    actual_reward_window_usdc: float = 0.0
+    verified_net_window_usdc: float = 0.0
+    fill_rate_window: float = 0.0
 
 
 @dataclass
@@ -274,6 +315,10 @@ class RewardProfitSessionState:
     account_open_sell_order_count: int = 0
     account_canceled_unselected_buy_count: int = 0
     account_order_sync_error: str | None = None
+    account_inventory_usdc: float = 0.0
+    account_open_buy_usdc: float = 0.0
+    account_open_sell_usdc: float = 0.0
+    account_canceled_excess_buy_count: int = 0
     selected_market_slugs: list[str] = field(default_factory=list)
     markets: dict[str, RewardMarketState] = field(default_factory=dict)
     cycle_history: list[dict[str, Any]] = field(default_factory=list)
@@ -406,6 +451,18 @@ def _sellable_token_size(balance: float, *, dust_shares: float = 0.0001) -> floa
     raw_units = int(max(0.0, balance) * 1_000_000)
     dust_units = int(max(0.0, dust_shares) * 1_000_000)
     return round(max(0, raw_units - dust_units) / 1_000_000.0, 6)
+
+
+def _tick_size_value(raw_tick: str | None) -> float:
+    try:
+        tick = float(raw_tick) if raw_tick not in (None, "") else 0.001
+    except Exception:
+        tick = 0.001
+    return max(0.000001, tick)
+
+
+def _order_notional(order: LiveOpenOrder) -> float:
+    return max(0.0, float(order.price or 0.0) * float(order.size_remaining or 0.0))
 
 
 def _make_order_intent(
@@ -994,6 +1051,8 @@ class RewardProfitSessionEngine:
             f"live buy {summary['live_open_buy_order_count']} sell {summary['live_open_sell_order_count']} | "
             f"acct buy {summary['account_open_buy_order_count']} sell {summary['account_open_sell_order_count']} | "
             f"mode {summary['inventory_mode']} | "
+            f"acct_inv ${summary.get('account_inventory_usdc', 0.0):.2f} open_buy ${summary.get('account_open_buy_usdc', 0.0):.2f} | "
+            f"action {summary.get('top_action', 'NA')} gate {summary.get('profit_gate_status', 'NA')} | "
             f"reward ${summary['reward_accrued_estimate_usdc'] + summary['reward_accrued_actual_usdc']:.4f} | "
             f"spread ${summary['spread_realized_usdc']:.4f} | "
             f"mtm ${summary['inventory_mtm_pnl_usdc']:.4f} | "
@@ -1024,6 +1083,22 @@ class RewardProfitSessionEngine:
         if self.config.max_break_even_hours > 0.0 and item.break_even_hours > self.config.max_break_even_hours + 1e-9:
             return "BREAK_EVEN_HOURS"
         if self.config.live:
+            if state is not None:
+                if (
+                    self.config.max_account_open_buy_orders > 0
+                    and state.account_open_buy_order_count >= self.config.max_account_open_buy_orders
+                ):
+                    return "ACCOUNT_OPEN_BUY_COUNT"
+                if (
+                    self.config.max_total_open_buy_usdc > 0.0
+                    and state.account_open_buy_usdc >= self.config.max_total_open_buy_usdc - 1e-9
+                ):
+                    return "ACCOUNT_OPEN_BUY_LIMIT"
+                if (
+                    self.config.max_total_inventory_usdc > 0.0
+                    and state.account_inventory_usdc >= self.config.max_total_inventory_usdc - 1e-9
+                ):
+                    return "ACCOUNT_INVENTORY_LIMIT"
             if (
                 self.config.max_inventory_shares_per_market > 0.0
                 and item.quote_size > self.config.max_inventory_shares_per_market + 1e-9
@@ -1106,6 +1181,7 @@ class RewardProfitSessionEngine:
         now = cycle_ts or _utc_now()
         state.cycle_index += 1
         state.updated_ts = now.isoformat()
+        self._sync_account_order_summary(state)
 
         if scanned_candidates is None:
             registry = self.registry_provider(self.config)
@@ -1177,6 +1253,7 @@ class RewardProfitSessionEngine:
             self._sync_live_market_state(market_state, candidate, now)
             self._advance_market_state(state, market_state, candidate, now)
 
+        self._sync_account_order_summary(state)
         pnl_report = self._build_pnl_report(state)
         state.halted = pnl_report["summary"]["net_after_reward_and_cost_usdc"] <= -abs(self.config.max_daily_loss)
         state.halt_reason = "MAX_DAILY_LOSS" if state.halted else None
@@ -1200,6 +1277,7 @@ class RewardProfitSessionEngine:
         previous_ts = datetime.fromisoformat(market_state.last_cycle_ts) if market_state.last_cycle_ts else now
         dt_hours = max(0.0, (now - previous_ts).total_seconds() / 3600.0)
         candidate = self._candidate_with_execution_quote(market_state, candidate)
+        candidate = self._candidate_with_optimal_action(state, market_state, candidate)
 
         market_state.status = RewardMarketStatus.SELECTED.value
         if market_state.last_exit_ts and market_state.inventory_shares <= 0.0:
@@ -1217,6 +1295,17 @@ class RewardProfitSessionEngine:
         market_state.quote_attempt = candidate.quote_attempt
         market_state.next_quote_bid = candidate.next_quote_bid
         market_state.quote_decision_reason = candidate.quote_decision_reason
+        market_state.action = candidate.action
+        market_state.action_score = candidate.action_score
+        market_state.quote_bid_reason = candidate.quote_bid_reason
+        market_state.quote_ask_reason = candidate.quote_ask_reason
+        market_state.kelly_size = candidate.kelly_size
+        market_state.final_order_size = candidate.final_order_size
+        market_state.target_inventory_usdc = candidate.target_inventory_usdc
+        market_state.account_inventory_usdc = candidate.account_inventory_usdc
+        market_state.account_open_buy_usdc = candidate.account_open_buy_usdc
+        market_state.profit_gate_status = candidate.profit_gate_status
+        market_state.profit_gate_reason = candidate.profit_gate_reason
 
         self._refresh_live_order_marks(market_state, now)
         self._enforce_live_synced_inventory_floor(market_state)
@@ -1316,6 +1405,13 @@ class RewardProfitSessionEngine:
         )
         market_state.net_after_reward_and_cost_usdc = round(
             market_state.net_after_reward_usdc - market_state.total_cost_proxy_usdc,
+            6,
+        )
+        market_state.actual_reward_window_usdc = round(market_state.reward_accrued_actual_usdc, 6)
+        market_state.verified_net_window_usdc = round(market_state.net_after_reward_and_cost_usdc, 6)
+        denominator = max(1.0, market_state.bid_order_size + market_state.ask_order_size)
+        market_state.fill_rate_window = round(
+            (market_state.bid_order_filled_size + market_state.ask_order_filled_size) / denominator,
             6,
         )
         self._update_inventory_risk_metrics(market_state, candidate)
@@ -1506,6 +1602,48 @@ class RewardProfitSessionEngine:
         market_state.ask_order_remaining_size = round(order.size_remaining, 6)
         market_state.ask_order_status = order.status
 
+    def _sync_account_order_summary(self, state: RewardProfitSessionState) -> list[LiveOpenOrder]:
+        if not self.config.live:
+            state.account_open_buy_order_count = 0
+            state.account_open_sell_order_count = 0
+            state.account_open_buy_usdc = 0.0
+            state.account_open_sell_usdc = 0.0
+            state.account_inventory_usdc = 0.0
+            state.account_order_sync_error = None
+            return []
+        try:
+            open_orders = self.order_manager.get_all_open_orders()
+        except Exception as exc:
+            state.account_order_sync_error = f"account open order sync failed: {exc}"
+            state.last_scan_diagnostics["account_order_sync_error"] = state.account_order_sync_error
+            return []
+
+        dust = max(0.0, float(self.config.inventory_dust_shares))
+        buy_orders = [
+            order for order in open_orders
+            if order.side == "BUY" and order.size_remaining > dust + 1e-9
+        ]
+        sell_orders = [
+            order for order in open_orders
+            if order.side == "SELL" and order.size_remaining > dust + 1e-9
+        ]
+        account_inventory = 0.0
+        for market in state.markets.values():
+            mark = market.last_best_bid or market.avg_inventory_cost or 0.0
+            account_inventory += max(0.0, market.live_synced_inventory_shares or market.inventory_shares) * mark
+        state.account_open_buy_order_count = len(buy_orders)
+        state.account_open_sell_order_count = len(sell_orders)
+        state.account_open_buy_usdc = round(sum(_order_notional(order) for order in buy_orders), 6)
+        state.account_open_sell_usdc = round(sum(_order_notional(order) for order in sell_orders), 6)
+        state.account_inventory_usdc = round(account_inventory, 6)
+        state.account_order_sync_error = None
+        state.last_scan_diagnostics["account_open_buy_orders_seen"] = len(buy_orders)
+        state.last_scan_diagnostics["account_open_sell_orders_seen"] = len(sell_orders)
+        state.last_scan_diagnostics["account_open_buy_usdc"] = state.account_open_buy_usdc
+        state.last_scan_diagnostics["account_open_sell_usdc"] = state.account_open_sell_usdc
+        state.last_scan_diagnostics["account_inventory_usdc"] = state.account_inventory_usdc
+        return open_orders
+
     def _cancel_unselected_live_buy_orders(
         self,
         state: RewardProfitSessionState,
@@ -1515,14 +1653,12 @@ class RewardProfitSessionEngine:
             state.account_open_buy_order_count = 0
             state.account_open_sell_order_count = 0
             state.account_canceled_unselected_buy_count = 0
+            state.account_canceled_excess_buy_count = 0
             state.account_order_sync_error = None
             return
         selected_token_ids = {item.token_id for item in selected}
-        try:
-            open_orders = self.order_manager.get_all_open_orders()
-        except Exception as exc:
-            state.account_order_sync_error = f"account open order sync failed: {exc}"
-            state.last_scan_diagnostics["account_order_sync_error"] = state.account_order_sync_error
+        open_orders = self._sync_account_order_summary(state)
+        if state.account_order_sync_error:
             return
 
         dust = max(0.0, float(self.config.inventory_dust_shares))
@@ -1537,6 +1673,8 @@ class RewardProfitSessionEngine:
             if order.side == "SELL" and order.size_remaining > dust + 1e-9
         ]
         canceled = 0
+        excess_canceled = 0
+        canceled_ids: set[str] = set()
         skipped_unknown_token = 0
         for order in buy_orders:
             if order.token_id is None:
@@ -1546,14 +1684,45 @@ class RewardProfitSessionEngine:
                 continue
             if self.order_manager.cancel_order(order.order_id):
                 canceled += 1
+                canceled_ids.add(order.order_id)
 
-        state.account_open_buy_order_count = max(0, len(buy_orders) - canceled)
+        remaining_buys = [order for order in buy_orders if order.order_id not in canceled_ids]
+        max_orders = int(self.config.max_account_open_buy_orders or 0)
+        if max_orders > 0 and len(remaining_buys) > max_orders:
+            remaining_buys.sort(
+                key=lambda order: (
+                    0 if order.token_id in selected_token_ids else 1,
+                    getattr(order, "created_ts", "") or "",
+                )
+            )
+            for order in remaining_buys[max_orders:]:
+                if self.order_manager.cancel_order(order.order_id):
+                    excess_canceled += 1
+                    canceled_ids.add(order.order_id)
+        max_open_buy_usdc = float(self.config.max_total_open_buy_usdc or 0.0)
+        if max_open_buy_usdc > 0.0:
+            remaining_buys = [order for order in buy_orders if order.order_id not in canceled_ids]
+            open_buy_usdc = sum(_order_notional(order) for order in remaining_buys)
+            for order in sorted(remaining_buys, key=_order_notional, reverse=True):
+                if open_buy_usdc <= max_open_buy_usdc + 1e-9:
+                    break
+                if self.order_manager.cancel_order(order.order_id):
+                    excess_canceled += 1
+                    canceled_ids.add(order.order_id)
+                    open_buy_usdc -= _order_notional(order)
+
+        remaining_buys = [order for order in buy_orders if order.order_id not in canceled_ids]
+        state.account_open_buy_order_count = len(remaining_buys)
         state.account_open_sell_order_count = len(sell_orders)
+        state.account_open_buy_usdc = round(sum(_order_notional(order) for order in remaining_buys), 6)
+        state.account_open_sell_usdc = round(sum(_order_notional(order) for order in sell_orders), 6)
         state.account_canceled_unselected_buy_count = canceled
+        state.account_canceled_excess_buy_count = excess_canceled
         state.account_order_sync_error = None
         state.last_scan_diagnostics["account_open_buy_orders_seen"] = len(buy_orders)
         state.last_scan_diagnostics["account_open_sell_orders_seen"] = len(sell_orders)
         state.last_scan_diagnostics["account_canceled_unselected_buy_orders"] = canceled
+        state.last_scan_diagnostics["account_canceled_excess_buy_orders"] = excess_canceled
         if skipped_unknown_token:
             state.last_scan_diagnostics["account_open_buy_orders_without_token_id"] = skipped_unknown_token
 
@@ -1563,6 +1732,17 @@ class RewardProfitSessionEngine:
         candidate: RewardProfitCandidate,
         now: datetime,
     ) -> tuple[str | None, str | None]:
+        if str(self.config.action_mode or "legacy").lower() == "optimal":
+            if candidate.action in {"SKIP", "HOLD"} and market_state.inventory_shares <= self.config.inventory_dust_shares + 1e-9:
+                if market_state.bid_order_id:
+                    self._cancel_side_order(market_state, "bid", "ACTION_CANCEL_BUY", count_requote=False)
+                    market_state.canceled_buy_count += 1
+                return None, None
+            if candidate.action in {"PLACE_ASK", "REDUCE_ONLY_SELL", "FLATTEN_POSITION"}:
+                market_state.allow_bid_with_inventory = False
+                if market_state.bid_order_id:
+                    self._cancel_side_order(market_state, "bid", "ACTION_SELL_ONLY_CANCEL_BUY", count_requote=False)
+                    market_state.canceled_buy_count += 1
         if self.config.entry_mode != "maker_first":
             return self.order_manager.ensure_quote_orders(market_state, candidate)
         if self.config.live and self._inventory_limit_reached(market_state, candidate):
@@ -1618,6 +1798,9 @@ class RewardProfitSessionEngine:
         market_state: RewardMarketState,
         candidate: RewardProfitCandidate,
     ) -> RewardProfitCandidate:
+        if str(self.config.quote_search_mode or "legacy").lower() == "best_ev" or str(self.config.action_mode or "legacy").lower() == "optimal":
+            return self._candidate_with_best_ev_quote(market_state, candidate)
+
         mode = str(self.config.quote_mode or "passive").lower()
         if mode not in {"passive", "midpoint", "adaptive", "urgent"}:
             mode = "passive"
@@ -1665,6 +1848,210 @@ class RewardProfitSessionEngine:
             next_quote_bid=quote_bid,
             quote_decision_reason=decision,
         )
+
+    def _candidate_with_best_ev_quote(
+        self,
+        market_state: RewardMarketState,
+        candidate: RewardProfitCandidate,
+    ) -> RewardProfitCandidate:
+        tick = _tick_size_value(candidate.tick_size)
+        best_bid = float(candidate.best_bid)
+        best_ask = float(candidate.best_ask)
+        spread = max(tick, best_ask - best_bid)
+        max_bid = max(0.0, best_ask - tick)
+        min_ask = best_bid + tick
+        bid_prices = {
+            best_bid,
+            min(max_bid, best_bid + tick),
+            min(max_bid, candidate.midpoint),
+            max_bid,
+        }
+        ask_prices = {
+            best_ask,
+            max(min_ask, best_ask - tick),
+            max(min_ask, candidate.midpoint),
+            min_ask,
+        }
+
+        def bid_score(price: float) -> float:
+            improvement = max(0.0, price - best_bid)
+            fill_boost = 1.0 + min(1.0, improvement / spread) * 0.65
+            reward = candidate.expected_reward_per_hour_lower * fill_boost
+            spread_capture = candidate.expected_spread_capture_per_hour * fill_boost
+            improvement_cost = improvement * candidate.quote_size
+            stale_penalty = 0.0005 * max(0, int(market_state.no_fill_requote_count))
+            return reward + spread_capture - candidate.expected_drawdown_cost_per_hour - improvement_cost - stale_penalty
+
+        valid_bids = sorted(price for price in bid_prices if best_bid <= price < best_ask - 1e-9)
+        if not valid_bids:
+            valid_bids = [best_bid]
+        quote_bid = max(valid_bids, key=bid_score)
+        quote_bid = round(quote_bid, 6)
+
+        inventory = max(0.0, market_state.inventory_shares)
+        avg_cost = market_state.avg_inventory_cost or quote_bid
+
+        def ask_score(price: float) -> float:
+            discount = max(0.0, best_ask - price)
+            size = min(inventory if inventory > 0.0 else candidate.quote_size, candidate.quote_size)
+            realized_edge = max(0.0, price - avg_cost) * size
+            fill_boost = 1.0 + min(1.0, discount / spread) * 0.65
+            return realized_edge * fill_boost + candidate.expected_reward_per_hour_lower * 0.25 - discount * size * 0.25
+
+        valid_asks = sorted(price for price in ask_prices if price > best_bid + 1e-9)
+        quote_ask = round(max(valid_asks, key=ask_score) if valid_asks else best_ask, 6)
+        improvement = max(0.0, quote_bid - best_bid)
+        quote_cost = improvement * candidate.quote_size
+        action_score = bid_score(quote_bid)
+        return replace(
+            candidate,
+            quote_bid=quote_bid,
+            quote_ask=quote_ask,
+            quote_improvement_cents=round(improvement * 100.0, 6),
+            quote_improvement_cost_usdc=round(quote_cost, 6),
+            quote_improvement_reason="BEST_EV_QUOTE_SEARCH",
+            quote_mode="best_ev",
+            quote_attempt=max(0, int(market_state.no_fill_requote_count)),
+            next_quote_bid=quote_bid,
+            quote_decision_reason="BEST_EV_QUOTE_SEARCH",
+            quote_bid_reason=f"BEST_EV_BID_SCORE:{action_score:.6f}",
+            quote_ask_reason="BEST_EV_ASK_SEARCH",
+            action_score=round(action_score, 6),
+            maker_rebate_estimate_per_hour=0.0,
+            inventory_risk_per_hour=round(candidate.expected_drawdown_cost_per_hour, 6),
+            stale_order_penalty_per_hour=round(0.0005 * max(0, int(market_state.no_fill_requote_count)), 6),
+        )
+
+    def _candidate_with_optimal_action(
+        self,
+        state: RewardProfitSessionState,
+        market_state: RewardMarketState,
+        candidate: RewardProfitCandidate,
+    ) -> RewardProfitCandidate:
+        if str(self.config.action_mode or "legacy").lower() != "optimal":
+            return candidate
+
+        dust = max(0.0, float(self.config.inventory_dust_shares))
+        price = max(0.000001, float(candidate.quote_bid or candidate.best_bid))
+        inventory_shares = max(0.0, market_state.inventory_shares)
+        inventory_usdc = inventory_shares * price
+        target_usdc = float(self.config.target_inventory_usdc_per_market or 0.0)
+        if target_usdc <= 0.0:
+            max_inv = float(self.config.max_inventory_usdc_per_market or self.config.per_market_cap_usdc or 0.0)
+            target_usdc = max_inv * 0.5 if max_inv > 0.0 else self.config.per_market_cap_usdc * 0.5
+        max_market_usdc = float(self.config.max_inventory_usdc_per_market or self.config.per_market_cap_usdc or 0.0)
+        account_inventory_usdc = max(state.account_inventory_usdc, inventory_usdc)
+        account_open_buy_usdc = max(0.0, state.account_open_buy_usdc)
+
+        edge_usdc = candidate.action_score * max(0.0, self.config.projection_horizon_hours)
+        profit_gate_status, profit_gate_reason = self._profit_gate_status(market_state, candidate)
+
+        action = "PLACE_BID"
+        buy_block_reason = None
+        allow_bid = inventory_shares <= dust
+        if inventory_shares > dust:
+            allow_bid = bool(self.config.inventory_policy == "balanced" and inventory_usdc < target_usdc - 1e-9)
+            action = "BALANCED_QUOTE" if allow_bid else "PLACE_ASK"
+        if max_market_usdc > 0.0 and inventory_usdc >= max_market_usdc - 1e-9:
+            action = "REDUCE_ONLY_SELL"
+            allow_bid = False
+            buy_block_reason = "INVENTORY_LIMIT"
+        if self.config.max_total_inventory_usdc > 0.0 and account_inventory_usdc >= self.config.max_total_inventory_usdc - 1e-9:
+            action = "REDUCE_ONLY_SELL"
+            allow_bid = False
+            buy_block_reason = "ACCOUNT_INVENTORY_LIMIT"
+        if self.config.max_account_open_buy_orders > 0 and state.account_open_buy_order_count >= self.config.max_account_open_buy_orders:
+            allow_bid = False
+            buy_block_reason = buy_block_reason or "ACCOUNT_OPEN_BUY_COUNT"
+            if inventory_shares <= dust:
+                action = "SKIP"
+        if self.config.max_total_open_buy_usdc > 0.0 and account_open_buy_usdc >= self.config.max_total_open_buy_usdc - 1e-9:
+            allow_bid = False
+            buy_block_reason = buy_block_reason or "ACCOUNT_OPEN_BUY_LIMIT"
+            if inventory_shares <= dust:
+                action = "SKIP"
+        if profit_gate_status == "HARD_FAIL":
+            allow_bid = False
+            buy_block_reason = buy_block_reason or "PROFIT_GATE_HARD_FAIL"
+            action = "REDUCE_ONLY_SELL" if inventory_shares > dust else "SKIP"
+        if edge_usdc < float(self.config.min_action_edge_usdc or 0.0) and inventory_shares <= dust:
+            allow_bid = False
+            buy_block_reason = buy_block_reason or "MIN_ACTION_EDGE"
+            action = "SKIP"
+
+        headrooms = [max(0.0, candidate.quote_size)]
+        if target_usdc > 0.0:
+            headrooms.append(max(0.0, (target_usdc - inventory_usdc) / price))
+        if max_market_usdc > 0.0:
+            headrooms.append(max(0.0, (max_market_usdc - inventory_usdc) / price))
+        if self.config.max_total_inventory_usdc > 0.0:
+            headrooms.append(max(0.0, (self.config.max_total_inventory_usdc - account_inventory_usdc) / price))
+        if self.config.max_total_open_buy_usdc > 0.0:
+            headrooms.append(max(0.0, (self.config.max_total_open_buy_usdc - account_open_buy_usdc) / price))
+        if self.config.capital_limit_usdc > 0.0:
+            headrooms.append(max(0.0, self.config.capital_limit_usdc / price))
+        if self.config.per_market_cap_usdc > 0.0:
+            headrooms.append(max(0.0, self.config.per_market_cap_usdc / price))
+        if self.config.use_kelly_sizing:
+            headrooms.append(max(0.0, candidate.kelly_position_shares))
+
+        final_size = round(max(0.0, min(headrooms)), 6) if allow_bid else 0.0
+        reward_min = max(0.0, float(candidate.effective_quote_size or candidate.quote_size))
+        if allow_bid and reward_min > 0.0 and final_size + 1e-9 < reward_min:
+            allow_bid = False
+            final_size = 0.0
+            buy_block_reason = buy_block_reason or "RISK_CAP_BELOW_REWARD_MIN_SIZE"
+            action = "PLACE_ASK" if inventory_shares > dust else "SKIP"
+
+        market_state.allow_bid_with_inventory = allow_bid and inventory_shares > dust
+        if not allow_bid:
+            market_state.buy_block_reason = buy_block_reason
+        if inventory_shares > dust:
+            market_state.inventory_mode = "balanced" if allow_bid else "sell_only"
+        elif action == "SKIP":
+            market_state.inventory_mode = "normal"
+
+        return replace(
+            candidate,
+            quote_size=final_size if allow_bid and final_size > 0.0 else candidate.quote_size,
+            action=action,
+            action_score=round(edge_usdc, 6),
+            kelly_size=round(candidate.kelly_position_shares if self.config.use_kelly_sizing else 0.0, 6),
+            final_order_size=final_size,
+            target_inventory_usdc=round(target_usdc, 6),
+            account_inventory_usdc=round(account_inventory_usdc, 6),
+            account_open_buy_usdc=round(account_open_buy_usdc, 6),
+            profit_gate_status=profit_gate_status,
+            profit_gate_reason=profit_gate_reason,
+            actual_reward_window_usdc=round(market_state.reward_accrued_actual_usdc, 6),
+            verified_net_window_usdc=round(market_state.net_after_reward_and_cost_usdc, 6),
+            fill_rate_window=round(
+                (market_state.bid_order_filled_size + market_state.ask_order_filled_size)
+                / max(1.0, market_state.bid_order_size + market_state.ask_order_size),
+                6,
+            ),
+        )
+
+    def _profit_gate_status(
+        self,
+        market_state: RewardMarketState,
+        candidate: RewardProfitCandidate,
+    ) -> tuple[str, str]:
+        mode = str(self.config.profit_evidence_mode or "off").lower()
+        if mode in {"", "off", "none"}:
+            return "PROBATION", "PROFIT_GATE_OFF"
+        warmup_hours = max(0.0, float(self.config.actual_reward_warmup_minutes or 0.0)) / 60.0
+        if market_state.hours_in_reward_zone < warmup_hours:
+            return "PROBATION", "WARMUP"
+        verified = market_state.net_after_reward_and_cost_usdc
+        filled = market_state.bid_order_filled_size + market_state.ask_order_filled_size
+        if verified > max(0.0, float(self.config.min_action_edge_usdc or 0.0)) and (
+            market_state.reward_accrued_actual_usdc > 0.0 or market_state.spread_realized_usdc > 0.0 or filled > 0.0
+        ):
+            return "PASS", "VERIFIED_POSITIVE"
+        if verified <= 0.0 and market_state.reward_accrued_actual_usdc <= 0.0 and mode == "strict":
+            return "SOFT_FAIL", "NO_ACTUAL_REWARD_OR_VERIFIED_NET"
+        return "PROBATION", "INSUFFICIENT_EVIDENCE"
 
     def _update_exit_behavior_metrics(
         self,
@@ -2412,6 +2799,20 @@ class RewardProfitSessionEngine:
                 "queue_wait_sec": round(market.queue_wait_sec, 3),
                 "next_quote_bid": round(float(market.next_quote_bid or 0.0), 6),
                 "quote_decision_reason": market.quote_decision_reason,
+                "action": market.action,
+                "action_score": round(market.action_score, 6),
+                "quote_bid_reason": market.quote_bid_reason,
+                "quote_ask_reason": market.quote_ask_reason,
+                "kelly_size": round(market.kelly_size, 6),
+                "final_order_size": round(market.final_order_size, 6),
+                "target_inventory_usdc": round(market.target_inventory_usdc, 6),
+                "account_inventory_usdc": round(market.account_inventory_usdc, 6),
+                "account_open_buy_usdc": round(market.account_open_buy_usdc, 6),
+                "profit_gate_status": market.profit_gate_status,
+                "profit_gate_reason": market.profit_gate_reason,
+                "actual_reward_window_usdc": round(market.actual_reward_window_usdc, 6),
+                "verified_net_window_usdc": round(market.verified_net_window_usdc, 6),
+                "fill_rate_window": round(market.fill_rate_window, 6),
                 "last_order_error": market.last_order_error,
                 "last_cancel_reason": market.last_cancel_reason,
                 "sizing_mode": str(market.selection_metrics.get("sizing_mode") or ""),
@@ -2447,6 +2848,10 @@ class RewardProfitSessionEngine:
         raw_seen = int(state.last_scan_diagnostics.get("raw_markets_seen") or 0)
         if raw_seen >= 1000 and state.last_scanned_candidate_count < 100:
             warnings.append("LOW_SCANNED_CANDIDATE_COUNT")
+        selected_market_rows = [
+            state.markets[slug] for slug in state.selected_market_slugs if slug in state.markets
+        ]
+        top_market = max(selected_market_rows, key=lambda market: market.action_score, default=None)
         return {
             "report_type": "reward_profit_pnl",
             "session_id": state.session_id,
@@ -2466,8 +2871,16 @@ class RewardProfitSessionEngine:
                 "account_sync_mode": "live_enabled" if self.config.live else "dry_run_disabled",
                 "account_open_buy_order_count": state.account_open_buy_order_count,
                 "account_open_sell_order_count": state.account_open_sell_order_count,
+                "account_inventory_usdc": round(state.account_inventory_usdc, 6),
+                "account_open_buy_usdc": round(state.account_open_buy_usdc, 6),
+                "account_open_sell_usdc": round(state.account_open_sell_usdc, 6),
                 "account_canceled_unselected_buy_count": state.account_canceled_unselected_buy_count,
+                "account_canceled_excess_buy_count": state.account_canceled_excess_buy_count,
                 "account_order_sync_error": state.account_order_sync_error,
+                "top_action": top_market.action if top_market is not None else "NA",
+                "top_action_score": round(top_market.action_score, 6) if top_market is not None else 0.0,
+                "profit_gate_status": top_market.profit_gate_status if top_market is not None else "NA",
+                "profit_gate_reason": top_market.profit_gate_reason if top_market is not None else "NA",
                 "capital_limit_usdc": round(state.capital_limit_usdc, 6),
                 "capital_in_use_usdc": round(total_capital, 6),
                 "active_quote_market_count": active_quote_count,
