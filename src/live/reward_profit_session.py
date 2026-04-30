@@ -98,6 +98,18 @@ class RewardProfitCandidate:
     actual_reward_window_usdc: float = 0.0
     verified_net_window_usdc: float = 0.0
     fill_rate_window: float = 0.0
+    strategy_id: str = "reward_mm"
+    decision_trace: list[str] = field(default_factory=list)
+    expected_verified_net: float = 0.0
+    reward_score_estimate: float = 0.0
+    competition_score_estimate: float = 0.0
+    queue_position_estimate: float = 0.0
+    adverse_selection_after_fill_usdc: float = 0.0
+    quote_time_in_reward_zone_sec: float = 0.0
+    order_reject_count: int = 0
+    risk_reject_reason: str | None = None
+    scale_gate_status: str = "PROBATION"
+    scale_gate_reason: str = "NO_LIVE_EVIDENCE_YET"
 
 
 @dataclass
@@ -169,6 +181,16 @@ class RewardProfitConfig:
     min_action_edge_usdc: float = 0.0
     profit_evidence_mode: str = "off"
     actual_reward_warmup_minutes: float = 0.0
+    strategy_set: str = "reward_mm,inventory_manager"
+    scale_mode: str = "evidence_gated"
+    risk_profile: str = "standard"
+    max_verified_drawdown_usdc: float = 0.0
+    min_actual_reward_window_usdc: float = 0.0
+    min_verified_net_window_usdc: float = 0.0
+    disable_new_buys: bool = False
+    inventory_manager_only: bool = False
+    max_order_rejects_per_hour: int = 0
+    quote_refresh_mode: str = "cycle"
     inventory_dust_shares: float = 0.0001
     inventory_policy: str = "sell_only"
     min_live_order_size_shares: float = 5.0
@@ -289,6 +311,18 @@ class RewardMarketState:
     actual_reward_window_usdc: float = 0.0
     verified_net_window_usdc: float = 0.0
     fill_rate_window: float = 0.0
+    strategy_id: str = "reward_mm"
+    decision_trace: list[str] = field(default_factory=list)
+    expected_verified_net: float = 0.0
+    reward_score_estimate: float = 0.0
+    competition_score_estimate: float = 0.0
+    queue_position_estimate: float = 0.0
+    adverse_selection_after_fill_usdc: float = 0.0
+    quote_time_in_reward_zone_sec: float = 0.0
+    order_reject_count: int = 0
+    risk_reject_reason: str | None = None
+    scale_gate_status: str = "PROBATION"
+    scale_gate_reason: str = "NO_LIVE_EVIDENCE_YET"
 
 
 @dataclass
@@ -1096,6 +1130,12 @@ class RewardProfitSessionEngine:
             existing = state.markets.get(item.market_slug)
             if existing is not None and self._market_in_cooldown(existing, now):
                 return "COOLDOWN_AFTER_EXIT"
+            if (
+                existing is not None
+                and self.config.max_order_rejects_per_hour > 0
+                and existing.order_reject_count >= self.config.max_order_rejects_per_hour
+            ):
+                return "ORDER_REJECT_LIMIT"
         if self.config.max_entry_cost_usdc > 0.0 and item.immediate_entry_cost_usdc > self.config.max_entry_cost_usdc + 1e-9:
             return "ENTRY_COST_USDC"
         if self.config.max_entry_cost_pct > 0.0 and item.immediate_entry_cost_pct > self.config.max_entry_cost_pct + 1e-9:
@@ -1326,6 +1366,17 @@ class RewardProfitSessionEngine:
         market_state.account_open_buy_usdc = candidate.account_open_buy_usdc
         market_state.profit_gate_status = candidate.profit_gate_status
         market_state.profit_gate_reason = candidate.profit_gate_reason
+        market_state.strategy_id = candidate.strategy_id
+        market_state.decision_trace = list(candidate.decision_trace)
+        market_state.expected_verified_net = candidate.expected_verified_net
+        market_state.reward_score_estimate = candidate.reward_score_estimate
+        market_state.competition_score_estimate = candidate.competition_score_estimate
+        market_state.queue_position_estimate = candidate.queue_position_estimate
+        market_state.adverse_selection_after_fill_usdc = candidate.adverse_selection_after_fill_usdc
+        market_state.quote_time_in_reward_zone_sec = candidate.quote_time_in_reward_zone_sec
+        market_state.risk_reject_reason = candidate.risk_reject_reason
+        market_state.scale_gate_status = candidate.scale_gate_status
+        market_state.scale_gate_reason = candidate.scale_gate_reason
 
         self._refresh_live_order_marks(market_state, now)
         self._enforce_live_synced_inventory_floor(market_state)
@@ -1348,6 +1399,8 @@ class RewardProfitSessionEngine:
         bid_order_id, ask_order_id = self._ensure_quote_orders(market_state, candidate, now)
         market_state.bid_order_id = bid_order_id
         market_state.ask_order_id = ask_order_id
+        if market_state.last_order_error:
+            market_state.order_reject_count += 1
         self._record_new_order_metadata(market_state, candidate, now, previous_bid_id, previous_ask_id)
         if self.config.live and self._is_order_version_mismatch(market_state.last_order_error):
             self._pause_market(
@@ -1375,6 +1428,8 @@ class RewardProfitSessionEngine:
             bid_order_id, ask_order_id = self._ensure_quote_orders(market_state, candidate, now)
             market_state.bid_order_id = bid_order_id
             market_state.ask_order_id = ask_order_id
+            if market_state.last_order_error:
+                market_state.order_reject_count += 1
             self._record_new_order_metadata(market_state, candidate, now, previous_bid_id, previous_ask_id)
             if self.config.live and self._is_order_version_mismatch(market_state.last_order_error):
                 self._pause_market(
@@ -1534,6 +1589,20 @@ class RewardProfitSessionEngine:
         market_state.live_open_buy_order_count = len(buys)
         market_state.live_open_sell_order_count = len(sells)
         market_state.external_order_sync_count += len(open_orders)
+        if self.config.disable_new_buys or self.config.inventory_manager_only:
+            for order in buys:
+                if self.order_manager.cancel_order(order.order_id):
+                    market_state.cancel_count += 1
+                    market_state.canceled_buy_count += 1
+                    market_state.last_cancel_reason = (
+                        "INVENTORY_MANAGER_ONLY_CANCEL_BUY"
+                        if self.config.inventory_manager_only
+                        else "NEW_BUYS_DISABLED_CANCEL_BUY"
+                    )
+            if buys:
+                market_state.bid_order_id = None
+                market_state.live_open_buy_order_count = 0
+                buys = []
 
         if has_inventory:
             limit_reached = self._inventory_limit_reached(market_state, candidate)
@@ -1775,6 +1844,16 @@ class RewardProfitSessionEngine:
             min_order_size_shares=market_state.min_order_size_shares,
         )
         has_tradeable_inventory = sellable_inventory > 0.0
+        if self.config.live and (self.config.disable_new_buys or self.config.inventory_manager_only):
+            market_state.allow_bid_with_inventory = False
+            market_state.buy_block_reason = (
+                "INVENTORY_MANAGER_ONLY" if self.config.inventory_manager_only else "NEW_BUYS_DISABLED"
+            )
+            if market_state.bid_order_id:
+                self._cancel_side_order(market_state, "bid", market_state.buy_block_reason, count_requote=False)
+                market_state.canceled_buy_count += 1
+            if not has_tradeable_inventory:
+                return None, None
         if str(self.config.action_mode or "legacy").lower() == "optimal":
             if candidate.action in {"SKIP", "HOLD"} and not has_tradeable_inventory:
                 if market_state.bid_order_id:
@@ -1994,6 +2073,20 @@ class RewardProfitSessionEngine:
 
         edge_usdc = candidate.action_score * max(0.0, self.config.projection_horizon_hours)
         profit_gate_status, profit_gate_reason = self._profit_gate_status(market_state, candidate)
+        strategy_tokens = {
+            token.strip().lower()
+            for token in str(self.config.strategy_set or "").split(",")
+            if token.strip()
+        }
+        reward_mm_enabled = "reward_mm" in strategy_tokens
+        inventory_manager_enabled = "inventory_manager" in strategy_tokens or not strategy_tokens
+        scale_gate_status = profit_gate_status if str(self.config.scale_mode or "").lower() == "evidence_gated" else "OFF"
+        scale_gate_reason = profit_gate_reason if scale_gate_status != "OFF" else "SCALE_GATE_OFF"
+        decision_trace: list[str] = [
+            f"strategy_set={','.join(sorted(strategy_tokens)) or 'default'}",
+            f"profit_gate={profit_gate_status}:{profit_gate_reason}",
+            f"scale_gate={scale_gate_status}:{scale_gate_reason}",
+        ]
 
         action = "PLACE_BID"
         buy_block_reason = None
@@ -2019,14 +2112,33 @@ class RewardProfitSessionEngine:
             buy_block_reason = buy_block_reason or "ACCOUNT_OPEN_BUY_LIMIT"
             if inventory_shares <= dust:
                 action = "SKIP"
-        if profit_gate_status == "HARD_FAIL":
+        if self.config.inventory_manager_only:
             allow_bid = False
-            buy_block_reason = buy_block_reason or "PROFIT_GATE_HARD_FAIL"
+            buy_block_reason = buy_block_reason or "INVENTORY_MANAGER_ONLY"
+            action = "PLACE_ASK" if inventory_shares > dust and inventory_manager_enabled else "SKIP"
+        if self.config.disable_new_buys or not reward_mm_enabled:
+            allow_bid = False
+            buy_block_reason = buy_block_reason or (
+                "NEW_BUYS_DISABLED" if self.config.disable_new_buys else "REWARD_MM_DISABLED"
+            )
+            if inventory_shares <= dust:
+                action = "SKIP"
+        if self.config.max_order_rejects_per_hour > 0 and market_state.order_reject_count >= self.config.max_order_rejects_per_hour:
+            allow_bid = False
+            buy_block_reason = buy_block_reason or "ORDER_REJECT_LIMIT"
+            action = "PLACE_ASK" if inventory_shares > dust else "SKIP"
+        if profit_gate_status in {"SOFT_FAIL", "HARD_FAIL"}:
+            allow_bid = False
+            buy_block_reason = buy_block_reason or f"PROFIT_GATE_{profit_gate_status}"
             action = "REDUCE_ONLY_SELL" if inventory_shares > dust else "SKIP"
         if edge_usdc < float(self.config.min_action_edge_usdc or 0.0) and inventory_shares <= dust:
             allow_bid = False
             buy_block_reason = buy_block_reason or "MIN_ACTION_EDGE"
             action = "SKIP"
+        if buy_block_reason:
+            decision_trace.append(f"risk_reject={buy_block_reason}")
+        else:
+            decision_trace.append("risk_reject=none")
 
         headrooms = [max(0.0, candidate.quote_size)]
         if target_usdc > 0.0:
@@ -2051,6 +2163,10 @@ class RewardProfitSessionEngine:
             final_size = 0.0
             buy_block_reason = buy_block_reason or "RISK_CAP_BELOW_REWARD_MIN_SIZE"
             action = "PLACE_ASK" if inventory_shares > dust else "SKIP"
+        if not allow_bid and buy_block_reason and decision_trace[-1] == "risk_reject=none":
+            decision_trace[-1] = f"risk_reject={buy_block_reason}"
+        decision_trace.append(f"action={action}")
+        decision_trace.append(f"final_order_size={final_size:.6f}")
 
         market_state.allow_bid_with_inventory = allow_bid and inventory_shares > dust
         if not allow_bid:
@@ -2060,12 +2176,19 @@ class RewardProfitSessionEngine:
         elif action == "SKIP":
             market_state.inventory_mode = "normal"
 
+        kelly_size = candidate.kelly_position_shares if self.config.use_kelly_sizing and allow_bid else 0.0
+        expected_verified_net = edge_usdc if action not in {"SKIP", "HOLD"} else 0.0
+        fill_window = round(
+            (market_state.bid_order_filled_size + market_state.ask_order_filled_size)
+            / max(1.0, market_state.bid_order_size + market_state.ask_order_size),
+            6,
+        )
         return replace(
             candidate,
             quote_size=final_size if allow_bid and final_size > 0.0 else candidate.quote_size,
             action=action,
             action_score=round(edge_usdc, 6),
-            kelly_size=round(candidate.kelly_position_shares if self.config.use_kelly_sizing else 0.0, 6),
+            kelly_size=round(kelly_size, 6),
             final_order_size=final_size,
             target_inventory_usdc=round(target_usdc, 6),
             account_inventory_usdc=round(account_inventory_usdc, 6),
@@ -2074,11 +2197,19 @@ class RewardProfitSessionEngine:
             profit_gate_reason=profit_gate_reason,
             actual_reward_window_usdc=round(market_state.reward_accrued_actual_usdc, 6),
             verified_net_window_usdc=round(market_state.net_after_reward_and_cost_usdc, 6),
-            fill_rate_window=round(
-                (market_state.bid_order_filled_size + market_state.ask_order_filled_size)
-                / max(1.0, market_state.bid_order_size + market_state.ask_order_size),
-                6,
-            ),
+            fill_rate_window=fill_window,
+            strategy_id="inventory_manager" if action in {"PLACE_ASK", "REDUCE_ONLY_SELL", "FLATTEN_POSITION"} else "reward_mm",
+            decision_trace=decision_trace,
+            expected_verified_net=round(expected_verified_net, 6),
+            reward_score_estimate=round(candidate.expected_reward_per_hour_lower * max(0.0, self.config.projection_horizon_hours), 6),
+            competition_score_estimate=round(candidate.fill_probability_score, 6),
+            queue_position_estimate=round(candidate.fill_probability_score, 6),
+            adverse_selection_after_fill_usdc=round(market_state.adverse_midpoint_move_usdc, 6),
+            quote_time_in_reward_zone_sec=round(market_state.hours_in_reward_zone * 3600.0, 3),
+            order_reject_count=market_state.order_reject_count,
+            risk_reject_reason=buy_block_reason,
+            scale_gate_status=scale_gate_status,
+            scale_gate_reason=scale_gate_reason,
         )
 
     def _profit_gate_status(
@@ -2094,11 +2225,23 @@ class RewardProfitSessionEngine:
             return "PROBATION", "WARMUP"
         verified = market_state.net_after_reward_and_cost_usdc
         filled = market_state.bid_order_filled_size + market_state.ask_order_filled_size
-        if verified > max(0.0, float(self.config.min_action_edge_usdc or 0.0)) and (
-            market_state.reward_accrued_actual_usdc > 0.0 or market_state.spread_realized_usdc > 0.0 or filled > 0.0
-        ):
+        min_actual = max(0.0, float(self.config.min_actual_reward_window_usdc or 0.0))
+        min_verified = max(0.0, float(self.config.min_verified_net_window_usdc or self.config.min_action_edge_usdc or 0.0))
+        max_drawdown = max(0.0, float(self.config.max_verified_drawdown_usdc or 0.0))
+        if max_drawdown > 0.0 and verified <= -max_drawdown + 1e-9:
+            return "HARD_FAIL", "VERIFIED_DRAWDOWN_LIMIT"
+        has_real_positive_evidence = (
+            market_state.reward_accrued_actual_usdc >= min_actual > 0.0
+            or market_state.spread_realized_usdc > 0.0
+            or filled > 0.0
+        )
+        if verified > min_verified and has_real_positive_evidence:
             return "PASS", "VERIFIED_POSITIVE"
-        if verified <= 0.0 and market_state.reward_accrued_actual_usdc <= 0.0 and mode == "strict":
+        if (
+            verified <= min_verified
+            and market_state.reward_accrued_actual_usdc < max(min_actual, 0.000001)
+            and mode == "strict"
+        ):
             return "SOFT_FAIL", "NO_ACTUAL_REWARD_OR_VERIFIED_NET"
         return "PROBATION", "INSUFFICIENT_EVIDENCE"
 
@@ -2870,8 +3013,20 @@ class RewardProfitSessionEngine:
                 "quote_decision_reason": market.quote_decision_reason,
                 "action": market.action,
                 "action_score": round(market.action_score, 6),
+                "strategy_id": market.strategy_id,
+                "decision_trace": list(market.decision_trace),
+                "expected_verified_net": round(market.expected_verified_net, 6),
                 "quote_bid_reason": market.quote_bid_reason,
                 "quote_ask_reason": market.quote_ask_reason,
+                "reward_score_estimate": round(market.reward_score_estimate, 6),
+                "competition_score_estimate": round(market.competition_score_estimate, 6),
+                "queue_position_estimate": round(market.queue_position_estimate, 6),
+                "adverse_selection_after_fill_usdc": round(market.adverse_selection_after_fill_usdc, 6),
+                "quote_time_in_reward_zone_sec": round(market.quote_time_in_reward_zone_sec, 3),
+                "order_reject_count": market.order_reject_count,
+                "risk_reject_reason": market.risk_reject_reason,
+                "scale_gate_status": market.scale_gate_status,
+                "scale_gate_reason": market.scale_gate_reason,
                 "kelly_size": round(market.kelly_size, 6),
                 "final_order_size": round(market.final_order_size, 6),
                 "target_inventory_usdc": round(market.target_inventory_usdc, 6),
@@ -2954,6 +3109,10 @@ class RewardProfitSessionEngine:
                 "account_order_sync_error": state.account_order_sync_error,
                 "top_action": top_market.action if top_market is not None else "NA",
                 "top_action_score": round(top_market.action_score, 6) if top_market is not None else 0.0,
+                "top_strategy_id": top_market.strategy_id if top_market is not None else "NA",
+                "top_expected_verified_net": round(top_market.expected_verified_net, 6) if top_market is not None else 0.0,
+                "scale_gate_status": top_market.scale_gate_status if top_market is not None else "NA",
+                "scale_gate_reason": top_market.scale_gate_reason if top_market is not None else "NA",
                 "profit_gate_status": top_market.profit_gate_status if top_market is not None else "NA",
                 "profit_gate_reason": top_market.profit_gate_reason if top_market is not None else "NA",
                 "capital_limit_usdc": round(state.capital_limit_usdc, 6),

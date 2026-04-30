@@ -2109,6 +2109,153 @@ class RewardProfitSessionEngineTests(unittest.TestCase):
             self.assertEqual(state.account_open_buy_order_count, 1)
             self.assertEqual(reason, "ACCOUNT_OPEN_BUY_COUNT")
 
+    def test_disable_new_buys_prevents_live_bid(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manager = _LiveLifecycleOrderManager()
+            config = RewardProfitConfig(
+                out_dir=tmpdir,
+                state_path=str(Path(tmpdir) / "state.json"),
+                pnl_path=str(Path(tmpdir) / "pnl.json"),
+                live=True,
+                action_mode="optimal",
+                quote_search_mode="best_ev",
+                disable_new_buys=True,
+                max_entry_cost_usdc=100.0,
+                max_entry_cost_pct=1.0,
+                max_break_even_hours=100.0,
+            )
+            engine = RewardProfitSessionEngine(
+                config,
+                reward_client_factory=lambda dry_run: None,
+                order_manager=manager,
+                registry_provider=lambda cfg: {"events": []},
+            )
+            cand = _candidate(market_slug="m1", spread_capture_hour=1.0)
+            manager.token_balances[cand.token_id] = 0.0
+
+            state = engine.run_cycle(scanned_candidates=[cand], cycle_ts=datetime(2026, 4, 24, tzinfo=timezone.utc))
+            market = state.markets["m1"]
+
+            self.assertEqual(market.action, "SKIP")
+            self.assertEqual(market.risk_reject_reason, "NEW_BUYS_DISABLED")
+            self.assertEqual(manager.submitted, [])
+            self.assertIn("risk_reject=NEW_BUYS_DISABLED", market.decision_trace)
+
+    def test_inventory_manager_only_places_reduce_only_ask(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manager = _LiveLifecycleOrderManager()
+            config = RewardProfitConfig(
+                out_dir=tmpdir,
+                state_path=str(Path(tmpdir) / "state.json"),
+                pnl_path=str(Path(tmpdir) / "pnl.json"),
+                live=True,
+                action_mode="optimal",
+                quote_search_mode="best_ev",
+                inventory_manager_only=True,
+                inventory_policy="balanced",
+                max_entry_cost_usdc=100.0,
+                max_entry_cost_pct=1.0,
+                max_break_even_hours=100.0,
+            )
+            engine = RewardProfitSessionEngine(
+                config,
+                reward_client_factory=lambda dry_run: None,
+                order_manager=manager,
+                registry_provider=lambda cfg: {"events": []},
+            )
+            cand = _candidate(market_slug="m1", best_bid=0.35, best_ask=0.40, spread_capture_hour=1.0)
+            manager.token_balances[cand.token_id] = 12.0
+
+            state = engine.run_cycle(scanned_candidates=[cand], cycle_ts=datetime(2026, 4, 24, tzinfo=timezone.utc))
+            market = state.markets["m1"]
+
+            self.assertEqual(market.action, "PLACE_ASK")
+            self.assertEqual(market.risk_reject_reason, "INVENTORY_MANAGER_ONLY")
+            self.assertIsNone(market.bid_order_id)
+            self.assertIsNotNone(market.ask_order_id)
+            self.assertEqual([row[0] for row in manager.submitted], ["ask"])
+
+    def test_strict_soft_fail_blocks_new_buy_after_warmup(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manager = _LiveLifecycleOrderManager()
+            config = RewardProfitConfig(
+                out_dir=tmpdir,
+                state_path=str(Path(tmpdir) / "state.json"),
+                pnl_path=str(Path(tmpdir) / "pnl.json"),
+                live=True,
+                action_mode="optimal",
+                quote_search_mode="best_ev",
+                profit_evidence_mode="strict",
+                actual_reward_warmup_minutes=0.0,
+                min_verified_net_window_usdc=0.01,
+                min_actual_reward_window_usdc=0.05,
+                max_entry_cost_usdc=100.0,
+                max_entry_cost_pct=1.0,
+                max_break_even_hours=100.0,
+            )
+            engine = RewardProfitSessionEngine(
+                config,
+                reward_client_factory=lambda dry_run: None,
+                order_manager=manager,
+                registry_provider=lambda cfg: {"events": []},
+            )
+            cand = _candidate(market_slug="m1", spread_capture_hour=1.0)
+            manager.token_balances[cand.token_id] = 0.0
+            state = engine._load_state()
+            state.markets["m1"] = RewardMarketState(
+                event_slug=cand.event_slug,
+                event_title=cand.event_title,
+                market_slug=cand.market_slug,
+                question=cand.question,
+                token_id=cand.token_id,
+                hours_in_reward_zone=1.0,
+                net_after_reward_and_cost_usdc=-0.02,
+            )
+
+            state = engine.run_cycle(state, scanned_candidates=[cand], cycle_ts=datetime(2026, 4, 24, tzinfo=timezone.utc))
+            market = state.markets["m1"]
+
+            self.assertEqual(market.profit_gate_status, "SOFT_FAIL")
+            self.assertEqual(market.action, "SKIP")
+            self.assertEqual(market.kelly_size, 0.0)
+            self.assertEqual(market.risk_reject_reason, "PROFIT_GATE_SOFT_FAIL")
+            self.assertEqual(manager.submitted, [])
+
+    def test_report_includes_decision_and_scale_gate_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manager = _LiveLifecycleOrderManager()
+            config = RewardProfitConfig(
+                out_dir=tmpdir,
+                state_path=str(Path(tmpdir) / "state.json"),
+                pnl_path=str(Path(tmpdir) / "pnl.json"),
+                live=True,
+                action_mode="optimal",
+                quote_search_mode="best_ev",
+                disable_new_buys=True,
+                max_entry_cost_usdc=100.0,
+                max_entry_cost_pct=1.0,
+                max_break_even_hours=100.0,
+            )
+            engine = RewardProfitSessionEngine(
+                config,
+                reward_client_factory=lambda dry_run: None,
+                order_manager=manager,
+                registry_provider=lambda cfg: {"events": []},
+            )
+            cand = _candidate(market_slug="m1", spread_capture_hour=1.0)
+            manager.token_balances[cand.token_id] = 0.0
+
+            state = engine.run_cycle(scanned_candidates=[cand], cycle_ts=datetime(2026, 4, 24, tzinfo=timezone.utc))
+            pnl = engine._build_pnl_report(state)
+            row = pnl["markets"][0]
+
+            self.assertIn("decision_trace", row)
+            self.assertIn("expected_verified_net", row)
+            self.assertIn("risk_reject_reason", row)
+            self.assertIn("scale_gate_status", row)
+            self.assertIn("decision_trace", row["live_order_lifecycle"])
+            self.assertEqual(pnl["summary"]["top_strategy_id"], "reward_mm")
+
 
 if __name__ == "__main__":
     unittest.main()

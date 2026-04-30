@@ -52,6 +52,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--min-action-edge-usdc", type=float, default=0.0)
     parser.add_argument("--profit-evidence-mode", choices=["off", "strict"], default="off")
     parser.add_argument("--actual-reward-warmup-minutes", type=float, default=0.0)
+    parser.add_argument("--strategy-set", type=str, default="reward_mm,inventory_manager")
+    parser.add_argument("--scale-mode", choices=["off", "evidence_gated"], default="evidence_gated")
+    parser.add_argument("--risk-profile", choices=["standard", "canary"], default="standard")
+    parser.add_argument("--max-verified-drawdown-usdc", type=float, default=0.0)
+    parser.add_argument("--min-actual-reward-window-usdc", type=float, default=0.0)
+    parser.add_argument("--min-verified-net-window-usdc", type=float, default=0.0)
+    parser.add_argument("--disable-new-buys", action="store_true")
+    parser.add_argument("--inventory-manager-only", action="store_true")
+    parser.add_argument("--max-order-rejects-per-hour", type=int, default=0)
+    parser.add_argument("--quote-refresh-mode", choices=["cycle", "event_driven"], default="cycle")
     parser.add_argument("--entry-mode", choices=["maker_first", "inventory_first"], default="maker_first")
     parser.add_argument("--exit-cooldown-minutes", type=float, default=45.0)
     parser.add_argument("--repeat-exit-cooldown-minutes", type=float, default=90.0)
@@ -117,6 +127,8 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     kelly_fraction_scale = args.kelly_multiplier if args.kelly_multiplier is not None else args.kelly_fraction_scale
+    if args.risk_profile == "canary" and args.kelly_multiplier is None:
+        kelly_fraction_scale = min(kelly_fraction_scale, 0.10)
     max_inventory_shares = (
         float(args.max_inventory_shares_per_market)
         if args.max_inventory_shares_per_market is not None
@@ -170,6 +182,16 @@ def main() -> None:
         min_action_edge_usdc=args.min_action_edge_usdc,
         profit_evidence_mode=args.profit_evidence_mode,
         actual_reward_warmup_minutes=args.actual_reward_warmup_minutes,
+        strategy_set=args.strategy_set,
+        scale_mode=args.scale_mode,
+        risk_profile=args.risk_profile,
+        max_verified_drawdown_usdc=args.max_verified_drawdown_usdc,
+        min_actual_reward_window_usdc=args.min_actual_reward_window_usdc,
+        min_verified_net_window_usdc=args.min_verified_net_window_usdc,
+        disable_new_buys=args.disable_new_buys,
+        inventory_manager_only=args.inventory_manager_only,
+        max_order_rejects_per_hour=args.max_order_rejects_per_hour,
+        quote_refresh_mode=args.quote_refresh_mode,
         entry_mode=args.entry_mode,
         exit_cooldown_minutes=args.exit_cooldown_minutes,
         repeat_exit_cooldown_minutes=args.repeat_exit_cooldown_minutes,
