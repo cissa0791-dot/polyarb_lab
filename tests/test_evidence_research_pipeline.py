@@ -10,7 +10,13 @@ from pathlib import Path
 
 from scripts.analyze_live_edge_evidence import build_live_edge_summary, load_jsonl as load_evidence_jsonl
 from scripts.replay_live_orderbook_snapshots import build_replay_report, load_jsonl as load_snapshot_jsonl
-from scripts.run_evidence_research_pipeline import build_research_outputs, run_pipeline
+from scripts.run_evidence_research_pipeline import (
+    PipelineInterrupted,
+    _scan_command,
+    build_research_outputs,
+    parse_args,
+    run_pipeline,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -135,6 +141,82 @@ class EvidenceResearchPipelineTests(unittest.TestCase):
             self.assertTrue((Path(tmpdir) / "research_market_intel_latest.json").exists())
             self.assertTrue((Path(tmpdir) / "research_whitelist_latest.json").exists())
             self.assertTrue((Path(tmpdir) / "research_blacklist_latest.json").exists())
+
+    def test_pipeline_builds_partial_outputs_after_interrupted_scan(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            args = argparse.Namespace(
+                cycles=120,
+                interval_sec=30,
+                event_limit=10,
+                market_limit=20,
+                snapshot_max_markets=5,
+                snapshot_filtered_max=3,
+                out_dir=tmpdir,
+                verbose=False,
+            )
+
+            def fake_runner(command: list[str]) -> None:
+                joined = " ".join(command)
+                if "run_auto_trade_profit.py" in joined:
+                    evidence_path = Path(command[command.index("--edge-evidence-path") + 1])
+                    snapshot_path = Path(command[command.index("--orderbook-snapshot-path") + 1])
+                    evidence_path.write_text(
+                        json.dumps(
+                            {
+                                "row_type": "market_observation",
+                                "market_slug": "partial-market",
+                                "verified_net_window_usdc": 0.0,
+                            }
+                        )
+                        + "\n",
+                        encoding="utf-8",
+                    )
+                    snapshot_path.write_text("", encoding="utf-8")
+                    raise PipelineInterrupted()
+                if "analyze_live_edge_evidence.py" in joined:
+                    evidence_path = Path(command[command.index("--evidence") + 1])
+                    out_path = Path(command[command.index("--out") + 1])
+                    intel_path = Path(command[command.index("--market-intel-out") + 1])
+                    summary = build_live_edge_summary(load_evidence_jsonl(str(evidence_path)))
+                    out_path.write_text(json.dumps(summary), encoding="utf-8")
+                    intel_path.write_text(json.dumps(summary["market_intel"]), encoding="utf-8")
+                    return
+                if "replay_live_orderbook_snapshots.py" in joined:
+                    out_path = Path(command[command.index("--out") + 1])
+                    out_path.write_text(json.dumps(build_replay_report([])), encoding="utf-8")
+                    return
+                raise AssertionError(f"unexpected command: {command}")
+
+            summary = run_pipeline(args, command_runner=fake_runner)
+
+            self.assertTrue(summary["partial"])
+            self.assertEqual(summary["partial_reason"], "SCAN_INTERRUPTED")
+            self.assertTrue((Path(tmpdir) / "research_pipeline_summary_latest.json").exists())
+
+    def test_quick_mode_uses_short_defaults(self) -> None:
+        args = parse_args(["--quick"])
+
+        self.assertEqual(args.cycles, 10)
+        self.assertEqual(args.interval_sec, 5)
+
+    def test_scan_command_keeps_progress_visible(self) -> None:
+        args = argparse.Namespace(
+            cycles=1,
+            interval_sec=0,
+            event_limit=10,
+            market_limit=20,
+            snapshot_max_markets=5,
+            snapshot_filtered_max=3,
+            verbose=False,
+        )
+        paths = {
+            "evidence": Path("evidence.jsonl"),
+            "snapshots": Path("snapshots.jsonl"),
+        }
+
+        command = _scan_command(args, paths)
+
+        self.assertNotIn("--no-progress", command)
 
     def test_pipeline_rejects_live_flag(self) -> None:
         result = subprocess.run(

@@ -17,9 +17,18 @@ from scripts.analyze_live_edge_evidence import load_jsonl as load_evidence_jsonl
 CommandRunner = Callable[[list[str]], None]
 
 
-def parse_args() -> argparse.Namespace:
+class PipelineInterrupted(RuntimeError):
+    """Raised when the long dry-run scan is interrupted but partial outputs can be built."""
+
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run a dry-run evidence research pipeline.")
     parser.add_argument("--live", action="store_true", help="Rejected: this pipeline is dry-run only.")
+    parser.add_argument(
+        "--quick",
+        action="store_true",
+        help="Use a short smoke-test run: 10 cycles with 5 second intervals.",
+    )
     parser.add_argument("--cycles", type=int, default=120)
     parser.add_argument("--interval-sec", type=int, default=30)
     parser.add_argument("--event-limit", type=int, default=1000)
@@ -28,9 +37,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--snapshot-filtered-max", type=int, default=60)
     parser.add_argument("--out-dir", type=str, default=str(ROOT / "data" / "reports"))
     parser.add_argument("--verbose", action="store_true")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     if args.live:
         parser.error("run_evidence_research_pipeline.py is dry-run only; --live is not allowed")
+    if args.quick:
+        args.cycles = 10
+        args.interval_sec = 5
     return args
 
 
@@ -64,7 +76,17 @@ def run_pipeline(args: argparse.Namespace, *, command_runner: CommandRunner | No
             path.unlink()
 
     runner = command_runner or _default_command_runner
-    runner(_scan_command(args, paths))
+    partial = False
+    partial_reason = None
+    try:
+        runner(_scan_command(args, paths))
+    except (KeyboardInterrupt, PipelineInterrupted):
+        partial = True
+        partial_reason = "SCAN_INTERRUPTED"
+        print(
+            "Scan interrupted; building partial evidence/replay reports from data collected so far.",
+            file=sys.stderr,
+        )
     runner(
         [
             sys.executable,
@@ -97,6 +119,10 @@ def run_pipeline(args: argparse.Namespace, *, command_runner: CommandRunner | No
         arb_rows=arb_rows,
         paths={key: str(path) for key, path in paths.items()},
     )
+    outputs["summary"]["partial"] = partial
+    outputs["summary"]["partial_reason"] = partial_reason
+    outputs["summary"]["scan_cycles_requested"] = max(1, int(args.cycles))
+    outputs["summary"]["scan_interval_sec"] = max(0, int(args.interval_sec))
 
     _write_json(paths["pipeline_summary"], outputs["summary"])
     _write_json(paths["market_intel"], outputs["market_intel"])
@@ -166,7 +192,6 @@ def _scan_command(args: argparse.Namespace, paths: dict[str, Path]) -> list[str]
         str(max(1, int(args.event_limit))),
         "--market-limit",
         str(max(1, int(args.market_limit))),
-        "--no-progress",
     ]
     if bool(getattr(args, "verbose", False)):
         command.append("--verbose")
@@ -234,6 +259,8 @@ def build_research_outputs(
         "replayed_market_count": replay_report.get("replayed_market_count", 0),
         "top_focus_markets": focus[:10],
         "output_paths": paths or {},
+        "partial": False,
+        "partial_reason": None,
     }
     return {
         "summary": summary,
@@ -317,7 +344,26 @@ def _write_json(path: Path, payload: dict[str, Any]) -> None:
 
 
 def _default_command_runner(command: list[str]) -> None:
-    subprocess.run(command, check=True)
+    print(f"\n$ {' '.join(command)}", flush=True)
+    process = subprocess.Popen(command, cwd=str(ROOT))
+    try:
+        return_code = process.wait()
+    except KeyboardInterrupt as exc:
+        _terminate_process(process)
+        raise PipelineInterrupted() from exc
+    if return_code != 0:
+        raise subprocess.CalledProcessError(return_code, command)
+
+
+def _terminate_process(process: subprocess.Popen[Any]) -> None:
+    if process.poll() is not None:
+        return
+    process.terminate()
+    try:
+        process.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait()
 
 
 def main() -> None:
@@ -330,6 +376,8 @@ def main() -> None:
                 "dry_run_focus_count": summary["dry_run_focus_count"],
                 "blacklist_count": summary["blacklist_count"],
                 "scale_recommendation": summary["scale_recommendation"],
+                "partial": summary.get("partial", False),
+                "partial_reason": summary.get("partial_reason"),
             },
             indent=2,
         )
