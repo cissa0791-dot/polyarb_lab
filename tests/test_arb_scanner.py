@@ -63,7 +63,7 @@ class ArbScannerTests(unittest.TestCase):
             "events": [
                 {
                     "slug": "loose-group",
-                    "title": "Loose Group",
+                    "title": "Election Winner",
                     "neg_risk": False,
                     "markets": [
                         {"slug": "a", "best_bid": 0.20, "best_ask": 0.21, "active": True, "closed": False},
@@ -78,6 +78,60 @@ class ArbScannerTests(unittest.TestCase):
         self.assertEqual(report["candidate_count"], 0)
         self.assertEqual(report["watch_count"], 1)
         self.assertEqual(report["opportunities"][0]["resolution_mismatch_risk"], "medium")
+
+    def test_skips_non_exclusive_top_four_over_one(self) -> None:
+        registry = {
+            "events": [
+                {
+                    "slug": "epl-top-4-finish",
+                    "title": "Premier League Top 4 Finish",
+                    "neg_risk": False,
+                    "markets": [
+                        {
+                            "slug": "will-arsenal-finish-in-the-top-4",
+                            "question": "Will Arsenal finish in the top 4?",
+                            "best_bid": 0.80,
+                            "best_ask": 0.82,
+                            "active": True,
+                            "closed": False,
+                        },
+                        {
+                            "slug": "will-liverpool-finish-in-the-top-4",
+                            "question": "Will Liverpool finish in the top 4?",
+                            "best_bid": 0.70,
+                            "best_ask": 0.72,
+                            "active": True,
+                            "closed": False,
+                        },
+                    ],
+                }
+            ]
+        }
+
+        report = scan_arb_opportunities(registry, min_edge=0.01)
+
+        self.assertEqual(report["opportunity_count"], 0)
+        self.assertEqual(report["skip_reasons"]["NON_EXCLUSIVE_EVENT"], 1)
+
+    def test_skips_non_neg_risk_over_one_requiring_short(self) -> None:
+        registry = {
+            "events": [
+                {
+                    "slug": "unknown-basket",
+                    "title": "Unknown Basket",
+                    "neg_risk": False,
+                    "markets": [
+                        {"slug": "a", "best_bid": 0.60, "best_ask": 0.62, "active": True, "closed": False},
+                        {"slug": "b", "best_bid": 0.60, "best_ask": 0.62, "active": True, "closed": False},
+                    ],
+                }
+            ]
+        }
+
+        report = scan_arb_opportunities(registry, min_edge=0.01)
+
+        self.assertEqual(report["opportunity_count"], 0)
+        self.assertEqual(report["skip_reasons"]["OVER_ONE_NEEDS_SHORT_OR_NEG_RISK"], 1)
 
 
 if __name__ == "__main__":

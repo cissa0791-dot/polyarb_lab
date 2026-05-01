@@ -59,11 +59,16 @@ def scan_arb_opportunities(
         event_slug = str(event.get("slug") or "")
         event_title = event.get("title")
         neg_risk = _truthy(event.get("neg_risk")) or _truthy(event.get("enable_neg_risk")) or _truthy(event.get("neg_risk_augmented"))
+        structure = _event_structure(event_slug, event_title, usable)
+        if structure == "non_exclusive":
+            skip_reasons["NON_EXCLUSIVE_EVENT"] = skip_reasons.get("NON_EXCLUSIVE_EVENT", 0) + 1
+            continue
         resolution_risk = "low" if neg_risk else "medium"
         base_trace = [
             f"event_markets={len(event_markets)}",
             f"usable_markets={len(usable)}",
             f"neg_risk={neg_risk}",
+            f"event_structure={structure}",
         ]
 
         ask_sum = sum(row["best_ask"] for row in usable)
@@ -72,7 +77,7 @@ def scan_arb_opportunities(
         over_edge = bid_sum - 1.0
         fee_slippage = _fee_slippage_estimate(len(usable))
 
-        if under_edge > 0.0:
+        if under_edge > 0.0 and (neg_risk or structure == "likely_exclusive"):
             executable = under_edge - fee_slippage
             opportunities.append(
                 ArbScanOpportunity(
@@ -104,8 +109,10 @@ def scan_arb_opportunities(
                     ],
                 )
             )
+        elif under_edge > 0.0:
+            skip_reasons["UNDER_ONE_NOT_EXHAUSTIVE"] = skip_reasons.get("UNDER_ONE_NOT_EXHAUSTIVE", 0) + 1
 
-        if over_edge > 0.0:
+        if over_edge > 0.0 and neg_risk:
             executable = over_edge - fee_slippage
             opportunities.append(
                 ArbScanOpportunity(
@@ -138,6 +145,8 @@ def scan_arb_opportunities(
                     ],
                 )
             )
+        elif over_edge > 0.0:
+            skip_reasons["OVER_ONE_NEEDS_SHORT_OR_NEG_RISK"] = skip_reasons.get("OVER_ONE_NEEDS_SHORT_OR_NEG_RISK", 0) + 1
 
     opportunities.sort(key=lambda item: (item.status == "ARB_CANDIDATE", item.executable_edge), reverse=True)
     rows = [item.to_dict() for item in opportunities[:max(0, int(max_opportunities))]]
@@ -172,6 +181,51 @@ def _market_quote(market: dict[str, Any]) -> dict[str, Any] | None:
         "best_bid": round(bid, 6),
         "best_ask": round(ask, 6),
     }
+
+
+def _event_structure(event_slug: str, event_title: Any, usable_markets: list[dict[str, Any]]) -> str:
+    text = " ".join(
+        [
+            event_slug,
+            "" if event_title is None else str(event_title),
+            *[str(row.get("market_slug") or "") for row in usable_markets],
+            *[str(row.get("question") or "") for row in usable_markets],
+        ]
+    ).lower()
+    non_exclusive_markers = (
+        "top 4",
+        "top-4",
+        "top four",
+        "finish in the top",
+        "which countries",
+        "which cities",
+        "which companies",
+        "which states",
+        "which tokens",
+        "which stocks",
+        "new trade deal",
+        "launch in",
+        "will waymo launch",
+        "before 2027",
+    )
+    if any(marker in text for marker in non_exclusive_markers):
+        return "non_exclusive"
+    likely_exclusive_markers = (
+        "winner",
+        "who will win",
+        "which team will win",
+        "which candidate will win",
+        "next president",
+        "next prime minister",
+        "election winner",
+        "nominee",
+        "champion",
+        "champions",
+        "mvp",
+    )
+    if any(marker in text for marker in likely_exclusive_markers):
+        return "likely_exclusive"
+    return "unknown"
 
 
 def _as_float(value: Any) -> float | None:
