@@ -60,6 +60,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--min-verified-net-window-usdc", type=float, default=0.0)
     parser.add_argument("--disable-new-buys", action="store_true")
     parser.add_argument("--inventory-manager-only", action="store_true")
+    parser.add_argument("--arb-scan-only", action="store_true", help="Run the arbitrage / relative-value scanner without placing or canceling orders.")
+    parser.add_argument("--arb-scan-min-edge", type=float, default=0.01)
+    parser.add_argument(
+        "--edge-evidence-path",
+        type=str,
+        default=str(ROOT / "data" / "reports" / "live_edge_observations.jsonl"),
+    )
     parser.add_argument("--max-order-rejects-per-hour", type=int, default=0)
     parser.add_argument("--quote-refresh-mode", choices=["cycle", "event_driven"], default="cycle")
     parser.add_argument("--entry-mode", choices=["maker_first", "inventory_first"], default="maker_first")
@@ -190,6 +197,9 @@ def main() -> None:
         min_verified_net_window_usdc=args.min_verified_net_window_usdc,
         disable_new_buys=args.disable_new_buys,
         inventory_manager_only=args.inventory_manager_only,
+        arb_scan_only=args.arb_scan_only,
+        arb_scan_min_edge_usdc=args.arb_scan_min_edge,
+        edge_evidence_path=args.edge_evidence_path,
         max_order_rejects_per_hour=args.max_order_rejects_per_hour,
         quote_refresh_mode=args.quote_refresh_mode,
         entry_mode=args.entry_mode,

@@ -14,6 +14,7 @@ from src.live.auth import load_live_credentials
 from src.live.broker import LiveBroker
 from src.live.client import LiveClientError, LiveOpenOrder, LiveOrderStatus, LiveWriteClient
 from src.live.rewards import RewardClient, RewardClientError
+from src.scanner.arb_scanner import scan_arb_opportunities
 
 
 def _utc_now() -> datetime:
@@ -189,6 +190,9 @@ class RewardProfitConfig:
     min_verified_net_window_usdc: float = 0.0
     disable_new_buys: bool = False
     inventory_manager_only: bool = False
+    arb_scan_only: bool = False
+    arb_scan_min_edge_usdc: float = 0.01
+    edge_evidence_path: str = ""
     max_order_rejects_per_hour: int = 0
     quote_refresh_mode: str = "cycle"
     inventory_dust_shares: float = 0.0001
@@ -357,6 +361,7 @@ class RewardProfitSessionState:
     account_open_sell_usdc: float = 0.0
     account_canceled_excess_buy_count: int = 0
     selected_market_slugs: list[str] = field(default_factory=list)
+    last_arb_opportunities: list[dict[str, Any]] = field(default_factory=list)
     markets: dict[str, RewardMarketState] = field(default_factory=dict)
     cycle_history: list[dict[str, Any]] = field(default_factory=list)
 
@@ -1062,7 +1067,7 @@ class RewardProfitSessionEngine:
         except KeyboardInterrupt:
             state.halted = True
             state.halt_reason = "INTERRUPTED"
-        if self.config.live and self.config.cancel_open_orders_on_finish:
+        if self.config.live and self.config.cancel_open_orders_on_finish and not self.config.arb_scan_only:
             self._cancel_open_orders_on_finish(state)
         pnl_report = self._build_pnl_report(state)
         self._write_reports(state, pnl_report)
@@ -1262,6 +1267,51 @@ class RewardProfitSessionEngine:
                 "source": "injected_scanned_candidates",
             }
 
+        strategy_names = {
+            item.strip()
+            for item in str(self.config.strategy_set or "").split(",")
+            if item.strip()
+        }
+        if self.config.arb_scan_only or "arb_scanner" in strategy_names:
+            arb_report = scan_arb_opportunities(
+                registry,
+                min_edge=self.config.arb_scan_min_edge_usdc,
+            )
+            state.last_arb_opportunities = list(arb_report.get("opportunities") or [])
+            scan_diagnostics["arb_scan"] = {
+                key: value
+                for key, value in arb_report.items()
+                if key != "opportunities"
+            }
+        else:
+            state.last_arb_opportunities = []
+
+        if self.config.arb_scan_only:
+            state.last_scanned_candidate_count = len(scanned_candidates)
+            state.last_eligible_candidate_count = 0
+            state.last_filter_reasons = {}
+            state.last_selection_reasons = {}
+            state.selected_market_slugs = []
+            scan_diagnostics["eligible_candidates"] = 0
+            scan_diagnostics["candidate_filter_reasons"] = {}
+            scan_diagnostics["selected_markets"] = 0
+            scan_diagnostics["selection_reasons"] = {}
+            state.last_scan_diagnostics = scan_diagnostics
+            self._sync_account_order_summary(state)
+            pnl_report = self._build_pnl_report(state)
+            state.halted = pnl_report["summary"]["net_after_reward_and_cost_usdc"] <= -abs(self.config.max_daily_loss)
+            state.halt_reason = "MAX_DAILY_LOSS" if state.halted else None
+            state.cycle_history.append(
+                {
+                    "cycle_index": state.cycle_index,
+                    "ts": now.isoformat(),
+                    "selected_market_slugs": [],
+                    "summary": pnl_report["summary"],
+                }
+            )
+            self._append_edge_observations(state, pnl_report, now)
+            return state
+
         horizon = self.config.projection_horizon_hours
         max_true_be = self.config.max_true_break_even_hours
         eligible_candidates = []
@@ -1325,7 +1375,87 @@ class RewardProfitSessionEngine:
                 "summary": pnl_report["summary"],
             }
         )
+        self._append_edge_observations(state, pnl_report, now)
         return state
+
+    def _append_edge_observations(
+        self,
+        state: RewardProfitSessionState,
+        pnl_report: dict[str, Any],
+        now: datetime,
+    ) -> None:
+        path_text = str(self.config.edge_evidence_path or "").strip()
+        if not path_text:
+            return
+        rows: list[dict[str, Any]] = []
+        summary = dict(pnl_report.get("summary") or {})
+        for market in pnl_report.get("markets") or []:
+            if not isinstance(market, dict):
+                continue
+            rows.append(
+                {
+                    "row_type": "market_observation",
+                    "ts": now.isoformat(),
+                    "session_id": state.session_id,
+                    "cycle_index": state.cycle_index,
+                    "mode": state.mode,
+                    "event_slug": market.get("event_slug"),
+                    "market_slug": market.get("market_slug"),
+                    "token_id": market.get("token_id"),
+                    "status": market.get("status"),
+                    "best_bid": market.get("last_best_bid"),
+                    "best_ask": market.get("last_best_ask"),
+                    "quote_bid": (market.get("selection_metrics") or {}).get("quote_bid"),
+                    "quote_ask": (market.get("selection_metrics") or {}).get("quote_ask"),
+                    "bid_order_id": market.get("bid_order_id"),
+                    "ask_order_id": market.get("ask_order_id"),
+                    "bid_order_filled_size": market.get("bid_order_filled_size"),
+                    "ask_order_filled_size": market.get("ask_order_filled_size"),
+                    "inventory_shares": market.get("inventory_shares"),
+                    "live_synced_inventory_shares": market.get("live_synced_inventory_shares"),
+                    "reward_estimate_usdc": market.get("reward_accrued_estimate_usdc"),
+                    "actual_reward_usdc": market.get("reward_accrued_actual_usdc"),
+                    "spread_realized_usdc": market.get("spread_realized_usdc"),
+                    "inventory_mtm_pnl_usdc": market.get("inventory_mtm_pnl_usdc"),
+                    "inventory_realized_pnl_usdc": market.get("inventory_realized_pnl_usdc"),
+                    "net_after_reward_and_cost_usdc": market.get("net_after_reward_and_cost_usdc"),
+                    "verified_net_window_usdc": market.get("verified_net_window_usdc"),
+                    "action": market.get("action"),
+                    "strategy_id": market.get("strategy_id"),
+                    "decision_trace": list(market.get("decision_trace") or []),
+                    "risk_reject_reason": market.get("risk_reject_reason"),
+                    "scale_gate_status": market.get("scale_gate_status"),
+                    "scale_gate_reason": market.get("scale_gate_reason"),
+                    "profit_gate_status": market.get("profit_gate_status"),
+                    "profit_gate_reason": market.get("profit_gate_reason"),
+                    "order_reject_count": market.get("order_reject_count"),
+                    "account_inventory_usdc": summary.get("account_inventory_usdc"),
+                    "account_open_buy_usdc": summary.get("account_open_buy_usdc"),
+                    "account_open_sell_usdc": summary.get("account_open_sell_usdc"),
+                }
+            )
+
+        for opportunity in state.last_arb_opportunities:
+            rows.append(
+                {
+                    "row_type": "arb_opportunity",
+                    "ts": now.isoformat(),
+                    "session_id": state.session_id,
+                    "cycle_index": state.cycle_index,
+                    **dict(opportunity),
+                }
+            )
+
+        if not rows:
+            return
+        try:
+            path = Path(path_text)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("a", encoding="utf-8") as handle:
+                for row in rows:
+                    handle.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
+        except Exception as exc:
+            state.last_scan_diagnostics["edge_evidence_error"] = str(exc)
 
     def _advance_market_state(
         self,
@@ -2931,6 +3061,7 @@ class RewardProfitSessionEngine:
             actual_reward_latest_usdc=float(payload.get("actual_reward_latest_usdc") or 0.0),
             reward_epoch_id=payload.get("reward_epoch_id"),
             selected_market_slugs=list(payload.get("selected_market_slugs") or []),
+            last_arb_opportunities=list(payload.get("last_arb_opportunities") or []),
             markets=markets,
             cycle_history=list(payload.get("cycle_history") or []),
         )
@@ -3115,6 +3246,10 @@ class RewardProfitSessionEngine:
                 "scale_gate_reason": top_market.scale_gate_reason if top_market is not None else "NA",
                 "profit_gate_status": top_market.profit_gate_status if top_market is not None else "NA",
                 "profit_gate_reason": top_market.profit_gate_reason if top_market is not None else "NA",
+                "arb_opportunity_count": len(state.last_arb_opportunities),
+                "arb_candidate_count": sum(
+                    1 for row in state.last_arb_opportunities if row.get("status") == "ARB_CANDIDATE"
+                ),
                 "capital_limit_usdc": round(state.capital_limit_usdc, 6),
                 "capital_in_use_usdc": round(total_capital, 6),
                 "active_quote_market_count": active_quote_count,
@@ -3157,6 +3292,7 @@ class RewardProfitSessionEngine:
                     "verified_net_after_all_costs_usdc": verified_net_after_reward_and_cost,
                 },
             },
+            "arb_opportunities": list(state.last_arb_opportunities),
             "markets": sorted(market_rows, key=lambda row: (-row["net_after_reward_and_cost_usdc"], row["market_slug"])),
         }
 
