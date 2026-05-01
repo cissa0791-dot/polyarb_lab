@@ -70,6 +70,8 @@ def run_pipeline(args: argparse.Namespace, *, command_runner: CommandRunner | No
         "market_intel": out_dir / "research_market_intel_latest.json",
         "whitelist": out_dir / "research_whitelist_latest.json",
         "blacklist": out_dir / "research_blacklist_latest.json",
+        "state": out_dir / "research_auto_trade_state_latest.json",
+        "pnl": out_dir / "research_auto_trade_pnl_latest.json",
     }
     for path in paths.values():
         if path.exists():
@@ -112,7 +114,9 @@ def run_pipeline(args: argparse.Namespace, *, command_runner: CommandRunner | No
 
     evidence_summary = load_json(paths["evidence_summary"])
     replay_report = load_json(paths["replay"])
-    arb_rows = [row for row in load_evidence_jsonl(str(paths["evidence"])) if row.get("row_type") == "arb_opportunity"]
+    evidence_rows = load_evidence_jsonl(str(paths["evidence"]))
+    arb_rows = [row for row in evidence_rows if row.get("row_type") == "arb_opportunity"]
+    contamination = _detect_contaminated_state(evidence_rows)
     outputs = build_research_outputs(
         evidence_summary=evidence_summary,
         replay_report=replay_report,
@@ -123,6 +127,14 @@ def run_pipeline(args: argparse.Namespace, *, command_runner: CommandRunner | No
     outputs["summary"]["partial_reason"] = partial_reason
     outputs["summary"]["scan_cycles_requested"] = max(1, int(args.cycles))
     outputs["summary"]["scan_interval_sec"] = max(0, int(args.interval_sec))
+    outputs["summary"]["fresh_state"] = True
+    outputs["summary"]["state_path"] = str(paths["state"])
+    outputs["summary"]["pnl_path"] = str(paths["pnl"])
+    outputs["summary"]["contaminated_state_detected"] = bool(contamination["contaminated_state_detected"])
+    outputs["summary"]["contamination_reason"] = contamination["contamination_reason"]
+    outputs["summary"]["initial_filled_shares"] = contamination["initial_filled_shares"]
+    if contamination["contaminated_state_detected"]:
+        outputs["summary"]["scale_recommendation"] = "DO_NOT_SCALE"
 
     _write_json(paths["pipeline_summary"], outputs["summary"])
     _write_json(paths["market_intel"], outputs["market_intel"])
@@ -176,6 +188,11 @@ def _scan_command(args: argparse.Namespace, paths: dict[str, Path]) -> list[str]
         "strict",
         "--actual-reward-warmup-minutes",
         "120",
+        "--state-path",
+        str(paths["state"]),
+        "--pnl-path",
+        str(paths["pnl"]),
+        "--reset-state",
         "--edge-evidence-path",
         str(paths["evidence"]),
         "--record-orderbook-snapshots",
@@ -261,6 +278,11 @@ def build_research_outputs(
         "output_paths": paths or {},
         "partial": False,
         "partial_reason": None,
+        "fresh_state": True,
+        "state_path": (paths or {}).get("state"),
+        "pnl_path": (paths or {}).get("pnl"),
+        "contaminated_state_detected": False,
+        "contamination_reason": None,
     }
     return {
         "summary": summary,
@@ -336,6 +358,35 @@ def _float(value: Any, default: float = 0.0) -> float:
         return float(value)
     except (TypeError, ValueError):
         return default
+
+
+def _detect_contaminated_state(rows: Iterable[dict[str, Any]]) -> dict[str, Any]:
+    initial_filled = 0.0
+    initial_spread = 0.0
+    initial_reward_estimate = 0.0
+    for row in rows:
+        if row.get("row_type") != "market_observation":
+            continue
+        cycle_index = int(_float(row.get("cycle_index")))
+        if cycle_index != 1:
+            continue
+        initial_filled += max(0.0, _float(row.get("bid_order_filled_size")))
+        initial_filled += max(0.0, _float(row.get("ask_order_filled_size")))
+        initial_spread += max(0.0, _float(row.get("spread_realized_usdc")))
+        initial_reward_estimate += max(0.0, _float(row.get("reward_estimate_usdc")))
+
+    reasons: list[str] = []
+    if initial_filled > 5.0:
+        reasons.append("CYCLE_1_FILLED_SHARES_GT_5")
+    if initial_spread > 0.01:
+        reasons.append("CYCLE_1_SPREAD_GT_0_01")
+    if initial_reward_estimate > 0.01:
+        reasons.append("CYCLE_1_REWARD_ESTIMATE_GT_0_01")
+    return {
+        "contaminated_state_detected": bool(reasons),
+        "contamination_reason": ",".join(reasons) if reasons else None,
+        "initial_filled_shares": round(initial_filled, 6),
+    }
 
 
 def _write_json(path: Path, payload: dict[str, Any]) -> None:

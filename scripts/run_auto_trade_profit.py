@@ -139,6 +139,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--market-limit", type=int, default=400)
     parser.add_argument("--cycles", type=int, default=1)
     parser.add_argument("--interval-sec", type=int, default=0)
+    parser.add_argument(
+        "--state-path",
+        type=str,
+        default=str(ROOT / "data" / "reports" / "auto_trade_profit_state_latest.json"),
+        help="Path for session state. Research runs should use an isolated state file.",
+    )
+    parser.add_argument(
+        "--pnl-path",
+        type=str,
+        default=str(ROOT / "data" / "reports" / "auto_trade_profit_pnl_latest.json"),
+        help="Path for the latest PnL report. Research runs should use an isolated report file.",
+    )
     parser.add_argument("--reset-state", action="store_true")
     parser.add_argument("--keep-open-orders", action="store_true", help="Do not cancel live open orders when the run exits.")
     parser.add_argument("--exclude-market-slug", action="append", dest="excluded_market_slugs", default=[], metavar="SLUG", help="Skip this market slug (repeatable).")
@@ -169,8 +181,8 @@ def main() -> None:
     max_account_open_buy_orders = args.max_account_open_buy_orders or (2 if optimal_live else 0)
     config = RewardProfitConfig(
         out_dir=str(ROOT / "data" / "reports"),
-        state_path=str(ROOT / "data" / "reports" / "auto_trade_profit_state_latest.json"),
-        pnl_path=str(ROOT / "data" / "reports" / "auto_trade_profit_pnl_latest.json"),
+        state_path=args.state_path,
+        pnl_path=args.pnl_path,
         capital_limit_usdc=args.capital,
         per_market_cap_usdc=args.per_market_cap,
         max_markets=args.max_markets,
