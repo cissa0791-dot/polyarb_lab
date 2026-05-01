@@ -705,7 +705,7 @@ class RewardProfitSessionEngineTests(unittest.TestCase):
                 registry_provider=lambda cfg: {"events": []},
             )
             cycle_ts = datetime(2026, 4, 24, tzinfo=timezone.utc)
-            cand = _candidate(market_slug="m1", spread_capture_hour=1.25)
+            cand = _candidate(market_slug="m1", best_bid=0.39, best_ask=0.40, spread_capture_hour=1.25)
             state = engine.run_cycle(scanned_candidates=[cand], cycle_ts=cycle_ts)
             state = engine.run_cycle(
                 state,
@@ -720,6 +720,14 @@ class RewardProfitSessionEngineTests(unittest.TestCase):
             self.assertAlmostEqual(market.simulated_spread_capture_usdc, 1.25, places=6)
             self.assertAlmostEqual(market.spread_realized_usdc, 1.25, places=6)
             self.assertEqual(pnl["markets"][0]["fill_simulation"]["simulated_spread_capture_usdc"], 1.25)
+            self.assertEqual(pnl["markets"][0]["evidence_source"], "DRY_RUN_SIMULATED")
+            self.assertTrue(pnl["markets"][0]["simulated_fill"])
+            self.assertEqual(pnl["markets"][0]["simulated_spread_usdc"], 1.25)
+            self.assertEqual(pnl["markets"][0]["actual_reward_usdc"], 0.0)
+            self.assertFalse(pnl["markets"][0]["replay_confirmed"])
+            self.assertEqual(pnl["summary"]["simulated_profitable_market_count"], 1)
+            self.assertEqual(pnl["summary"]["actual_reward_confirmed_market_count"], 0)
+            self.assertEqual(pnl["summary"]["evidence_source_counts"]["DRY_RUN_SIMULATED"], 1)
 
     def test_actual_reward_zero_streak_closes_market(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

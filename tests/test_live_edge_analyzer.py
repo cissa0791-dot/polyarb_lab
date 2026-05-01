@@ -67,6 +67,36 @@ class LiveEdgeAnalyzerTests(unittest.TestCase):
         self.assertFalse(summary["market_intel"]["markets"]["quiet"]["blocked"])
         self.assertEqual(summary["scale_recommendation"], "ALLOW_DRY_RUN_FOCUS")
 
+    def test_simulated_positive_edge_is_not_whitelisted(self) -> None:
+        rows = [
+            {
+                "row_type": "market_observation",
+                "market_slug": "sim-only",
+                "event_slug": "event-sim",
+                "token_id": "tok-sim",
+                "actual_reward_usdc": 0.0,
+                "spread_realized_usdc": 0.05,
+                "simulated_spread_usdc": 0.05,
+                "verified_net_window_usdc": 0.05,
+                "fill_rate_window": 0.5,
+                "order_reject_count": 0,
+                "evidence_source": "DRY_RUN_SIMULATED",
+                "simulated_fill": True,
+            }
+        ]
+
+        summary = build_live_edge_summary(rows)
+        market = summary["market_intel"]["markets"]["sim-only"]
+
+        self.assertEqual(summary["profitable_market_count"], 0)
+        self.assertEqual(summary["simulated_profitable_market_count"], 1)
+        self.assertEqual(summary["whitelist_candidates"], [])
+        self.assertEqual(market["evidence_status"], "NO_EVIDENCE")
+        self.assertIn("SIMULATED_PROFIT_ONLY", market["evidence_reasons"])
+        self.assertEqual(market["realized_spread_window_usdc"], 0.0)
+        self.assertEqual(market["simulated_spread_window_usdc"], 0.05)
+        self.assertEqual(summary["scale_recommendation"], "ALLOW_DRY_RUN_FOCUS")
+
 
 if __name__ == "__main__":
     unittest.main()

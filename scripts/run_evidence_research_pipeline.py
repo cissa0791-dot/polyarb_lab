@@ -243,10 +243,19 @@ def build_research_outputs(
         evidence_status = str(evidence.get("evidence_status") or evidence_row.get("evidence_status") or "NO_EVIDENCE")
         replay_suitability = str(replay.get("suitability") or "NO_EVIDENCE")
         arb = arb_status.get(slug) or "ARB_SKIP"
+        actual_reward = _float(evidence.get("actual_reward_window_usdc", evidence_row.get("actual_reward_usdc", 0.0)))
+        simulated_fill = _truthy(evidence.get("simulated_fill", evidence_row.get("simulated_fill")))
+        simulated_spread = _float(
+            evidence.get("simulated_spread_window_usdc", evidence_row.get("simulated_spread_usdc", 0.0))
+        )
+        replay_confirmed = _truthy(replay.get("replay_confirmed")) or replay_suitability == "REWARD_MM_CANDIDATE"
         action, reason = _recommended_action(
             evidence_status=evidence_status,
             replay_suitability=replay_suitability,
             arb_status=arb,
+            simulated_fill=simulated_fill,
+            actual_reward_usdc=actual_reward,
+            replay_confirmed=replay_confirmed,
         )
         row = {
             "market_slug": slug,
@@ -258,7 +267,12 @@ def build_research_outputs(
             "recommended_action": action,
             "reason": reason,
             "verified_net_window_usdc": evidence.get("verified_net_window_usdc", evidence_row.get("verified_net_usdc", 0.0)),
+            "actual_reward_window_usdc": round(actual_reward, 6),
             "fill_rate_window": evidence.get("fill_rate_window", evidence_row.get("fill_rate", 0.0)),
+            "evidence_source": evidence.get("evidence_source", evidence_row.get("evidence_source", "UNKNOWN")),
+            "simulated_fill": simulated_fill,
+            "simulated_spread_window_usdc": round(simulated_spread, 6),
+            "replay_confirmed": replay_confirmed,
             "net_pnl_usdc": replay.get("net_pnl_usdc", 0.0),
             "simulated_fill_count": replay.get("simulated_fill_count", replay.get("fill_count", 0)),
         }
@@ -273,6 +287,15 @@ def build_research_outputs(
         live_canary_eligible_count=len(whitelist),
         dry_run_focus_count=len(focus),
     )
+    simulated_profitable_market_count = int(
+        evidence_summary.get(
+            "simulated_profitable_market_count",
+            sum(1 for row in rows if row["simulated_fill"] and _float(row["verified_net_window_usdc"]) > 0.0),
+        )
+        or 0
+    )
+    replay_confirmed_market_count = sum(1 for row in rows if row["replay_confirmed"])
+    actual_reward_confirmed_market_count = int(evidence_summary.get("actual_reward_confirmed_market_count") or 0)
     summary = {
         "report_type": "research_pipeline_summary",
         "market_count": len(rows),
@@ -281,6 +304,15 @@ def build_research_outputs(
         "blacklist_count": len(blacklist),
         "scale_recommendation": scale_recommendation,
         "profitable_market_count": evidence_summary.get("profitable_market_count", 0),
+        "simulated_profitable_market_count": simulated_profitable_market_count,
+        "replay_confirmed_market_count": replay_confirmed_market_count,
+        "actual_reward_confirmed_market_count": actual_reward_confirmed_market_count,
+        "live_ready_blockers": _live_ready_blockers(
+            rows=rows,
+            whitelist_count=len(whitelist),
+            replay_confirmed_market_count=replay_confirmed_market_count,
+            actual_reward_confirmed_market_count=actual_reward_confirmed_market_count,
+        ),
         "replayed_market_count": replay_report.get("replayed_market_count", 0),
         "top_focus_markets": focus[:10],
         "output_paths": paths or {},
@@ -349,18 +381,52 @@ def _arb_status_by_market(rows: Iterable[dict[str, Any]]) -> dict[str, str]:
     return status_by_market
 
 
-def _recommended_action(*, evidence_status: str, replay_suitability: str, arb_status: str) -> tuple[str, str]:
+def _recommended_action(
+    *,
+    evidence_status: str,
+    replay_suitability: str,
+    arb_status: str,
+    simulated_fill: bool,
+    actual_reward_usdc: float,
+    replay_confirmed: bool,
+) -> tuple[str, str]:
     if evidence_status == "BLACKLIST_CANDIDATE" or replay_suitability == "AVOID_ADVERSE_SELECTION":
         return "BLACKLIST", "bad evidence or adverse replay"
     if replay_suitability == "AVOID_TOO_THIN":
         return "IGNORE", "orderbook too thin for reward MM replay"
-    if evidence_status == "WHITELIST_CANDIDATE" and replay_suitability == "REWARD_MM_CANDIDATE":
+    confirmed_positive_evidence = evidence_status == "WHITELIST_CANDIDATE" and (
+        not simulated_fill or actual_reward_usdc > 0.0
+    )
+    if confirmed_positive_evidence and replay_suitability == "REWARD_MM_CANDIDATE" and replay_confirmed:
         return "LIVE_CANARY_ELIGIBLE", "real positive evidence and replay candidate"
+    if simulated_fill and evidence_status != "BLACKLIST_CANDIDATE":
+        return "DRY_RUN_FOCUS", "simulated edge only; needs confirmed evidence before live"
+    if evidence_status == "WHITELIST_CANDIDATE":
+        return "DRY_RUN_FOCUS", "positive evidence needs replay confirmation before live"
     if replay_suitability in {"REWARD_MM_CANDIDATE", "REWARD_MM_WATCH"} or arb_status == "ARB_CANDIDATE":
         return "DRY_RUN_FOCUS", "needs more dry-run observation before live"
     if replay_suitability == "AVOID_NO_FILL":
         return "OBSERVE_MORE", "snapshots did not produce simulated fills"
     return "OBSERVE_MORE", "no reliable edge evidence yet"
+
+
+def _live_ready_blockers(
+    *,
+    rows: list[dict[str, Any]],
+    whitelist_count: int,
+    replay_confirmed_market_count: int,
+    actual_reward_confirmed_market_count: int,
+) -> list[str]:
+    if whitelist_count > 0:
+        return []
+    blockers: list[str] = ["NO_LIVE_CANARY_ELIGIBLE"]
+    if any(row["simulated_fill"] and _float(row["verified_net_window_usdc"]) > 0.0 for row in rows):
+        blockers.append("SIMULATED_PROFIT_ONLY")
+    if replay_confirmed_market_count <= 0:
+        blockers.append("REPLAY_NOT_CONFIRMED")
+    if actual_reward_confirmed_market_count <= 0:
+        blockers.append("NO_ACTUAL_REWARD_CONFIRMED")
+    return blockers
 
 
 def _research_score(
@@ -389,6 +455,16 @@ def _float(value: Any, default: float = 0.0) -> float:
         return float(value)
     except (TypeError, ValueError):
         return default
+
+
+def _truthy(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "y"}
+    return False
 
 
 def _detect_contaminated_state(rows: Iterable[dict[str, Any]]) -> dict[str, Any]:

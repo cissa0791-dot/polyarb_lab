@@ -1106,9 +1106,15 @@ class RewardProfitSessionEngine:
         summary = self._build_pnl_report(state)["summary"]
         selection_reasons = dict(state.last_selection_reasons)
         selection_note = ""
-        if not state.selected_market_slugs and selection_reasons:
-            top_reason, top_count = max(selection_reasons.items(), key=lambda item: item[1])
+        blocking_selection_reasons = {
+            key: value for key, value in selection_reasons.items() if key != "SELECTED"
+        }
+        if len(state.selected_market_slugs) < self.config.max_markets and blocking_selection_reasons:
+            top_reason, top_count = max(blocking_selection_reasons.items(), key=lambda item: item[1])
             selection_note = f" | select_block {top_reason}:{top_count}"
+        if len(state.selected_market_slugs) < self.config.max_markets and state.last_filter_reasons:
+            top_filter, top_filter_count = max(state.last_filter_reasons.items(), key=lambda item: item[1])
+            selection_note += f" | filter_block {top_filter}:{top_filter_count}"
         print(
             "Progress: "
             f"{cycle_number}/{total_cycles} "
@@ -1606,6 +1612,10 @@ class RewardProfitSessionEngine:
                     "bid_filled_delta": market.get("bid_filled_delta"),
                     "ask_filled_delta": market.get("ask_filled_delta"),
                     "fill_rate_window": market.get("fill_rate_window"),
+                    "evidence_source": market.get("evidence_source"),
+                    "simulated_fill": market.get("simulated_fill"),
+                    "simulated_spread_usdc": market.get("simulated_spread_usdc"),
+                    "replay_confirmed": market.get("replay_confirmed"),
                     "inventory_shares": market.get("inventory_shares"),
                     "live_synced_inventory_shares": market.get("live_synced_inventory_shares"),
                     "reward_estimate_usdc": market.get("reward_accrued_estimate_usdc"),
@@ -3473,6 +3483,23 @@ class RewardProfitSessionEngine:
             cycle_history=list(payload.get("cycle_history") or []),
         )
 
+    def _market_evidence_source(self, market: RewardMarketState) -> str:
+        if market.reward_accrued_actual_usdc > 1e-9:
+            return "ACTUAL_REWARD"
+        if self.config.live and (
+            market.bid_order_filled_size > 1e-9
+            or market.ask_order_filled_size > 1e-9
+            or market.live_synced_inventory_shares > 1e-9
+        ):
+            return "LIVE_ORDER_SYNC"
+        if (
+            market.simulated_bid_fill_shares > 1e-9
+            or market.simulated_ask_fill_shares > 1e-9
+            or market.simulated_spread_capture_usdc > 1e-9
+        ):
+            return "DRY_RUN_SIMULATED"
+        return "LIVE_OBSERVATION" if self.config.live else "DRY_RUN_OBSERVATION"
+
     def _build_pnl_report(self, state: RewardProfitSessionState) -> dict[str, Any]:
         market_rows = []
         total_capital = 0.0
@@ -3494,6 +3521,9 @@ class RewardProfitSessionEngine:
         live_synced_inventory = 0.0
         live_open_buy_orders = 0
         live_open_sell_orders = 0
+        simulated_profitable_market_count = 0
+        actual_reward_confirmed_market_count = 0
+        evidence_source_counts: dict[str, int] = {}
         inventory_modes: set[str] = set()
         for market in state.markets.values():
             if market.status == RewardMarketStatus.QUOTING.value:
@@ -3521,6 +3551,29 @@ class RewardProfitSessionEngine:
             total_entry_spread_cost += market.total_entry_spread_cost_usdc
             total_cost_proxy += market.total_cost_proxy_usdc
             market_row = asdict(market)
+            evidence_source = self._market_evidence_source(market)
+            simulated_fill = (
+                market.simulated_bid_fill_shares > 1e-9
+                or market.simulated_ask_fill_shares > 1e-9
+                or market.simulated_spread_capture_usdc > 1e-9
+            )
+            evidence_source_counts[evidence_source] = evidence_source_counts.get(evidence_source, 0) + 1
+            simulated_net = (
+                market.simulated_spread_capture_usdc
+                + market.reward_accrued_estimate_usdc
+                + market.inventory_realized_pnl_usdc
+                + market.inventory_mtm_pnl_usdc
+                - market.total_cost_proxy_usdc
+            )
+            if simulated_fill and simulated_net > 0.0:
+                simulated_profitable_market_count += 1
+            if market.reward_accrued_actual_usdc > 1e-9:
+                actual_reward_confirmed_market_count += 1
+            market_row["evidence_source"] = evidence_source
+            market_row["simulated_fill"] = simulated_fill
+            market_row["simulated_spread_usdc"] = round(market.simulated_spread_capture_usdc, 6)
+            market_row["actual_reward_usdc"] = round(market.reward_accrued_actual_usdc, 6)
+            market_row["replay_confirmed"] = False
             market_row["fill_simulation"] = {
                 "simulated_bid_fill_shares": round(market.simulated_bid_fill_shares, 6),
                 "simulated_ask_fill_shares": round(market.simulated_ask_fill_shares, 6),
@@ -3681,6 +3734,9 @@ class RewardProfitSessionEngine:
                 "inventory_realized_pnl_usdc": round(total_inventory_realized, 6),
                 "spread_realized_usdc": round(total_spread_realized, 6),
                 "simulated_spread_capture_usdc": round(total_simulated_spread, 6),
+                "simulated_profitable_market_count": simulated_profitable_market_count,
+                "actual_reward_confirmed_market_count": actual_reward_confirmed_market_count,
+                "evidence_source_counts": dict(sorted(evidence_source_counts.items())),
                 "total_entry_spread_cost_usdc": round(total_entry_spread_cost, 6),
                 "net_after_reward_usdc": net_after_reward,
                 "cost_proxy_usdc": round(total_cost_proxy, 6),

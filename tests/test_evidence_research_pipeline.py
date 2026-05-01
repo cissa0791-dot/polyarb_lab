@@ -94,6 +94,69 @@ class EvidenceResearchPipelineTests(unittest.TestCase):
         self.assertEqual(outputs["summary"]["live_canary_eligible_count"], 1)
         self.assertEqual(outputs["summary"]["scale_recommendation"], "ALLOW_CANARY_ONLY")
 
+    def test_simulated_only_positive_edge_stays_dry_run_focus(self) -> None:
+        evidence_summary = build_live_edge_summary(
+            [
+                {
+                    "row_type": "market_observation",
+                    "market_slug": "sim-only",
+                    "verified_net_window_usdc": 0.05,
+                    "actual_reward_usdc": 0.0,
+                    "spread_realized_usdc": 0.05,
+                    "simulated_spread_usdc": 0.05,
+                    "fill_rate_window": 0.5,
+                    "evidence_source": "DRY_RUN_SIMULATED",
+                    "simulated_fill": True,
+                }
+            ]
+        )
+        replay_report = {
+            "markets": [
+                {
+                    "market_slug": "sim-only",
+                    "suitability": "REWARD_MM_CANDIDATE",
+                    "net_pnl_usdc": 0.03,
+                    "simulated_fill_count": 1,
+                }
+            ],
+            "replayed_market_count": 1,
+        }
+
+        outputs = build_research_outputs(evidence_summary=evidence_summary, replay_report=replay_report, arb_rows=[])
+
+        row = outputs["market_intel"]["by_market"]["sim-only"]
+        self.assertEqual(row["recommended_action"], "DRY_RUN_FOCUS")
+        self.assertEqual(outputs["whitelist"]["markets"], [])
+        self.assertEqual(outputs["summary"]["live_canary_eligible_count"], 0)
+        self.assertEqual(outputs["summary"]["simulated_profitable_market_count"], 1)
+        self.assertIn("SIMULATED_PROFIT_ONLY", outputs["summary"]["live_ready_blockers"])
+        self.assertEqual(outputs["summary"]["scale_recommendation"], "ALLOW_DRY_RUN_FOCUS")
+
+    def test_confirmed_positive_with_replay_canary_eligible(self) -> None:
+        evidence_summary = build_live_edge_summary(
+            [
+                {
+                    "row_type": "market_observation",
+                    "market_slug": "confirmed",
+                    "verified_net_window_usdc": 0.05,
+                    "actual_reward_usdc": 0.02,
+                    "spread_realized_usdc": 0.01,
+                    "fill_rate_window": 0.5,
+                    "evidence_source": "ACTUAL_REWARD",
+                }
+            ]
+        )
+        replay_report = {
+            "markets": [{"market_slug": "confirmed", "suitability": "REWARD_MM_CANDIDATE"}],
+            "replayed_market_count": 1,
+        }
+
+        outputs = build_research_outputs(evidence_summary=evidence_summary, replay_report=replay_report, arb_rows=[])
+
+        row = outputs["market_intel"]["by_market"]["confirmed"]
+        self.assertEqual(row["recommended_action"], "LIVE_CANARY_ELIGIBLE")
+        self.assertEqual(outputs["summary"]["live_ready_blockers"], [])
+
     def test_pipeline_generates_research_outputs_with_fake_runner(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             default_state = Path(tmpdir) / "auto_trade_profit_state_latest.json"
