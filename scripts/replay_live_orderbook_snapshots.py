@@ -4,6 +4,7 @@ import argparse
 import json
 import sys
 from collections import defaultdict
+from datetime import timedelta
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -12,6 +13,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from src.backtest.replay import ReplayConfig, parse_book_snapshots, replay_quote_strategy
+from src.backtest.replay import _parse_ts
 
 
 def parse_args() -> argparse.Namespace:
@@ -72,20 +74,34 @@ def build_replay_report(rows: Iterable[dict[str, Any]], config: ReplayConfig | N
                 {
                     "market_slug": slug,
                     "snapshot_count": len(snapshots),
-                    "suitability": "INSUFFICIENT_DATA",
+                    "simulated_fill_count": 0,
+                    "net_pnl_usdc": 0.0,
+                    "adverse_selection_30s_usdc": 0.0,
+                    "adverse_selection_2m_usdc": 0.0,
+                    "adverse_selection_5m_usdc": 0.0,
+                    "recommended_quote_offset": 0.0,
+                    "suitability": "NO_EVIDENCE",
                     "reason": "NEED_AT_LEAST_TWO_SNAPSHOTS",
                 }
             )
             continue
         result = replay_quote_strategy(snapshots, cfg)
         payload = result.to_dict()
-        adverse = _adverse_selection_after_fill(payload.get("fills") or [], snapshots[-1].midpoint)
-        payload["adverse_selection_after_fill_usdc"] = round(adverse, 6)
+        adverse_30s = _adverse_selection_after_fill(payload.get("fills") or [], snapshots, 30)
+        adverse_2m = _adverse_selection_after_fill(payload.get("fills") or [], snapshots, 120)
+        adverse_5m = _adverse_selection_after_fill(payload.get("fills") or [], snapshots, 300)
+        payload["simulated_fill_count"] = int(_float(payload.get("fill_count")))
+        payload["adverse_selection_30s_usdc"] = round(adverse_30s, 6)
+        payload["adverse_selection_2m_usdc"] = round(adverse_2m, 6)
+        payload["adverse_selection_5m_usdc"] = round(adverse_5m, 6)
+        payload["adverse_selection_after_fill_usdc"] = round(adverse_5m, 6)
+        payload["recommended_quote_offset"] = _recommended_quote_offset(payload)
+        payload["average_spread"] = round(_average_spread(snapshots), 6)
         payload["best_quote_offsets"] = {
             "quote_bid_offset": cfg.quote_bid_offset,
             "quote_ask_offset": cfg.quote_ask_offset,
         }
-        payload["suitability"] = _suitability(payload)
+        payload["suitability"] = _suitability(payload, min_spread=cfg.min_spread)
         market_reports.append(payload)
 
     replayed = [row for row in market_reports if row.get("snapshot_count", 0) >= 2]
@@ -104,25 +120,59 @@ def build_replay_report(rows: Iterable[dict[str, Any]], config: ReplayConfig | N
     }
 
 
-def _adverse_selection_after_fill(fills: list[dict[str, Any]], final_midpoint: float) -> float:
+def _adverse_selection_after_fill(fills: list[dict[str, Any]], snapshots: list[Any], window_seconds: int) -> float:
     adverse = 0.0
     for fill in fills:
         side = str(fill.get("side") or "").upper()
         price = _float(fill.get("price"))
         size = _float(fill.get("size"))
+        midpoint = _future_midpoint(fill.get("ts"), snapshots, window_seconds)
         if side == "BUY":
-            adverse += max(0.0, price - final_midpoint) * size
+            adverse += max(0.0, price - midpoint) * size
         elif side == "SELL":
-            adverse += max(0.0, final_midpoint - price) * size
+            adverse += max(0.0, midpoint - price) * size
     return adverse
 
 
-def _suitability(row: dict[str, Any]) -> str:
+def _future_midpoint(fill_ts: Any, snapshots: list[Any], window_seconds: int) -> float:
+    if not snapshots:
+        return 0.0
+    target = _parse_ts(str(fill_ts or "")) + timedelta(seconds=window_seconds)
+    for snapshot in snapshots:
+        if _parse_ts(snapshot.ts) >= target:
+            return float(snapshot.midpoint)
+    return float(snapshots[-1].midpoint)
+
+
+def _average_spread(snapshots: list[Any]) -> float:
+    if not snapshots:
+        return 0.0
+    return sum(max(0.0, snapshot.best_ask - snapshot.best_bid) for snapshot in snapshots) / len(snapshots)
+
+
+def _recommended_quote_offset(row: dict[str, Any]) -> float:
+    fill_count = int(_float(row.get("fill_count")))
+    adverse = _float(row.get("adverse_selection_5m_usdc"))
+    if fill_count <= 0:
+        return 0.0
+    if adverse > 0.0:
+        return 0.001
+    return 0.0
+
+
+def _suitability(row: dict[str, Any], *, min_spread: float) -> str:
     fill_count = int(_float(row.get("fill_count")))
     net = _float(row.get("net_pnl_usdc"))
-    adverse = _float(row.get("adverse_selection_after_fill_usdc"))
+    adverse = _float(row.get("adverse_selection_5m_usdc"))
+    avg_spread = _float(row.get("average_spread"))
+    if avg_spread <= max(0.0, min_spread):
+        return "AVOID_TOO_THIN"
     if fill_count <= 0:
-        return "INSUFFICIENT_DATA"
+        if int(_float(row.get("snapshot_count"))) <= 2:
+            return "NO_EVIDENCE"
+        return "AVOID_NO_FILL"
+    if adverse > max(abs(net), 0.01):
+        return "AVOID_ADVERSE_SELECTION"
     if net > 0.0 and adverse <= max(net, 0.0):
         return "REWARD_MM_CANDIDATE"
     return "REWARD_MM_WATCH"

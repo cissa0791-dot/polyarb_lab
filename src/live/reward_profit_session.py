@@ -203,6 +203,9 @@ class RewardProfitConfig:
     record_orderbook_snapshots: bool = False
     orderbook_snapshot_path: str = "data/reports/live_orderbook_snapshots.jsonl"
     orderbook_snapshot_max_markets: int = 20
+    orderbook_snapshot_include_filtered: bool = False
+    orderbook_snapshot_filtered_max: int = 60
+    orderbook_snapshot_min_score: float = 0.0
     enable_evidence_market_filter: bool = False
     evidence_market_intel_path: str = "data/reports/evidence_market_intel_latest.json"
     max_order_rejects_per_hour: int = 0
@@ -1380,18 +1383,20 @@ class RewardProfitSessionEngine:
                 }
             )
             self._append_edge_observations(state, pnl_report, now)
-            self._append_orderbook_snapshots(state, [], [], now)
+            self._append_orderbook_snapshots(state, [], [], [], now)
             return state
 
         horizon = self.config.projection_horizon_hours
         max_true_be = self.config.max_true_break_even_hours
         eligible_candidates = []
+        filtered_candidates: list[tuple[RewardProfitCandidate, str]] = []
         filter_reasons: dict[str, int] = {}
         for item in scanned_candidates:
             reason = self._candidate_filter_reason(item, state=state, now=now, horizon=horizon, max_true_be=max_true_be)
             if reason is None:
                 eligible_candidates.append(item)
             else:
+                filtered_candidates.append((item, reason))
                 filter_reasons[reason] = filter_reasons.get(reason, 0) + 1
         state.last_scanned_candidate_count = len(scanned_candidates)
         state.last_eligible_candidate_count = len(eligible_candidates)
@@ -1448,7 +1453,7 @@ class RewardProfitSessionEngine:
             }
         )
         self._append_edge_observations(state, pnl_report, now)
-        self._append_orderbook_snapshots(state, selected, eligible_candidates, now)
+        self._append_orderbook_snapshots(state, selected, eligible_candidates, filtered_candidates, now)
         return state
 
     def _append_edge_observations(
@@ -1540,6 +1545,7 @@ class RewardProfitSessionEngine:
         state: RewardProfitSessionState,
         selected: list[RewardProfitCandidate],
         eligible: list[RewardProfitCandidate],
+        filtered: list[tuple[RewardProfitCandidate, str]],
         now: datetime,
     ) -> None:
         if not self.config.record_orderbook_snapshots:
@@ -1568,6 +1574,38 @@ class RewardProfitSessionEngine:
                 rows.append(self._orderbook_snapshot_row(state, candidate, source, now))
             if len(rows) >= limit:
                 break
+
+        if len(rows) < limit and self.config.orderbook_snapshot_include_filtered:
+            filtered_limit = max(0, int(self.config.orderbook_snapshot_filtered_max or 0))
+            min_score = float(self.config.orderbook_snapshot_min_score or 0.0)
+            ranked_filtered = sorted(
+                (
+                    (candidate, reason)
+                    for candidate, reason in filtered
+                    if float(candidate.total_score or 0.0) >= min_score
+                ),
+                key=lambda item: (
+                    float(item[0].total_score or 0.0),
+                    float(item[0].expected_net_edge_per_hour or 0.0),
+                ),
+                reverse=True,
+            )[:filtered_limit]
+            for candidate, reason in ranked_filtered:
+                if len(rows) >= limit:
+                    break
+                key = candidate.market_slug or candidate.token_id
+                if key in seen_keys:
+                    continue
+                seen_keys.add(key)
+                rows.append(
+                    self._orderbook_snapshot_row(
+                        state,
+                        candidate,
+                        "near_miss_filtered",
+                        now,
+                        filter_reason=reason,
+                    )
+                )
 
         if len(rows) < limit:
             for opportunity in state.last_arb_opportunities:
@@ -1602,6 +1640,8 @@ class RewardProfitSessionEngine:
         candidate: RewardProfitCandidate,
         source: str,
         now: datetime,
+        *,
+        filter_reason: str | None = None,
     ) -> dict[str, Any]:
         market_state = state.markets.get(candidate.market_slug)
         context = self._snapshot_market_context(market_state)
@@ -1619,8 +1659,14 @@ class RewardProfitSessionEngine:
             "best_bid": candidate.best_bid,
             "best_ask": candidate.best_ask,
             "midpoint": candidate.midpoint,
+            "best_bid_size": None,
+            "best_ask_size": None,
             "bids": [],
             "asks": [],
+            "filter_reason": filter_reason,
+            "total_score": candidate.total_score,
+            "profit_score": candidate.profit_score,
+            "expected_net_edge_per_hour": candidate.expected_net_edge_per_hour,
             "reward_daily_rate": candidate.reward_daily_rate,
             "selected": candidate.market_slug in state.selected_market_slugs,
             "action": getattr(candidate, "action", None),
@@ -1646,8 +1692,15 @@ class RewardProfitSessionEngine:
     ) -> dict[str, Any]:
         price = _safe_float(leg.get("price"))
         side = str(leg.get("side") or "")
-        best_bid = price if side == "SELL_OR_SHORT" else None
-        best_ask = price if side == "BUY" else None
+        best_bid = _safe_float(leg.get("best_bid"))
+        best_ask = _safe_float(leg.get("best_ask"))
+        if best_bid is None and best_ask is None and price is not None:
+            best_bid = price
+            best_ask = price
+        elif best_bid is None:
+            best_bid = price
+        elif best_ask is None:
+            best_ask = price
         return {
             "row_type": "orderbook_snapshot",
             "ts": now.isoformat(),
@@ -1661,9 +1714,15 @@ class RewardProfitSessionEngine:
             "token_id": leg.get("token_id"),
             "best_bid": best_bid,
             "best_ask": best_ask,
-            "midpoint": None,
+            "midpoint": ((best_bid + best_ask) / 2.0) if best_bid is not None and best_ask is not None else None,
+            "best_bid_size": None,
+            "best_ask_size": None,
             "bids": [],
             "asks": [],
+            "filter_reason": None,
+            "total_score": None,
+            "profit_score": None,
+            "expected_net_edge_per_hour": None,
             "reward_daily_rate": None,
             "selected": False,
             "action": side,

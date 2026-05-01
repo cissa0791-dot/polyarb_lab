@@ -45,8 +45,22 @@ class ReplayLiveOrderbookSnapshotsTests(unittest.TestCase):
 
         self.assertEqual(report["market_count"], 1)
         self.assertEqual(report["replayed_market_count"], 1)
-        self.assertIn("adverse_selection_after_fill_usdc", report["markets"][0])
-        self.assertIn(report["markets"][0]["suitability"], {"REWARD_MM_CANDIDATE", "REWARD_MM_WATCH", "INSUFFICIENT_DATA"})
+        market = report["markets"][0]
+        self.assertIn("adverse_selection_30s_usdc", market)
+        self.assertIn("adverse_selection_2m_usdc", market)
+        self.assertIn("adverse_selection_5m_usdc", market)
+        self.assertIn("recommended_quote_offset", market)
+        self.assertIn(
+            market["suitability"],
+            {
+                "REWARD_MM_CANDIDATE",
+                "REWARD_MM_WATCH",
+                "NO_EVIDENCE",
+                "AVOID_ADVERSE_SELECTION",
+                "AVOID_NO_FILL",
+                "AVOID_TOO_THIN",
+            },
+        )
 
 
 if __name__ == "__main__":

@@ -90,29 +90,36 @@ def build_live_edge_summary(rows: Iterable[dict[str, Any]]) -> dict[str, Any]:
         fill_rate_values.append(fill_rate)
         order_reject_count += rejects
 
-        evidence_status = "NEUTRAL"
+        evidence_status = "NO_EVIDENCE"
         reasons: list[str] = []
         blocked = False
         allow = False
-        if verified_net <= 0.0 and actual_reward == 0.0:
-            evidence_status = "BLACKLIST_CANDIDATE"
-            reasons.append("VERIFIED_NET_NON_POSITIVE_WITH_ZERO_ACTUAL_REWARD")
+        has_real_positive = actual_reward > 0.0 or spread > 0.0 or fill_rate > 0.0
+        has_real_negative = fill_rate > 0.0 and verified_net < 0.0
+        if verified_net <= 0.0 and actual_reward == 0.0 and spread == 0.0 and fill_rate == 0.0:
+            reasons.append("NO_REAL_EDGE_EVIDENCE_YET")
         if verified_net <= -0.05 and actual_reward == 0.0:
             blocked = True
+            evidence_status = "BLACKLIST_CANDIDATE"
             reasons.append("VERIFIED_NET_WINDOW_BELOW_NEG_0_05")
         if rejects > 0:
             blocked = True
             evidence_status = "BLACKLIST_CANDIDATE"
             reasons.append("ORDER_REJECTS_PRESENT")
         if paused_count >= 3 or not_selected_count >= 3:
-            blocked = True
-            evidence_status = "BLACKLIST_CANDIDATE"
             reasons.append("REPEATED_COOLDOWN_OR_NOT_SELECTED_CHURN")
+            if has_real_negative:
+                blocked = True
+                evidence_status = "BLACKLIST_CANDIDATE"
+                reasons.append("CHURN_WITH_REAL_NEGATIVE_EVIDENCE")
         if verified_net > 0.01 and fill_rate > 0.0 and (actual_reward > 0.0 or spread > 0.0):
             evidence_status = "WHITELIST_CANDIDATE"
             allow = True
             blocked = False
             reasons.append("VERIFIED_POSITIVE_WITH_REAL_EVIDENCE")
+        elif not blocked and has_real_positive:
+            evidence_status = "NO_EVIDENCE"
+            reasons.append("REAL_ACTIVITY_BUT_NOT_ENOUGH_FOR_WHITELIST")
 
         risk_score = _risk_score(blocked=blocked, verified_net=verified_net, rejects=rejects, fill_rate=fill_rate)
         market_summary = {
@@ -189,11 +196,15 @@ def _scale_recommendation(
     fill_rate: float,
     order_reject_count: int,
 ) -> str:
-    if verified_net_total <= 0.0 or order_reject_count > 0:
+    if order_reject_count > 0 or verified_net_total <= -0.05:
         return "DO_NOT_SCALE"
     if profitable_market_count >= 2 and fill_rate > 0.0:
         return "ALLOW_SCALE_TO_2_MARKETS"
-    return "ALLOW_CANARY_ONLY"
+    if profitable_market_count >= 1 and fill_rate > 0.0:
+        return "ALLOW_CANARY_ONLY"
+    if verified_net_total > -0.05:
+        return "ALLOW_DRY_RUN_FOCUS"
+    return "DO_NOT_SCALE"
 
 
 def _fill_rate(row: dict[str, Any]) -> float:

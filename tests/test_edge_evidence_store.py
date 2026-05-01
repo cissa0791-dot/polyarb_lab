@@ -128,6 +128,41 @@ class EdgeEvidenceStoreTests(unittest.TestCase):
             self.assertEqual(rows[0]["best_bid"], 0.35)
             self.assertIn("account_inventory_usdc", rows[0])
 
+    def test_research_snapshot_records_filtered_near_miss(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            snapshot_path = Path(tmpdir) / "live_orderbook_snapshots.jsonl"
+            config = RewardProfitConfig(
+                out_dir=tmpdir,
+                state_path=str(Path(tmpdir) / "state.json"),
+                pnl_path=str(Path(tmpdir) / "pnl.json"),
+                record_orderbook_snapshots=True,
+                orderbook_snapshot_path=str(snapshot_path),
+                orderbook_snapshot_max_markets=5,
+                orderbook_snapshot_include_filtered=True,
+                orderbook_snapshot_filtered_max=5,
+                max_entry_cost_usdc=0.1,
+                max_entry_cost_pct=1.0,
+                max_break_even_hours=100.0,
+                min_reward_minus_drawdown_per_hour=0.0,
+                min_reward_per_dollar_inventory_per_hour=0.0,
+            )
+            engine = RewardProfitSessionEngine(
+                config,
+                reward_client_factory=lambda dry_run: None,
+                order_manager=_CountingOrderManager(),
+            )
+
+            engine.run_cycle(
+                scanned_candidates=[_candidate(market_slug="filtered")],
+                cycle_ts=datetime(2026, 4, 24, tzinfo=timezone.utc),
+            )
+
+            rows = [json.loads(line) for line in snapshot_path.read_text(encoding="utf-8").splitlines()]
+            self.assertEqual(rows[0]["source"], "near_miss_filtered")
+            self.assertEqual(rows[0]["filter_reason"], "ENTRY_COST_USDC")
+            self.assertIn("total_score", rows[0])
+            self.assertIn("expected_net_edge_per_hour", rows[0])
+
 
 if __name__ == "__main__":
     unittest.main()

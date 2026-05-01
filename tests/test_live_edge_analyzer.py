@@ -42,6 +42,31 @@ class LiveEdgeAnalyzerTests(unittest.TestCase):
         self.assertTrue(summary["market_intel"]["markets"]["bad"]["blocked"])
         self.assertTrue(summary["market_intel"]["markets"]["good"]["allow"])
 
+    def test_tiny_negative_no_fill_is_no_evidence_not_blacklist(self) -> None:
+        rows = [
+            {
+                "row_type": "market_observation",
+                "market_slug": "quiet",
+                "event_slug": "event-quiet",
+                "token_id": "tok-quiet",
+                "actual_reward_usdc": 0.0,
+                "spread_realized_usdc": 0.0,
+                "verified_net_window_usdc": -0.000052,
+                "fill_rate_window": 0.0,
+                "order_reject_count": 0,
+                "status": "PAUSED",
+                "last_cancel_reason": "NOT_SELECTED",
+            }
+            for _ in range(3)
+        ]
+
+        summary = build_live_edge_summary(rows)
+
+        self.assertEqual(summary["blacklist_candidates"], [])
+        self.assertEqual(summary["market_intel"]["markets"]["quiet"]["evidence_status"], "NO_EVIDENCE")
+        self.assertFalse(summary["market_intel"]["markets"]["quiet"]["blocked"])
+        self.assertEqual(summary["scale_recommendation"], "ALLOW_DRY_RUN_FOCUS")
+
 
 if __name__ == "__main__":
     unittest.main()

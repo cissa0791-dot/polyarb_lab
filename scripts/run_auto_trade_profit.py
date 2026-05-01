@@ -74,6 +74,9 @@ def parse_args() -> argparse.Namespace:
         default=str(ROOT / "data" / "reports" / "live_orderbook_snapshots.jsonl"),
     )
     parser.add_argument("--orderbook-snapshot-max-markets", type=int, default=20)
+    parser.add_argument("--orderbook-snapshot-include-filtered", action="store_true")
+    parser.add_argument("--orderbook-snapshot-filtered-max", type=int, default=60)
+    parser.add_argument("--orderbook-snapshot-min-score", type=float, default=0.0)
     parser.add_argument("--enable-evidence-market-filter", action="store_true")
     parser.add_argument(
         "--evidence-market-intel-path",
@@ -216,6 +219,9 @@ def main() -> None:
         record_orderbook_snapshots=args.record_orderbook_snapshots,
         orderbook_snapshot_path=args.orderbook_snapshot_path,
         orderbook_snapshot_max_markets=args.orderbook_snapshot_max_markets,
+        orderbook_snapshot_include_filtered=args.orderbook_snapshot_include_filtered,
+        orderbook_snapshot_filtered_max=args.orderbook_snapshot_filtered_max,
+        orderbook_snapshot_min_score=args.orderbook_snapshot_min_score,
         enable_evidence_market_filter=args.enable_evidence_market_filter,
         evidence_market_intel_path=args.evidence_market_intel_path,
         max_order_rejects_per_hour=args.max_order_rejects_per_hour,
