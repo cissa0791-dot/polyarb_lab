@@ -54,6 +54,46 @@ class EvidenceResearchPipelineTests(unittest.TestCase):
         self.assertEqual(row["recommended_action"], "LIVE_CANARY_ELIGIBLE")
         self.assertEqual(outputs["whitelist"]["markets"][0]["market_slug"], "m1")
 
+    def test_scale_recommendation_clamps_when_no_live_canary_candidates(self) -> None:
+        evidence_summary = {
+            "market_intel": {"markets": {"arb-only": {"evidence_status": "NO_EVIDENCE"}}},
+            "scale_recommendation": "ALLOW_SCALE_TO_2_MARKETS",
+            "profitable_market_count": 3,
+        }
+        replay_report = {"markets": [], "replayed_market_count": 0}
+        arb_rows = [{"status": "ARB_CANDIDATE", "required_legs": [{"market_slug": "arb-only"}]}]
+
+        outputs = build_research_outputs(
+            evidence_summary=evidence_summary,
+            replay_report=replay_report,
+            arb_rows=arb_rows,
+        )
+
+        self.assertEqual(outputs["summary"]["live_canary_eligible_count"], 0)
+        self.assertEqual(outputs["summary"]["dry_run_focus_count"], 1)
+        self.assertEqual(outputs["summary"]["scale_recommendation"], "ALLOW_DRY_RUN_FOCUS")
+        self.assertEqual(outputs["market_intel"]["by_market"]["arb-only"]["recommended_action"], "DRY_RUN_FOCUS")
+
+    def test_scale_recommendation_clamps_single_live_candidate_to_canary(self) -> None:
+        evidence_summary = {
+            "market_intel": {"markets": {"m1": {"evidence_status": "WHITELIST_CANDIDATE"}}},
+            "scale_recommendation": "ALLOW_SCALE_TO_2_MARKETS",
+            "profitable_market_count": 3,
+        }
+        replay_report = {
+            "markets": [{"market_slug": "m1", "suitability": "REWARD_MM_CANDIDATE"}],
+            "replayed_market_count": 1,
+        }
+
+        outputs = build_research_outputs(
+            evidence_summary=evidence_summary,
+            replay_report=replay_report,
+            arb_rows=[],
+        )
+
+        self.assertEqual(outputs["summary"]["live_canary_eligible_count"], 1)
+        self.assertEqual(outputs["summary"]["scale_recommendation"], "ALLOW_CANARY_ONLY")
+
     def test_pipeline_generates_research_outputs_with_fake_runner(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             default_state = Path(tmpdir) / "auto_trade_profit_state_latest.json"

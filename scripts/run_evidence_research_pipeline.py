@@ -268,13 +268,18 @@ def build_research_outputs(
     whitelist = [row for row in rows if row["recommended_action"] == "LIVE_CANARY_ELIGIBLE"]
     blacklist = [row for row in rows if row["recommended_action"] == "BLACKLIST"]
     focus = [row for row in rows if row["recommended_action"] == "DRY_RUN_FOCUS"]
+    scale_recommendation = _clamped_scale_recommendation(
+        requested=str(evidence_summary.get("scale_recommendation") or "DO_NOT_SCALE"),
+        live_canary_eligible_count=len(whitelist),
+        dry_run_focus_count=len(focus),
+    )
     summary = {
         "report_type": "research_pipeline_summary",
         "market_count": len(rows),
         "live_canary_eligible_count": len(whitelist),
         "dry_run_focus_count": len(focus),
         "blacklist_count": len(blacklist),
-        "scale_recommendation": evidence_summary.get("scale_recommendation", "DO_NOT_SCALE"),
+        "scale_recommendation": scale_recommendation,
         "profitable_market_count": evidence_summary.get("profitable_market_count", 0),
         "replayed_market_count": replay_report.get("replayed_market_count", 0),
         "top_focus_markets": focus[:10],
@@ -297,6 +302,29 @@ def build_research_outputs(
         "whitelist": {"report_type": "research_whitelist", "markets": whitelist},
         "blacklist": {"report_type": "research_blacklist", "markets": blacklist},
     }
+
+
+def _clamped_scale_recommendation(
+    *,
+    requested: str,
+    live_canary_eligible_count: int,
+    dry_run_focus_count: int,
+) -> str:
+    order = {
+        "DO_NOT_SCALE": 0,
+        "ALLOW_DRY_RUN_FOCUS": 1,
+        "ALLOW_CANARY_ONLY": 2,
+        "ALLOW_SCALE_TO_2_MARKETS": 3,
+    }
+    by_rank = {rank: value for value, rank in order.items()}
+    requested_rank = order.get(requested, 0)
+    if live_canary_eligible_count <= 0:
+        max_allowed = "ALLOW_DRY_RUN_FOCUS" if dry_run_focus_count > 0 else "DO_NOT_SCALE"
+    elif live_canary_eligible_count == 1:
+        max_allowed = "ALLOW_CANARY_ONLY"
+    else:
+        max_allowed = "ALLOW_SCALE_TO_2_MARKETS"
+    return by_rank[min(requested_rank, order[max_allowed])]
 
 
 def _evidence_rows_by_market(summary: dict[str, Any]) -> dict[str, dict[str, Any]]:
