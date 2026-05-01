@@ -133,6 +133,36 @@ class ArbScannerTests(unittest.TestCase):
         self.assertEqual(report["opportunity_count"], 0)
         self.assertEqual(report["skip_reasons"]["OVER_ONE_NEEDS_SHORT_OR_NEG_RISK"], 1)
 
+    def test_large_leg_count_is_watch_not_candidate(self) -> None:
+        registry = {
+            "events": [
+                {
+                    "slug": "large-winner-market",
+                    "title": "Election Winner",
+                    "neg_risk": True,
+                    "markets": [
+                        {
+                            "slug": f"candidate-{idx}",
+                            "question": f"Candidate {idx} wins?",
+                            "yes_token_id": f"tok-{idx}",
+                            "active": True,
+                            "closed": False,
+                            "enable_orderbook": True,
+                            "best_bid": 0.08,
+                            "best_ask": 0.09,
+                        }
+                        for idx in range(7)
+                    ],
+                }
+            ]
+        }
+
+        report = scan_arb_opportunities(registry, min_edge=0.02)
+
+        self.assertEqual(report["candidate_count"], 0)
+        self.assertEqual(report["watch_count"], 1)
+        self.assertIn("candidate_block=LEG_COUNT_GT_6", report["opportunities"][0]["decision_trace"])
+
 
 if __name__ == "__main__":
     unittest.main()

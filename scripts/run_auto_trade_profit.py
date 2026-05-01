@@ -61,11 +61,24 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--disable-new-buys", action="store_true")
     parser.add_argument("--inventory-manager-only", action="store_true")
     parser.add_argument("--arb-scan-only", action="store_true", help="Run the arbitrage / relative-value scanner without placing or canceling orders.")
-    parser.add_argument("--arb-scan-min-edge", type=float, default=0.01)
+    parser.add_argument("--arb-scan-min-edge", type=float, default=0.02)
     parser.add_argument(
         "--edge-evidence-path",
         type=str,
         default=str(ROOT / "data" / "reports" / "live_edge_observations.jsonl"),
+    )
+    parser.add_argument("--record-orderbook-snapshots", action="store_true")
+    parser.add_argument(
+        "--orderbook-snapshot-path",
+        type=str,
+        default=str(ROOT / "data" / "reports" / "live_orderbook_snapshots.jsonl"),
+    )
+    parser.add_argument("--orderbook-snapshot-max-markets", type=int, default=20)
+    parser.add_argument("--enable-evidence-market-filter", action="store_true")
+    parser.add_argument(
+        "--evidence-market-intel-path",
+        type=str,
+        default=str(ROOT / "data" / "reports" / "evidence_market_intel_latest.json"),
     )
     parser.add_argument("--max-order-rejects-per-hour", type=int, default=0)
     parser.add_argument("--quote-refresh-mode", choices=["cycle", "event_driven"], default="cycle")
@@ -200,6 +213,11 @@ def main() -> None:
         arb_scan_only=args.arb_scan_only,
         arb_scan_min_edge_usdc=args.arb_scan_min_edge,
         edge_evidence_path=args.edge_evidence_path,
+        record_orderbook_snapshots=args.record_orderbook_snapshots,
+        orderbook_snapshot_path=args.orderbook_snapshot_path,
+        orderbook_snapshot_max_markets=args.orderbook_snapshot_max_markets,
+        enable_evidence_market_filter=args.enable_evidence_market_filter,
+        evidence_market_intel_path=args.evidence_market_intel_path,
         max_order_rejects_per_hour=args.max_order_rejects_per_hour,
         quote_refresh_mode=args.quote_refresh_mode,
         entry_mode=args.entry_mode,

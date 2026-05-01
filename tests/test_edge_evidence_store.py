@@ -91,6 +91,42 @@ class EdgeEvidenceStoreTests(unittest.TestCase):
             self.assertEqual(rows[0]["row_type"], "market_observation")
             self.assertEqual(rows[0]["market_slug"], "m1")
             self.assertIn("decision_trace", rows[0])
+            self.assertIn("fill_rate_window", rows[0])
+
+    def test_run_cycle_records_selected_orderbook_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            snapshot_path = Path(tmpdir) / "live_orderbook_snapshots.jsonl"
+            config = RewardProfitConfig(
+                out_dir=tmpdir,
+                state_path=str(Path(tmpdir) / "state.json"),
+                pnl_path=str(Path(tmpdir) / "pnl.json"),
+                record_orderbook_snapshots=True,
+                orderbook_snapshot_path=str(snapshot_path),
+                orderbook_snapshot_max_markets=1,
+                max_entry_cost_usdc=10.0,
+                max_entry_cost_pct=1.0,
+                max_break_even_hours=100.0,
+                min_reward_minus_drawdown_per_hour=0.0,
+                min_reward_per_dollar_inventory_per_hour=0.0,
+            )
+            engine = RewardProfitSessionEngine(
+                config,
+                reward_client_factory=lambda dry_run: None,
+                order_manager=_CountingOrderManager(),
+            )
+
+            engine.run_cycle(
+                scanned_candidates=[_candidate(market_slug="m1"), _candidate(market_slug="m2")],
+                cycle_ts=datetime(2026, 4, 24, tzinfo=timezone.utc),
+            )
+
+            rows = [json.loads(line) for line in snapshot_path.read_text(encoding="utf-8").splitlines()]
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0]["row_type"], "orderbook_snapshot")
+            self.assertEqual(rows[0]["source"], "selected")
+            self.assertIn(rows[0]["market_slug"], {"m1", "m2"})
+            self.assertEqual(rows[0]["best_bid"], 0.35)
+            self.assertIn("account_inventory_usdc", rows[0])
 
 
 if __name__ == "__main__":

@@ -236,6 +236,57 @@ class RewardProfitSelectorTests(unittest.TestCase):
         self.assertEqual(selected, [])
         self.assertEqual(reasons, {"SELECT_PER_MARKET_CAP": 1})
 
+    def test_evidence_market_filter_blocks_blacklisted_candidate(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            intel_path = Path(tmpdir) / "evidence_market_intel_latest.json"
+            intel_path.write_text(
+                json.dumps(
+                    {
+                        "markets": {
+                            "blocked": {
+                                "blocked": True,
+                                "evidence_status": "BLACKLIST_CANDIDATE",
+                                "risk_score": 1.0,
+                            },
+                            "allowed": {
+                                "allow": True,
+                                "evidence_status": "WHITELIST_CANDIDATE",
+                                "risk_score": 0.1,
+                            },
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            config = RewardProfitConfig(
+                out_dir=tmpdir,
+                state_path=str(Path(tmpdir) / "state.json"),
+                pnl_path=str(Path(tmpdir) / "pnl.json"),
+                max_entry_cost_usdc=10.0,
+                max_entry_cost_pct=1.0,
+                max_break_even_hours=100.0,
+                min_reward_minus_drawdown_per_hour=0.0,
+                min_reward_per_dollar_inventory_per_hour=0.0,
+                enable_evidence_market_filter=True,
+                evidence_market_intel_path=str(intel_path),
+            )
+            engine = RewardProfitSessionEngine(
+                config,
+                reward_client_factory=lambda dry_run: None,
+                order_manager=_CountingOrderManager(),
+            )
+
+            state = engine.run_cycle(
+                scanned_candidates=[
+                    _candidate(market_slug="blocked", event_slug="event-a", reward_hour=0.5),
+                    _candidate(market_slug="allowed", event_slug="event-b", reward_hour=0.4),
+                ],
+                cycle_ts=datetime(2026, 4, 24, tzinfo=timezone.utc),
+            )
+
+            self.assertEqual(state.last_filter_reasons, {"EVIDENCE_MARKET_FILTER": 1})
+            self.assertEqual(state.selected_market_slugs, ["allowed"])
+
 
 class RewardProfitSessionEngineTests(unittest.TestCase):
     def _engine(self, tmpdir: str, *, reward_client: _FakeRewardClient | None = None, order_manager: _CountingOrderManager | None = None, max_drawdown: float = 10.0) -> RewardProfitSessionEngine:

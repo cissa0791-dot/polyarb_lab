@@ -26,7 +26,7 @@ class ArbScanOpportunity:
 def scan_arb_opportunities(
     registry: dict[str, Any],
     *,
-    min_edge: float = 0.01,
+    min_edge: float = 0.02,
     max_opportunities: int = 25,
 ) -> dict[str, Any]:
     """Read-only Polymarket internal arbitrage / relative-value scanner.
@@ -79,9 +79,16 @@ def scan_arb_opportunities(
 
         if under_edge > 0.0 and (neg_risk or structure == "likely_exclusive"):
             executable = under_edge - fee_slippage
+            status, status_trace = _arb_status(
+                executable=executable,
+                min_edge=min_edge,
+                neg_risk=neg_risk,
+                resolution_risk=resolution_risk,
+                leg_count=len(usable),
+            )
             opportunities.append(
                 ArbScanOpportunity(
-                    status="ARB_CANDIDATE" if executable >= min_edge and neg_risk else "ARB_WATCH",
+                    status=status,
                     kind="event_yes_basket_under_one",
                     event_slug=event_slug,
                     event_title=event_title if event_title is None else str(event_title),
@@ -106,6 +113,7 @@ def scan_arb_opportunities(
                         f"ask_sum={ask_sum:.6f}",
                         f"gross_edge={under_edge:.6f}",
                         f"estimated_fee_slippage={fee_slippage:.6f}",
+                        *status_trace,
                     ],
                 )
             )
@@ -114,9 +122,17 @@ def scan_arb_opportunities(
 
         if over_edge > 0.0 and neg_risk:
             executable = over_edge - fee_slippage
+            resolution_risk = "medium"
+            status, status_trace = _arb_status(
+                executable=executable,
+                min_edge=min_edge,
+                neg_risk=neg_risk,
+                resolution_risk=resolution_risk,
+                leg_count=len(usable),
+            )
             opportunities.append(
                 ArbScanOpportunity(
-                    status="ARB_CANDIDATE" if executable >= min_edge and neg_risk else "ARB_WATCH",
+                    status=status,
                     kind="event_yes_basket_over_one",
                     event_slug=event_slug,
                     event_title=event_title if event_title is None else str(event_title),
@@ -133,7 +149,7 @@ def scan_arb_opportunities(
                         }
                         for row in usable
                     ],
-                    resolution_mismatch_risk="high" if not neg_risk else "medium",
+                    resolution_mismatch_risk=resolution_risk,
                     estimated_capital_lock_time="until_resolution",
                     confidence_score=_confidence(executable, min_edge, neg_risk) * 0.8,
                     decision_trace=[
@@ -142,6 +158,7 @@ def scan_arb_opportunities(
                         f"gross_edge={over_edge:.6f}",
                         f"estimated_fee_slippage={fee_slippage:.6f}",
                         "shorting_or_complement_execution_required",
+                        *status_trace,
                     ],
                 )
             )
@@ -247,6 +264,26 @@ def _truthy(value: Any, *, default: bool = False) -> bool:
 
 def _fee_slippage_estimate(leg_count: int) -> float:
     return round(max(0.0025, 0.0015 * max(1, leg_count)), 6)
+
+
+def _arb_status(
+    *,
+    executable: float,
+    min_edge: float,
+    neg_risk: bool,
+    resolution_risk: str,
+    leg_count: int,
+) -> tuple[str, list[str]]:
+    trace: list[str] = []
+    if executable < min_edge:
+        trace.append("candidate_block=EDGE_TOO_THIN")
+    if not neg_risk:
+        trace.append("candidate_block=NEG_RISK_NOT_SUPPORTED")
+    if resolution_risk == "high":
+        trace.append("candidate_block=RESOLUTION_RISK_HIGH")
+    if leg_count > 6:
+        trace.append("candidate_block=LEG_COUNT_GT_6")
+    return ("ARB_WATCH", trace) if trace else ("ARB_CANDIDATE", ["candidate_pass=true"])
 
 
 def _confidence(edge: float, min_edge: float, neg_risk: bool) -> float:

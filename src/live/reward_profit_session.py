@@ -25,6 +25,13 @@ def _clamp(value: float, low: float, high: float) -> float:
     return max(low, min(high, value))
 
 
+def _safe_float(value: Any, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
 class RewardMarketStatus(str, Enum):
     SCANNED = "SCANNED"
     SELECTED = "SELECTED"
@@ -191,8 +198,13 @@ class RewardProfitConfig:
     disable_new_buys: bool = False
     inventory_manager_only: bool = False
     arb_scan_only: bool = False
-    arb_scan_min_edge_usdc: float = 0.01
+    arb_scan_min_edge_usdc: float = 0.02
     edge_evidence_path: str = ""
+    record_orderbook_snapshots: bool = False
+    orderbook_snapshot_path: str = "data/reports/live_orderbook_snapshots.jsonl"
+    orderbook_snapshot_max_markets: int = 20
+    enable_evidence_market_filter: bool = False
+    evidence_market_intel_path: str = "data/reports/evidence_market_intel_latest.json"
     max_order_rejects_per_hour: int = 0
     quote_refresh_mode: str = "cycle"
     inventory_dust_shares: float = 0.0001
@@ -1048,6 +1060,7 @@ class RewardProfitSessionEngine:
         self.reward_client = self.reward_client_factory(not config.live)
         self.order_manager = order_manager or _default_order_manager(config.live)
         self.market_intel = self._load_market_intel()
+        self.evidence_market_intel = self._load_evidence_market_intel()
 
     def run(self) -> tuple[RewardProfitSessionState, dict[str, Any]]:
         import time
@@ -1186,6 +1199,8 @@ class RewardProfitSessionEngine:
             < self.config.min_projected_net_at_horizon_usdc - 1e-9
         ):
             return "PROJECTED_NET_AT_HORIZON"
+        if self._candidate_blocked_by_evidence(item):
+            return "EVIDENCE_MARKET_FILTER"
         if self._candidate_blocked_by_market_intel(item):
             return "MARKET_INTEL_RISK"
         return None
@@ -1226,6 +1241,60 @@ class RewardProfitSessionEngine:
         risk_score = float(intel.get("risk_score") or 0.0)
         return risk_score > self.config.max_market_intel_risk_score
 
+    def _load_evidence_market_intel(self) -> dict[str, Any]:
+        if not self.config.enable_evidence_market_filter:
+            return {}
+        path = Path(self.config.evidence_market_intel_path)
+        if not path.exists():
+            return {}
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+        markets = payload.get("markets") if isinstance(payload, dict) else {}
+        return markets if isinstance(markets, dict) else {}
+
+    def _candidate_evidence_intel(self, item: RewardProfitCandidate) -> dict[str, Any] | None:
+        if not self.config.enable_evidence_market_filter:
+            return None
+        intel = self.evidence_market_intel.get(item.market_slug)
+        return intel if isinstance(intel, dict) else None
+
+    def _candidate_blocked_by_evidence(self, item: RewardProfitCandidate) -> bool:
+        intel = self._candidate_evidence_intel(item)
+        if not intel:
+            return False
+        if bool(intel.get("blocked") or intel.get("cooldown")):
+            return True
+        if intel.get("allow") is False and str(intel.get("evidence_status") or "").upper() == "BLACKLIST_CANDIDATE":
+            return True
+        return _safe_float(intel.get("risk_score")) >= 0.95
+
+    def _apply_evidence_priority(self, candidates: list[RewardProfitCandidate]) -> list[RewardProfitCandidate]:
+        if not self.config.enable_evidence_market_filter or not candidates:
+            return candidates
+        boosted: list[RewardProfitCandidate] = []
+        for item in candidates:
+            intel = self._candidate_evidence_intel(item)
+            if not intel or not bool(intel.get("allow")):
+                boosted.append(item)
+                continue
+            evidence_status = str(intel.get("evidence_status") or "").upper()
+            if evidence_status != "WHITELIST_CANDIDATE":
+                boosted.append(item)
+                continue
+            trace = list(item.decision_trace or [])
+            trace.append("evidence_filter=WHITELIST_BOOST")
+            boosted.append(
+                replace(
+                    item,
+                    profit_score=round(item.profit_score + 0.0125, 6),
+                    total_score=round(item.total_score + 0.025, 6),
+                    decision_trace=trace,
+                )
+            )
+        return boosted
+
     @staticmethod
     def _format_duration(seconds: float) -> str:
         seconds_int = max(0, int(round(seconds)))
@@ -1246,6 +1315,7 @@ class RewardProfitSessionEngine:
         now = cycle_ts or _utc_now()
         state.cycle_index += 1
         state.updated_ts = now.isoformat()
+        self.evidence_market_intel = self._load_evidence_market_intel()
         self._sync_account_order_summary(state)
 
         if scanned_candidates is None:
@@ -1310,6 +1380,7 @@ class RewardProfitSessionEngine:
                 }
             )
             self._append_edge_observations(state, pnl_report, now)
+            self._append_orderbook_snapshots(state, [], [], now)
             return state
 
         horizon = self.config.projection_horizon_hours
@@ -1328,6 +1399,7 @@ class RewardProfitSessionEngine:
         scan_diagnostics["eligible_candidates"] = len(eligible_candidates)
         scan_diagnostics["candidate_filter_reasons"] = dict(filter_reasons)
         state.last_scan_diagnostics = scan_diagnostics
+        eligible_candidates = self._apply_evidence_priority(eligible_candidates)
         selected, selection_reasons = self.selector.select_with_reasons(
             eligible_candidates,
             capital_limit_usdc=self.config.capital_limit_usdc,
@@ -1376,6 +1448,7 @@ class RewardProfitSessionEngine:
             }
         )
         self._append_edge_observations(state, pnl_report, now)
+        self._append_orderbook_snapshots(state, selected, eligible_candidates, now)
         return state
 
     def _append_edge_observations(
@@ -1411,6 +1484,9 @@ class RewardProfitSessionEngine:
                     "ask_order_id": market.get("ask_order_id"),
                     "bid_order_filled_size": market.get("bid_order_filled_size"),
                     "ask_order_filled_size": market.get("ask_order_filled_size"),
+                    "bid_filled_delta": market.get("bid_filled_delta"),
+                    "ask_filled_delta": market.get("ask_filled_delta"),
+                    "fill_rate_window": market.get("fill_rate_window"),
                     "inventory_shares": market.get("inventory_shares"),
                     "live_synced_inventory_shares": market.get("live_synced_inventory_shares"),
                     "reward_estimate_usdc": market.get("reward_accrued_estimate_usdc"),
@@ -1429,6 +1505,8 @@ class RewardProfitSessionEngine:
                     "profit_gate_status": market.get("profit_gate_status"),
                     "profit_gate_reason": market.get("profit_gate_reason"),
                     "order_reject_count": market.get("order_reject_count"),
+                    "last_order_error": market.get("last_order_error"),
+                    "last_cancel_reason": market.get("last_cancel_reason"),
                     "account_inventory_usdc": summary.get("account_inventory_usdc"),
                     "account_open_buy_usdc": summary.get("account_open_buy_usdc"),
                     "account_open_sell_usdc": summary.get("account_open_sell_usdc"),
@@ -1456,6 +1534,162 @@ class RewardProfitSessionEngine:
                     handle.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
         except Exception as exc:
             state.last_scan_diagnostics["edge_evidence_error"] = str(exc)
+
+    def _append_orderbook_snapshots(
+        self,
+        state: RewardProfitSessionState,
+        selected: list[RewardProfitCandidate],
+        eligible: list[RewardProfitCandidate],
+        now: datetime,
+    ) -> None:
+        if not self.config.record_orderbook_snapshots:
+            return
+        path_text = str(self.config.orderbook_snapshot_path or "").strip()
+        if not path_text:
+            return
+        limit = max(0, int(self.config.orderbook_snapshot_max_markets or 0))
+        if limit <= 0:
+            return
+
+        rows: list[dict[str, Any]] = []
+        seen_keys: set[str] = set()
+        selected_slugs = {item.market_slug for item in selected}
+
+        for source, candidates in (("selected", selected), ("eligible", eligible)):
+            for candidate in candidates:
+                if len(rows) >= limit:
+                    break
+                if source == "eligible" and candidate.market_slug in selected_slugs:
+                    continue
+                key = candidate.market_slug or candidate.token_id
+                if key in seen_keys:
+                    continue
+                seen_keys.add(key)
+                rows.append(self._orderbook_snapshot_row(state, candidate, source, now))
+            if len(rows) >= limit:
+                break
+
+        if len(rows) < limit:
+            for opportunity in state.last_arb_opportunities:
+                status = str(opportunity.get("status") or "")
+                if status not in {"ARB_CANDIDATE", "ARB_WATCH"}:
+                    continue
+                for leg in list(opportunity.get("required_legs") or []):
+                    if not isinstance(leg, dict) or len(rows) >= limit:
+                        break
+                    key = str(leg.get("market_slug") or leg.get("token_id") or "")
+                    if not key or key in seen_keys:
+                        continue
+                    seen_keys.add(key)
+                    rows.append(self._arb_orderbook_snapshot_row(state, opportunity, leg, now))
+                if len(rows) >= limit:
+                    break
+
+        if not rows:
+            return
+        try:
+            path = Path(path_text)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("a", encoding="utf-8") as handle:
+                for row in rows:
+                    handle.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
+        except Exception as exc:
+            state.last_scan_diagnostics["orderbook_snapshot_error"] = str(exc)
+
+    def _orderbook_snapshot_row(
+        self,
+        state: RewardProfitSessionState,
+        candidate: RewardProfitCandidate,
+        source: str,
+        now: datetime,
+    ) -> dict[str, Any]:
+        market_state = state.markets.get(candidate.market_slug)
+        context = self._snapshot_market_context(market_state)
+        return {
+            "row_type": "orderbook_snapshot",
+            "ts": now.isoformat(),
+            "session_id": state.session_id,
+            "cycle_index": state.cycle_index,
+            "source": source,
+            "event_slug": candidate.event_slug,
+            "event_title": candidate.event_title,
+            "market_slug": candidate.market_slug,
+            "question": candidate.question,
+            "token_id": candidate.token_id,
+            "best_bid": candidate.best_bid,
+            "best_ask": candidate.best_ask,
+            "midpoint": candidate.midpoint,
+            "bids": [],
+            "asks": [],
+            "reward_daily_rate": candidate.reward_daily_rate,
+            "selected": candidate.market_slug in state.selected_market_slugs,
+            "action": getattr(candidate, "action", None),
+            "status": context.get("status") or ("SELECTED" if candidate.market_slug in state.selected_market_slugs else "ELIGIBLE"),
+            "account_inventory_usdc": state.account_inventory_usdc,
+            "account_open_buy_usdc": state.account_open_buy_usdc,
+            "account_open_sell_usdc": state.account_open_sell_usdc,
+            "inventory_shares": context.get("inventory_shares", 0.0),
+            "live_synced_inventory_shares": context.get("live_synced_inventory_shares", 0.0),
+            "open_bid_order_id": context.get("bid_order_id"),
+            "open_ask_order_id": context.get("ask_order_id"),
+            "live_open_buy_order_count": context.get("live_open_buy_order_count", 0),
+            "live_open_sell_order_count": context.get("live_open_sell_order_count", 0),
+            "decision_trace": list(candidate.decision_trace or []),
+        }
+
+    def _arb_orderbook_snapshot_row(
+        self,
+        state: RewardProfitSessionState,
+        opportunity: dict[str, Any],
+        leg: dict[str, Any],
+        now: datetime,
+    ) -> dict[str, Any]:
+        price = _safe_float(leg.get("price"))
+        side = str(leg.get("side") or "")
+        best_bid = price if side == "SELL_OR_SHORT" else None
+        best_ask = price if side == "BUY" else None
+        return {
+            "row_type": "orderbook_snapshot",
+            "ts": now.isoformat(),
+            "session_id": state.session_id,
+            "cycle_index": state.cycle_index,
+            "source": str(opportunity.get("status") or "arb_watch").lower(),
+            "event_slug": opportunity.get("event_slug"),
+            "event_title": opportunity.get("event_title"),
+            "market_slug": leg.get("market_slug"),
+            "question": leg.get("question"),
+            "token_id": leg.get("token_id"),
+            "best_bid": best_bid,
+            "best_ask": best_ask,
+            "midpoint": None,
+            "bids": [],
+            "asks": [],
+            "reward_daily_rate": None,
+            "selected": False,
+            "action": side,
+            "status": opportunity.get("status"),
+            "arb_kind": opportunity.get("kind"),
+            "arb_executable_edge": opportunity.get("executable_edge"),
+            "resolution_mismatch_risk": opportunity.get("resolution_mismatch_risk"),
+            "account_inventory_usdc": state.account_inventory_usdc,
+            "account_open_buy_usdc": state.account_open_buy_usdc,
+            "account_open_sell_usdc": state.account_open_sell_usdc,
+            "decision_trace": list(opportunity.get("decision_trace") or []),
+        }
+
+    @staticmethod
+    def _snapshot_market_context(market_state: RewardMarketState | None) -> dict[str, Any]:
+        if market_state is None:
+            return {}
+        return {
+            "status": market_state.status,
+            "inventory_shares": market_state.inventory_shares,
+            "live_synced_inventory_shares": market_state.live_synced_inventory_shares,
+            "bid_order_id": market_state.bid_order_id,
+            "ask_order_id": market_state.ask_order_id,
+            "live_open_buy_order_count": market_state.live_open_buy_order_count,
+            "live_open_sell_order_count": market_state.live_open_sell_order_count,
+        }
 
     def _advance_market_state(
         self,
