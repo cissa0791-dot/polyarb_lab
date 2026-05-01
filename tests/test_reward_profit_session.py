@@ -365,6 +365,126 @@ class RewardProfitSessionEngineTests(unittest.TestCase):
             self.assertEqual(state.markets, {})
             self.assertEqual(manager.inventory_calls, 0)
 
+    def test_zero_size_candidate_does_not_consume_selected_slot(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = RewardProfitConfig(
+                out_dir=tmpdir,
+                state_path=str(Path(tmpdir) / "s.json"),
+                pnl_path=str(Path(tmpdir) / "p.json"),
+                capital_limit_usdc=100.0,
+                per_market_cap_usdc=100.0,
+                max_markets=1,
+                max_markets_per_event=1,
+                max_drawdown_per_market=10.0,
+                max_daily_loss=10.0,
+                max_entry_cost_usdc=10.0,
+                max_entry_cost_pct=1.0,
+                max_break_even_hours=100.0,
+                min_reward_minus_drawdown_per_hour=0.0,
+                min_reward_per_dollar_inventory_per_hour=0.0,
+                action_mode="optimal",
+                quote_search_mode="best_ev",
+                max_inventory_usdc_per_market=10.0,
+                target_inventory_usdc_per_market=10.0,
+                max_total_inventory_usdc=100.0,
+                max_total_open_buy_usdc=100.0,
+                max_account_open_buy_orders=3,
+                entry_mode="inventory_first",
+                live=False,
+            )
+            engine = RewardProfitSessionEngine(
+                config,
+                reward_client_factory=lambda dry_run: None,
+                order_manager=_CountingOrderManager(),
+                registry_provider=lambda cfg: {"events": []},
+            )
+
+            state = engine.run_cycle(
+                scanned_candidates=[
+                    _candidate(
+                        market_slug="a_zero_size",
+                        event_slug="event-a",
+                        capital=25.0,
+                        quote_size=50.0,
+                        best_bid=0.50,
+                        best_ask=0.51,
+                        reward_hour=5.0,
+                        drawdown_hour=0.01,
+                    ),
+                    _candidate(
+                        market_slug="b_actionable",
+                        event_slug="event-b",
+                        capital=5.0,
+                        quote_size=10.0,
+                        best_bid=0.50,
+                        best_ask=0.51,
+                        reward_hour=0.4,
+                        drawdown_hour=0.01,
+                    ),
+                ],
+                cycle_ts=datetime(2026, 4, 24, tzinfo=timezone.utc),
+            )
+
+            self.assertEqual(state.selected_market_slugs, ["b_actionable"])
+            self.assertNotIn("a_zero_size", state.markets)
+            self.assertEqual(state.last_selection_reasons["SELECT_ZERO_SIZE_REJECT"], 1)
+            self.assertEqual(state.last_scan_diagnostics["zero_size_selected_rejects"], 1)
+
+    def test_all_zero_size_candidates_leave_selection_empty(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = RewardProfitConfig(
+                out_dir=tmpdir,
+                state_path=str(Path(tmpdir) / "s.json"),
+                pnl_path=str(Path(tmpdir) / "p.json"),
+                capital_limit_usdc=100.0,
+                per_market_cap_usdc=100.0,
+                max_markets=1,
+                max_markets_per_event=1,
+                max_drawdown_per_market=10.0,
+                max_daily_loss=10.0,
+                max_entry_cost_usdc=10.0,
+                max_entry_cost_pct=1.0,
+                max_break_even_hours=100.0,
+                min_reward_minus_drawdown_per_hour=0.0,
+                min_reward_per_dollar_inventory_per_hour=0.0,
+                action_mode="optimal",
+                quote_search_mode="best_ev",
+                max_inventory_usdc_per_market=10.0,
+                target_inventory_usdc_per_market=10.0,
+                max_total_inventory_usdc=100.0,
+                max_total_open_buy_usdc=100.0,
+                max_account_open_buy_orders=3,
+                entry_mode="inventory_first",
+                live=False,
+            )
+            engine = RewardProfitSessionEngine(
+                config,
+                reward_client_factory=lambda dry_run: None,
+                order_manager=_CountingOrderManager(),
+                registry_provider=lambda cfg: {"events": []},
+            )
+
+            state = engine.run_cycle(
+                scanned_candidates=[
+                    _candidate(
+                        market_slug="a_zero_size",
+                        event_slug="event-a",
+                        capital=25.0,
+                        quote_size=50.0,
+                        best_bid=0.50,
+                        best_ask=0.51,
+                        reward_hour=5.0,
+                        drawdown_hour=0.01,
+                    )
+                ],
+                cycle_ts=datetime(2026, 4, 24, tzinfo=timezone.utc),
+            )
+
+            self.assertEqual(state.selected_market_slugs, [])
+            self.assertEqual(state.markets, {})
+            self.assertEqual(state.last_selection_reasons["SELECT_ZERO_SIZE_REJECT"], 1)
+            self.assertEqual(state.last_scan_diagnostics["selected_markets"], 0)
+
     def test_drawdown_limit_closes_market(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             engine = self._engine(tmpdir, max_drawdown=3.0)

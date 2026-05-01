@@ -262,6 +262,7 @@ class EvidenceResearchPipelineTests(unittest.TestCase):
 
         self.assertEqual(args.cycles, 10)
         self.assertEqual(args.interval_sec, 5)
+        self.assertEqual(args.max_selected_markets, 3)
 
     def test_scan_command_keeps_progress_visible(self) -> None:
         args = argparse.Namespace(
@@ -286,6 +287,35 @@ class EvidenceResearchPipelineTests(unittest.TestCase):
         self.assertIn("--reset-state", command)
         self.assertEqual(command[command.index("--state-path") + 1], "research_state.json")
         self.assertEqual(command[command.index("--pnl-path") + 1], "research_pnl.json")
+        self.assertEqual(command[command.index("--max-markets") + 1], "3")
+        self.assertEqual(command[command.index("--capital") + 1], "120")
+        self.assertEqual(command[command.index("--max-total-open-buy-usdc") + 1], "120")
+        self.assertEqual(command[command.index("--max-account-open-buy-orders") + 1], "3")
+
+    def test_scan_command_allows_single_selected_market_override(self) -> None:
+        args = argparse.Namespace(
+            cycles=1,
+            interval_sec=0,
+            event_limit=10,
+            market_limit=20,
+            snapshot_max_markets=5,
+            snapshot_filtered_max=3,
+            max_selected_markets=1,
+            verbose=False,
+        )
+        paths = {
+            "evidence": Path("evidence.jsonl"),
+            "snapshots": Path("snapshots.jsonl"),
+            "state": Path("research_state.json"),
+            "pnl": Path("research_pnl.json"),
+        }
+
+        command = _scan_command(args, paths)
+
+        self.assertEqual(command[command.index("--max-markets") + 1], "1")
+        self.assertEqual(command[command.index("--capital") + 1], "40")
+        self.assertEqual(command[command.index("--max-total-open-buy-usdc") + 1], "40")
+        self.assertEqual(command[command.index("--max-account-open-buy-orders") + 1], "1")
 
     def test_pipeline_rejects_live_flag(self) -> None:
         result = subprocess.run(

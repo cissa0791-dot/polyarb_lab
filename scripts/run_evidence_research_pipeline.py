@@ -35,6 +35,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--market-limit", type=int, default=2000)
     parser.add_argument("--snapshot-max-markets", type=int, default=80)
     parser.add_argument("--snapshot-filtered-max", type=int, default=60)
+    parser.add_argument("--max-selected-markets", type=int, default=3)
     parser.add_argument("--out-dir", type=str, default=str(ROOT / "data" / "reports"))
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args(argv)
@@ -144,6 +145,8 @@ def run_pipeline(args: argparse.Namespace, *, command_runner: CommandRunner | No
 
 
 def _scan_command(args: argparse.Namespace, paths: dict[str, Path]) -> list[str]:
+    max_selected_markets = max(1, int(getattr(args, "max_selected_markets", 3)))
+    capital_usdc = 40 * max_selected_markets
     command = [
         sys.executable,
         str(ROOT / "scripts" / "run_auto_trade_profit.py"),
@@ -153,11 +156,11 @@ def _scan_command(args: argparse.Namespace, paths: dict[str, Path]) -> list[str]
         "--interval-sec",
         str(max(0, int(args.interval_sec))),
         "--capital",
-        "40",
+        str(capital_usdc),
         "--per-market-cap",
         "40",
         "--max-markets",
-        "1",
+        str(max_selected_markets),
         "--strategy-set",
         "inventory_manager,reward_mm,arb_scanner",
         "--action-mode",
@@ -173,11 +176,11 @@ def _scan_command(args: argparse.Namespace, paths: dict[str, Path]) -> list[str]
         "--max-inventory-usdc-per-market",
         "40",
         "--max-total-inventory-usdc",
-        "80",
+        str(capital_usdc),
         "--max-total-open-buy-usdc",
-        "40",
+        str(capital_usdc),
         "--max-account-open-buy-orders",
-        "1",
+        str(max_selected_markets),
         "--min-live-order-size-shares",
         "5",
         "--inventory-policy",

@@ -1405,12 +1405,10 @@ class RewardProfitSessionEngine:
         scan_diagnostics["candidate_filter_reasons"] = dict(filter_reasons)
         state.last_scan_diagnostics = scan_diagnostics
         eligible_candidates = self._apply_evidence_priority(eligible_candidates)
-        selected, selection_reasons = self.selector.select_with_reasons(
+        selected, selection_reasons = self._select_actionable_candidates(
+            state,
             eligible_candidates,
-            capital_limit_usdc=self.config.capital_limit_usdc,
-            per_market_cap_usdc=self.config.per_market_cap_usdc,
-            max_markets=self.config.max_markets,
-            max_markets_per_event=self.config.max_markets_per_event,
+            now,
         )
         state.last_selection_reasons = selection_reasons
         state.last_scan_diagnostics["selected_markets"] = len(selected)
@@ -1455,6 +1453,122 @@ class RewardProfitSessionEngine:
         self._append_edge_observations(state, pnl_report, now)
         self._append_orderbook_snapshots(state, selected, eligible_candidates, filtered_candidates, now)
         return state
+
+    def _select_actionable_candidates(
+        self,
+        state: RewardProfitSessionState,
+        candidates: list[RewardProfitCandidate],
+        now: datetime,
+    ) -> tuple[list[RewardProfitCandidate], dict[str, int]]:
+        selected: list[RewardProfitCandidate] = []
+        selection_reasons: dict[str, int] = {}
+        total_capital = 0.0
+        event_counts: dict[str, int] = {}
+
+        ordered = sorted(
+            candidates,
+            key=lambda item: (
+                -item.total_score,
+                -item.profit_score,
+                -item.fill_probability_score,
+                item.true_break_even_hours,
+                item.capital_basis_usdc,
+                item.market_slug,
+            ),
+        )
+        for candidate in ordered:
+            if len(selected) >= self.config.max_markets:
+                selection_reasons["SELECT_MAX_MARKETS"] = selection_reasons.get("SELECT_MAX_MARKETS", 0) + 1
+                continue
+            if candidate.capital_basis_usdc > self.config.per_market_cap_usdc:
+                selection_reasons["SELECT_PER_MARKET_CAP"] = selection_reasons.get("SELECT_PER_MARKET_CAP", 0) + 1
+                continue
+            if total_capital + candidate.capital_basis_usdc > self.config.capital_limit_usdc + 1e-9:
+                selection_reasons["SELECT_CAPITAL_LIMIT"] = selection_reasons.get("SELECT_CAPITAL_LIMIT", 0) + 1
+                continue
+            if event_counts.get(candidate.event_slug, 0) >= self.config.max_markets_per_event:
+                selection_reasons["SELECT_EVENT_LIMIT"] = selection_reasons.get("SELECT_EVENT_LIMIT", 0) + 1
+                continue
+
+            market_state = state.markets.get(candidate.market_slug)
+            if market_state is None:
+                market_state = RewardMarketState(
+                    event_slug=candidate.event_slug,
+                    event_title=candidate.event_title,
+                    market_slug=candidate.market_slug,
+                    question=candidate.question,
+                    token_id=candidate.token_id,
+                )
+                add_market_state = True
+            else:
+                add_market_state = False
+
+            prepared = self._prepare_candidate_for_execution(state, market_state, candidate)
+            if self._is_zero_size_selection_reject(prepared):
+                selection_reasons["SELECT_ZERO_SIZE_REJECT"] = selection_reasons.get("SELECT_ZERO_SIZE_REJECT", 0) + 1
+                if not add_market_state:
+                    self._record_candidate_decision(market_state, prepared)
+                continue
+
+            if add_market_state:
+                state.markets[candidate.market_slug] = market_state
+            selected.append(prepared)
+            total_capital += candidate.capital_basis_usdc
+            event_counts[candidate.event_slug] = event_counts.get(candidate.event_slug, 0) + 1
+
+        if selected:
+            selection_reasons["SELECTED"] = len(selected)
+        state.last_scan_diagnostics["zero_size_selected_rejects"] = selection_reasons.get("SELECT_ZERO_SIZE_REJECT", 0)
+        return selected, selection_reasons
+
+    def _prepare_candidate_for_execution(
+        self,
+        state: RewardProfitSessionState,
+        market_state: RewardMarketState,
+        candidate: RewardProfitCandidate,
+    ) -> RewardProfitCandidate:
+        prepared = self._candidate_with_execution_quote(market_state, candidate)
+        return self._candidate_with_optimal_action(state, market_state, prepared)
+
+    @staticmethod
+    def _is_zero_size_selection_reject(candidate: RewardProfitCandidate) -> bool:
+        if candidate.final_order_size > 1e-9:
+            return False
+        return candidate.risk_reject_reason == "RISK_CAP_BELOW_REWARD_MIN_SIZE"
+
+    @staticmethod
+    def _record_candidate_decision(market_state: RewardMarketState, candidate: RewardProfitCandidate) -> None:
+        market_state.selection_metrics = asdict(candidate)
+        market_state.last_best_bid = candidate.best_bid
+        market_state.last_best_ask = candidate.best_ask
+        market_state.last_midpoint = candidate.midpoint
+        market_state.last_reward_rate = candidate.reward_daily_rate
+        market_state.quote_mode = candidate.quote_mode
+        market_state.quote_attempt = candidate.quote_attempt
+        market_state.next_quote_bid = candidate.next_quote_bid
+        market_state.quote_decision_reason = candidate.quote_decision_reason
+        market_state.action = candidate.action
+        market_state.action_score = candidate.action_score
+        market_state.quote_bid_reason = candidate.quote_bid_reason
+        market_state.quote_ask_reason = candidate.quote_ask_reason
+        market_state.kelly_size = candidate.kelly_size
+        market_state.final_order_size = candidate.final_order_size
+        market_state.target_inventory_usdc = candidate.target_inventory_usdc
+        market_state.account_inventory_usdc = candidate.account_inventory_usdc
+        market_state.account_open_buy_usdc = candidate.account_open_buy_usdc
+        market_state.profit_gate_status = candidate.profit_gate_status
+        market_state.profit_gate_reason = candidate.profit_gate_reason
+        market_state.strategy_id = candidate.strategy_id
+        market_state.decision_trace = list(candidate.decision_trace)
+        market_state.expected_verified_net = candidate.expected_verified_net
+        market_state.reward_score_estimate = candidate.reward_score_estimate
+        market_state.competition_score_estimate = candidate.competition_score_estimate
+        market_state.queue_position_estimate = candidate.queue_position_estimate
+        market_state.adverse_selection_after_fill_usdc = candidate.adverse_selection_after_fill_usdc
+        market_state.quote_time_in_reward_zone_sec = candidate.quote_time_in_reward_zone_sec
+        market_state.risk_reject_reason = candidate.risk_reject_reason
+        market_state.scale_gate_status = candidate.scale_gate_status
+        market_state.scale_gate_reason = candidate.scale_gate_reason
 
     def _append_edge_observations(
         self,
