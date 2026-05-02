@@ -3,6 +3,12 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
+if [[ -x "venv/bin/python" ]]; then
+  PYTHON_BIN="${PYTHON_BIN:-venv/bin/python}"
+else
+  PYTHON_BIN="${PYTHON_BIN:-python3}"
+fi
+
 echo "== tmux =="
 tmux ls 2>/dev/null || true
 
@@ -15,8 +21,12 @@ echo "== latest research files =="
 ls -lh data/reports/research*_latest.* 2>/dev/null || true
 
 echo
+echo "== active/current run summary =="
+"$PYTHON_BIN" scripts/show_research_status.py || true
+
+echo
 echo "== latest full summary =="
-python - <<'PY'
+"$PYTHON_BIN" - <<'PY'
 import json
 from pathlib import Path
 
@@ -44,4 +54,4 @@ PY
 
 echo
 echo "== autonomous decision =="
-python scripts/run_autonomous_project_manager.py || true
+"$PYTHON_BIN" scripts/run_autonomous_project_manager.py || true
