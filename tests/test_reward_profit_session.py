@@ -2202,6 +2202,41 @@ class RewardProfitSessionEngineTests(unittest.TestCase):
             self.assertEqual(diagnostics["candidate_prefilter_reasons"]["NO_CLOB_REWARD_RATE"], 1)
             self.assertNotIn("FEES_ENABLED", diagnostics["candidate_prefilter_reasons"])
 
+    def test_selection_diagnostics_include_blocked_candidate_details(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = RewardProfitConfig(
+                out_dir=tmpdir,
+                state_path=str(Path(tmpdir) / "state.json"),
+                pnl_path=str(Path(tmpdir) / "pnl.json"),
+                max_markets=2,
+                capital_limit_usdc=80.0,
+                per_market_cap_usdc=40.0,
+                max_entry_cost_usdc=100.0,
+                max_entry_cost_pct=1.0,
+                max_break_even_hours=100.0,
+                live=False,
+            )
+            engine = RewardProfitSessionEngine(
+                config,
+                reward_client_factory=lambda dry_run: None,
+                order_manager=_CountingOrderManager(),
+                registry_provider=lambda cfg: {"events": []},
+            )
+
+            state = engine.run_cycle(
+                scanned_candidates=[
+                    _candidate(market_slug="too_big", capital=75.0, spread_capture_hour=1.0),
+                    _candidate(market_slug="ok", capital=20.0, spread_capture_hour=0.5),
+                ],
+                cycle_ts=datetime(2026, 4, 24, tzinfo=timezone.utc),
+            )
+
+            blockers = state.last_scan_diagnostics["selection_blocked_candidates"]
+            self.assertEqual(state.last_selection_reasons["SELECT_PER_MARKET_CAP"], 1)
+            self.assertEqual(blockers[0]["market_slug"], "too_big")
+            self.assertEqual(blockers[0]["reason"], "SELECT_PER_MARKET_CAP")
+            self.assertEqual(blockers[0]["capital_basis_usdc"], 75.0)
+
     def test_report_warns_when_scanned_candidate_count_is_low(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             config = RewardProfitConfig(

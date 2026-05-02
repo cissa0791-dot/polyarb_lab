@@ -18,6 +18,16 @@ class ResearchProfitDriverTests(unittest.TestCase):
                     "eligible_candidate_count": 4,
                     "last_selection_reasons": {"SELECT_PER_MARKET_CAP": 2, "SELECTED": 1},
                     "last_filter_reasons": {"REWARD_MINUS_DRAWDOWN": 99},
+                    "scan_diagnostics": {
+                        "selection_blocked_candidates": [
+                            {
+                                "market_slug": "blocked-big",
+                                "reason": "SELECT_PER_MARKET_CAP",
+                                "capital_basis_usdc": 75.0,
+                                "total_score": 0.8,
+                            }
+                        ]
+                    },
                     "verified_net_after_reward_and_cost_usdc": 0.12,
                     "net_after_reward_and_cost_usdc": 0.15,
                     "reward_accrued_estimate_usdc": 0.03,
@@ -42,9 +52,11 @@ class ResearchProfitDriverTests(unittest.TestCase):
         self.assertEqual(report["latest_cycle"], 3)
         self.assertEqual(report["latest_selected_markets"], 1)
         self.assertEqual(report["latest_filter_reasons"]["REWARD_MINUS_DRAWDOWN"], 99)
+        self.assertEqual(report["latest_selection_blockers"][0]["market_slug"], "blocked-big")
         self.assertEqual(report["top_profit_drivers"][0]["profit_quality"], "SIMULATED_ONLY")
         self.assertEqual(report["top_profit_drivers"][0]["recommended_bucket"], "DRY_RUN_FOCUS")
         self.assertTrue(any("ranking only" in action for action in report["strategy_actions"]))
+        self.assertTrue(any("higher dry-run-only cap" in action for action in report["strategy_actions"]))
 
     def test_negative_or_risk_rejected_market_is_avoid(self) -> None:
         report = analyze_profit_drivers(

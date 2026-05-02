@@ -75,6 +75,7 @@ def analyze_profit_drivers(rows: Iterable[dict[str, Any]], *, top: int = 10) -> 
         "latest_eligible_candidates": latest_cycle_summary.get("eligible_candidate_count"),
         "latest_selection_reasons": latest_cycle_summary.get("last_selection_reasons"),
         "latest_filter_reasons": latest_cycle_summary.get("last_filter_reasons"),
+        "latest_selection_blockers": _selection_blockers(latest_cycle_summary),
         "profit_totals": totals,
         "selection_curve": cycle_curve[-top:],
         "top_profit_drivers": market_summaries[:top],
@@ -88,6 +89,7 @@ def analyze_profit_drivers(rows: Iterable[dict[str, Any]], *, top: int = 10) -> 
             avoid_count=len(avoid),
             latest_selection_reasons=latest_cycle_summary.get("last_selection_reasons") or {},
             latest_filter_reasons=latest_cycle_summary.get("last_filter_reasons") or {},
+            latest_selection_blockers=_selection_blockers(latest_cycle_summary),
         ),
     }
 
@@ -103,6 +105,7 @@ def build_markdown_report(report: dict[str, Any]) -> str:
         f"- Profit totals: {_compact(report.get('profit_totals'))}",
         f"- Latest selection reasons: {_compact(report.get('latest_selection_reasons'))}",
         f"- Latest filter reasons: {_compact(report.get('latest_filter_reasons'))}",
+        f"- Latest selection blockers: {_compact(report.get('latest_selection_blockers'))}",
         "",
         "## Strategy Actions",
         "",
@@ -140,6 +143,7 @@ def _cycle_curve(cycle_rows: list[dict[str, Any]], by_cycle: dict[int, list[dict
                     "eligible_candidate_count": row.get("eligible_candidate_count"),
                     "last_selection_reasons": row.get("last_selection_reasons"),
                     "last_filter_reasons": row.get("last_filter_reasons"),
+                    "scan_diagnostics": row.get("scan_diagnostics"),
                     "verified_net_after_cost_usdc": row.get("verified_net_after_reward_and_cost_usdc"),
                     "modeled_net_after_cost_usdc": row.get("net_after_reward_and_cost_usdc"),
                 }
@@ -162,6 +166,20 @@ def _cycle_curve(cycle_rows: list[dict[str, Any]], by_cycle: dict[int, list[dict
                 ),
             }
         )
+    return result
+
+
+def _selection_blockers(cycle_summary: dict[str, Any]) -> list[dict[str, Any]]:
+    diagnostics = cycle_summary.get("scan_diagnostics") if isinstance(cycle_summary, dict) else {}
+    if not isinstance(diagnostics, dict):
+        return []
+    blockers = diagnostics.get("selection_blocked_candidates")
+    if not isinstance(blockers, list):
+        return []
+    result: list[dict[str, Any]] = []
+    for row in blockers[:10]:
+        if isinstance(row, dict):
+            result.append(row)
     return result
 
 
@@ -291,6 +309,7 @@ def _strategy_actions(
     avoid_count: int,
     latest_selection_reasons: dict[str, Any],
     latest_filter_reasons: dict[str, Any],
+    latest_selection_blockers: list[dict[str, Any]],
 ) -> list[str]:
     actions: list[str] = []
     actual_reward = _float(totals.get("actual_reward_usdc"))
@@ -301,6 +320,20 @@ def _strategy_actions(
         actions.append("Treat current edge as spread/fill evidence; keep reward estimates as ranking only.")
     if latest_selection_reasons:
         actions.append(f"Selection pressure is dominated by {_top_counter_key(latest_selection_reasons)}.")
+    if latest_selection_blockers:
+        top_blocker = latest_selection_blockers[0]
+        reason = top_blocker.get("reason")
+        slug = top_blocker.get("market_slug")
+        cap = top_blocker.get("capital_basis_usdc")
+        if reason == "SELECT_PER_MARKET_CAP":
+            actions.append(
+                f"Top blocked market {slug} needs about ${cap} capital basis; keep live cap unchanged, "
+                "but consider a higher dry-run-only cap if we want to study that tier."
+            )
+        elif reason == "SELECT_ZERO_SIZE_REJECT":
+            actions.append(f"Top blocked market {slug} sized to zero after risk checks; keep rotating past it.")
+        else:
+            actions.append(f"Top blocked market {slug} was skipped by {reason}; inspect blocker list before scaling.")
     if latest_filter_reasons:
         actions.append(f"Candidate pool is dominated by filter {_top_counter_key(latest_filter_reasons)}.")
     if focus_count > 0:

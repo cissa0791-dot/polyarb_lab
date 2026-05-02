@@ -1473,6 +1473,7 @@ class RewardProfitSessionEngine:
     ) -> tuple[list[RewardProfitCandidate], dict[str, int]]:
         selected: list[RewardProfitCandidate] = []
         selection_reasons: dict[str, int] = {}
+        blocked_candidates: list[dict[str, Any]] = []
         total_capital = 0.0
         event_counts: dict[str, int] = {}
 
@@ -1490,15 +1491,19 @@ class RewardProfitSessionEngine:
         for candidate in ordered:
             if len(selected) >= self.config.max_markets:
                 selection_reasons["SELECT_MAX_MARKETS"] = selection_reasons.get("SELECT_MAX_MARKETS", 0) + 1
+                self._record_selection_blocker(blocked_candidates, candidate, "SELECT_MAX_MARKETS")
                 continue
             if candidate.capital_basis_usdc > self.config.per_market_cap_usdc:
                 selection_reasons["SELECT_PER_MARKET_CAP"] = selection_reasons.get("SELECT_PER_MARKET_CAP", 0) + 1
+                self._record_selection_blocker(blocked_candidates, candidate, "SELECT_PER_MARKET_CAP")
                 continue
             if total_capital + candidate.capital_basis_usdc > self.config.capital_limit_usdc + 1e-9:
                 selection_reasons["SELECT_CAPITAL_LIMIT"] = selection_reasons.get("SELECT_CAPITAL_LIMIT", 0) + 1
+                self._record_selection_blocker(blocked_candidates, candidate, "SELECT_CAPITAL_LIMIT")
                 continue
             if event_counts.get(candidate.event_slug, 0) >= self.config.max_markets_per_event:
                 selection_reasons["SELECT_EVENT_LIMIT"] = selection_reasons.get("SELECT_EVENT_LIMIT", 0) + 1
+                self._record_selection_blocker(blocked_candidates, candidate, "SELECT_EVENT_LIMIT")
                 continue
 
             market_state = state.markets.get(candidate.market_slug)
@@ -1517,6 +1522,7 @@ class RewardProfitSessionEngine:
             prepared = self._prepare_candidate_for_execution(state, market_state, candidate)
             if self._is_zero_size_selection_reject(prepared):
                 selection_reasons["SELECT_ZERO_SIZE_REJECT"] = selection_reasons.get("SELECT_ZERO_SIZE_REJECT", 0) + 1
+                self._record_selection_blocker(blocked_candidates, prepared, "SELECT_ZERO_SIZE_REJECT")
                 if not add_market_state:
                     self._record_candidate_decision(market_state, prepared)
                 continue
@@ -1530,7 +1536,36 @@ class RewardProfitSessionEngine:
         if selected:
             selection_reasons["SELECTED"] = len(selected)
         state.last_scan_diagnostics["zero_size_selected_rejects"] = selection_reasons.get("SELECT_ZERO_SIZE_REJECT", 0)
+        state.last_scan_diagnostics["selection_blocked_candidates"] = blocked_candidates
         return selected, selection_reasons
+
+    @staticmethod
+    def _record_selection_blocker(
+        blocked_candidates: list[dict[str, Any]],
+        candidate: RewardProfitCandidate,
+        reason: str,
+        *,
+        limit: int = 12,
+    ) -> None:
+        if len(blocked_candidates) >= limit:
+            return
+        blocked_candidates.append(
+            {
+                "market_slug": candidate.market_slug,
+                "event_slug": candidate.event_slug,
+                "reason": reason,
+                "capital_basis_usdc": round(float(candidate.capital_basis_usdc), 6),
+                "quote_size": round(float(candidate.quote_size), 6),
+                "final_order_size": round(float(candidate.final_order_size), 6),
+                "total_score": round(float(candidate.total_score), 6),
+                "profit_score": round(float(candidate.profit_score), 6),
+                "fill_probability_score": round(float(candidate.fill_probability_score), 6),
+                "expected_net_edge_per_hour": round(float(candidate.expected_net_edge_per_hour), 6),
+                "true_break_even_hours": round(float(candidate.true_break_even_hours), 6),
+                "risk_reject_reason": candidate.risk_reject_reason,
+                "sizing_reason": candidate.sizing_reason,
+            }
+        )
 
     def _prepare_candidate_for_execution(
         self,

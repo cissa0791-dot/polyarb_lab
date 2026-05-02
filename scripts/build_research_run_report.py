@@ -88,6 +88,16 @@ def build_report(*, out_dir: Path, run_dir: Path | None = None, proc_root: Path 
         lines.append(f"- Profit totals: {_compact_json(profit_drivers.get('profit_totals'))}")
         lines.append(f"- Latest selection reasons: {_compact_json(profit_drivers.get('latest_selection_reasons'))}")
         lines.append(f"- Latest filter reasons: {_compact_json(profit_drivers.get('latest_filter_reasons'))}")
+        blockers = profit_drivers.get("latest_selection_blockers") or []
+        if blockers:
+            lines.append("- Latest selection blockers:")
+            for blocker in blockers[:5]:
+                if not isinstance(blocker, dict):
+                    continue
+                lines.append(
+                    f"  - {blocker.get('market_slug')} | {blocker.get('reason')} | "
+                    f"capital={blocker.get('capital_basis_usdc')} | score={blocker.get('total_score')}"
+                )
         for action in profit_drivers.get("strategy_actions") or []:
             lines.append(f"- {action}")
 
