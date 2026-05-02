@@ -25,6 +25,7 @@ has_active_run() {
 while true; do
   while has_active_run; do
     log "active research/trading process detected; waiting ${SLEEP_SEC}s"
+    python scripts/refresh_research_report.py --out-dir data/reports >> "$WATCH_LOG" 2>&1 || true
     sleep "$SLEEP_SEC"
   done
 
