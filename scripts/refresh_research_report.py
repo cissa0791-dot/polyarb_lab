@@ -48,6 +48,13 @@ def refresh_reports(
 
     profit_json.write_text(json.dumps(profit_report, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     profit_md.write_text(build_markdown_report(profit_report), encoding="utf-8")
+    latest_profit_json = out_dir / "research_profit_drivers_latest.json"
+    latest_profit_md = out_dir / "research_profit_drivers.md"
+    latest_profit_json.write_text(
+        json.dumps(profit_report, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    latest_profit_md.write_text(build_markdown_report(profit_report), encoding="utf-8")
     run_report.write_text(build_report(out_dir=out_dir, run_dir=selected_run_dir, proc_root=proc_root), encoding="utf-8")
     return {
         "refreshed": True,

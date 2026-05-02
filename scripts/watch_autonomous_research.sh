@@ -20,7 +20,13 @@ log() {
 }
 
 has_active_run() {
-  pgrep -f "run_evidence_research_pipeline.py|run_auto_trade_profit.py" >/dev/null 2>&1
+  ps -eo comm=,args= \
+    | awk '
+      $1 ~ /python/ && ($0 ~ /run_evidence_research_pipeline.py/ || $0 ~ /run_auto_trade_profit.py/) {
+        found=1
+      }
+      END { exit found ? 0 : 1 }
+    '
 }
 
 while true; do

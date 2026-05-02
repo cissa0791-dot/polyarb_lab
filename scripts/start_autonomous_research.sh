@@ -63,6 +63,8 @@ python scripts/analyze_research_profit_drivers.py \
   --out '$RUN_DIR/research_profit_drivers_latest.json' \
   --markdown-out '$RUN_DIR/research_profit_drivers.md' \
   --run-id '$RUN_ID' || true
+cp '$RUN_DIR/research_profit_drivers_latest.json' '$OUT_DIR/research_profit_drivers_latest.json' 2>/dev/null || true
+cp '$RUN_DIR/research_profit_drivers.md' '$OUT_DIR/research_profit_drivers.md' 2>/dev/null || true
 python scripts/run_autonomous_project_manager.py \
   --summary '$RUN_DIR/research_pipeline_summary_latest.json' \
   --profit-drivers '$RUN_DIR/research_profit_drivers_latest.json' \
