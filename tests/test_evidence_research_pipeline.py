@@ -175,6 +175,8 @@ class EvidenceResearchPipelineTests(unittest.TestCase):
         self.assertEqual(row["recommended_action"], "DRY_RUN_FOCUS")
         self.assertEqual(outputs["whitelist"]["markets"], [])
         self.assertEqual(outputs["summary"]["live_canary_eligible_count"], 0)
+        self.assertEqual(outputs["summary"]["positive_dry_run_market_count"], 1)
+        self.assertEqual(outputs["market_intel"]["positive_dry_run_markets"][0]["market_slug"], "sim-only")
         self.assertEqual(outputs["summary"]["simulated_profitable_market_count"], 1)
         self.assertIn("SIMULATED_PROFIT_ONLY", outputs["summary"]["live_ready_blockers"])
         self.assertEqual(outputs["summary"]["scale_recommendation"], "ALLOW_DRY_RUN_FOCUS")
@@ -416,6 +418,7 @@ class EvidenceResearchPipelineTests(unittest.TestCase):
         self.assertEqual(args.research_min_reward_minus_drawdown_per_hour, 0.0)
         self.assertEqual(args.research_min_projected_net_at_horizon_usdc, 0.0)
         self.assertEqual(args.research_max_true_break_even_hours, 2.5)
+        self.assertEqual(args.research_per_market_cap_usdc, 40.0)
 
     def test_scan_command_keeps_progress_visible(self) -> None:
         args = argparse.Namespace(
@@ -444,6 +447,8 @@ class EvidenceResearchPipelineTests(unittest.TestCase):
         self.assertEqual(command[command.index("--capital") + 1], "120")
         self.assertEqual(command[command.index("--max-total-open-buy-usdc") + 1], "120")
         self.assertEqual(command[command.index("--max-account-open-buy-orders") + 1], "3")
+        self.assertEqual(command[command.index("--per-market-cap") + 1], "40")
+        self.assertEqual(command[command.index("--max-inventory-usdc-per-market") + 1], "40")
         self.assertEqual(command[command.index("--min-reward-minus-drawdown-per-hour") + 1], "0.0")
         self.assertEqual(command[command.index("--min-projected-net-at-horizon-usdc") + 1], "0.0")
         self.assertEqual(command[command.index("--max-true-break-even-hours") + 1], "2.5")
@@ -472,6 +477,23 @@ class EvidenceResearchPipelineTests(unittest.TestCase):
         self.assertEqual(command[command.index("--capital") + 1], "40")
         self.assertEqual(command[command.index("--max-total-open-buy-usdc") + 1], "40")
         self.assertEqual(command[command.index("--max-account-open-buy-orders") + 1], "1")
+
+    def test_scan_command_allows_dry_run_cap_override_without_live_changes(self) -> None:
+        args = parse_args(["--max-selected-markets", "3", "--research-per-market-cap-usdc", "80"])
+        paths = {
+            "evidence": Path("evidence.jsonl"),
+            "snapshots": Path("snapshots.jsonl"),
+            "state": Path("research_state.json"),
+            "pnl": Path("research_pnl.json"),
+        }
+
+        command = _scan_command(args, paths)
+
+        self.assertEqual(command[command.index("--max-markets") + 1], "3")
+        self.assertEqual(command[command.index("--capital") + 1], "240")
+        self.assertEqual(command[command.index("--per-market-cap") + 1], "80")
+        self.assertEqual(command[command.index("--max-total-open-buy-usdc") + 1], "240")
+        self.assertEqual(command[command.index("--max-account-open-buy-orders") + 1], "3")
 
     def test_scan_command_allows_research_filter_overrides(self) -> None:
         args = parse_args(

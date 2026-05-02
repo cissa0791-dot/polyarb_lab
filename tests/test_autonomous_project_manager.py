@@ -48,6 +48,67 @@ class AutonomousProjectManagerTests(unittest.TestCase):
         self.assertEqual(command[command.index("--max-total-open-buy-usdc") + 1], "20.00")
         self.assertEqual(command[command.index("--max-order-rejects-per-hour") + 1], "1")
 
+    def test_replay_negative_blocks_live_canary(self) -> None:
+        decision = build_autonomous_decision(
+            research_summary={
+                "scale_recommendation": "ALLOW_CANARY_ONLY",
+                "live_canary_eligible_count": 1,
+                "dry_run_focus_count": 2,
+                "live_ready_blockers": [],
+            },
+            profit_drivers={"live_canary_candidates": [{"profit_quality": "CONFIRMED"}]},
+            replay_report={"replayed_market_count": 20, "total_net_pnl_usdc": -0.32},
+            live_pnl={},
+        )
+
+        self.assertEqual(decision["decision"], "RUN_RESEARCH")
+        self.assertIn("REPLAY_NET_NEGATIVE", decision["reason"])
+        self.assertFalse(decision["can_execute_live"])
+
+    def test_simulated_profit_driver_blocks_live_canary(self) -> None:
+        decision = build_autonomous_decision(
+            research_summary={
+                "scale_recommendation": "ALLOW_CANARY_ONLY",
+                "live_canary_eligible_count": 1,
+                "dry_run_focus_count": 2,
+                "live_ready_blockers": [],
+            },
+            profit_drivers={
+                "top_profit_drivers": [
+                    {
+                        "market_slug": "sim-only",
+                        "verified_net_usdc": 0.2,
+                        "profit_quality": "SIMULATED_ONLY",
+                    }
+                ],
+                "live_canary_candidates": [],
+            },
+            replay_report={"replayed_market_count": 20, "total_net_pnl_usdc": 0.0},
+            live_pnl={},
+        )
+
+        self.assertEqual(decision["decision"], "RUN_RESEARCH")
+        self.assertIn("SIMULATED_ONLY_PROFIT_DRIVER", decision["reason"])
+
+    def test_single_market_positive_recommends_broader_dry_run_only(self) -> None:
+        decision = build_autonomous_decision(
+            research_summary={
+                "scale_recommendation": "ALLOW_DRY_RUN_FOCUS",
+                "live_canary_eligible_count": 0,
+                "dry_run_focus_count": 5,
+                "profitable_market_count": 1,
+                "verified_net_total": 0.2,
+                "live_ready_blockers": ["SIMULATED_PROFIT_ONLY"],
+            },
+            profit_drivers={"top_profit_drivers": [{"verified_net_usdc": 0.2, "profit_quality": "SIMULATED_ONLY"}]},
+            replay_report={"replayed_market_count": 20, "total_net_pnl_usdc": 0.0},
+            live_pnl={},
+        )
+
+        self.assertEqual(decision["decision"], "RUN_RESEARCH")
+        self.assertEqual(decision["research_policy"]["next_research_mode"], "BROADEN_DRY_RUN_ONLY")
+        self.assertEqual(decision["research_policy"]["recommended_dry_run_per_market_cap_usdc"], 80.0)
+
     def test_two_market_scale_requires_existing_healthy_live_canary(self) -> None:
         decision = build_autonomous_decision(
             research_summary={
@@ -65,6 +126,8 @@ class AutonomousProjectManagerTests(unittest.TestCase):
                 },
                 "markets": [{"order_reject_count": 0}],
             },
+            profit_drivers={"live_canary_candidates": [{"profit_quality": "CONFIRMED"}, {"profit_quality": "CONFIRMED"}]},
+            replay_report={"replayed_market_count": 20, "total_net_pnl_usdc": 0.0},
             max_live_risk_usdc=40.0,
         )
 

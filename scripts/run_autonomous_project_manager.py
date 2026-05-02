@@ -30,6 +30,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Latest live/canary PnL report, if one exists.",
     )
     parser.add_argument(
+        "--profit-drivers",
+        default=str(ROOT / "data" / "reports" / "research_profit_drivers_latest.json"),
+        help="Latest research profit-driver report.",
+    )
+    parser.add_argument(
+        "--replay",
+        default=str(ROOT / "data" / "reports" / "research_replay_report_latest.json"),
+        help="Latest orderbook replay report.",
+    )
+    parser.add_argument(
         "--out",
         default=str(ROOT / "data" / "reports" / "autonomous_decision_latest.json"),
         help="Where to write the autonomous decision report.",
@@ -61,18 +71,30 @@ def build_autonomous_decision(
     *,
     research_summary: dict[str, Any],
     live_pnl: dict[str, Any] | None = None,
+    profit_drivers: dict[str, Any] | None = None,
+    replay_report: dict[str, Any] | None = None,
     max_live_risk_usdc: float = 40.0,
     live_cycles: int = 60,
     live_interval_sec: int = 30,
 ) -> dict[str, Any]:
     live_pnl = live_pnl or {}
+    profit_drivers = profit_drivers or {}
+    replay_report = replay_report or {}
     requested_risk = max(0.0, float(max_live_risk_usdc or 0.0))
     requires_human_approval = requested_risk > HUMAN_APPROVAL_RISK_LIMIT_USDC
     live_health = _live_health(live_pnl, max_live_risk_usdc=min(requested_risk, HUMAN_APPROVAL_RISK_LIMIT_USDC))
+    replay_health = _replay_health(replay_report)
+    profit_quality = _profit_driver_quality(profit_drivers, research_summary)
+    research_policy = _research_policy(research_summary, profit_quality, replay_health)
     summary_blockers = list(research_summary.get("live_ready_blockers") or [])
     live_canary_eligible_count = int(_float(research_summary.get("live_canary_eligible_count")))
     dry_run_focus_count = int(_float(research_summary.get("dry_run_focus_count")))
     scale_recommendation = str(research_summary.get("scale_recommendation") or "DO_NOT_SCALE")
+    live_blockers = _live_data_blockers(
+        live_canary_eligible_count=live_canary_eligible_count,
+        profit_quality=profit_quality,
+        replay_health=replay_health,
+    )
 
     decision = {
         "report_type": "autonomous_project_manager_decision",
@@ -94,7 +116,10 @@ def build_autonomous_decision(
             "dry_run_focus_count": dry_run_focus_count,
             "live_ready_blockers": summary_blockers,
             "live_health": live_health,
+            "profit_driver_quality": profit_quality,
+            "replay": replay_health,
         },
+        "research_policy": research_policy,
     }
 
     if requires_human_approval:
@@ -133,11 +158,12 @@ def build_autonomous_decision(
         )
         return decision
 
-    if summary_blockers:
+    if summary_blockers or live_blockers:
+        blockers = summary_blockers + live_blockers
         decision.update(
             {
                 "decision": "RUN_RESEARCH",
-                "reason": "live readiness blockers remain: " + ",".join(summary_blockers),
+                "reason": "live readiness blockers remain: " + ",".join(blockers),
             }
         )
         return decision
@@ -221,6 +247,130 @@ def _live_health(live_pnl: dict[str, Any], *, max_live_risk_usdc: float) -> dict
     }
 
 
+def _replay_health(replay_report: dict[str, Any]) -> dict[str, Any]:
+    total_net = _float(replay_report.get("total_net_pnl_usdc"))
+    replayed_count = int(_float(replay_report.get("replayed_market_count")))
+    profitable_count = int(_float(replay_report.get("profitable_market_count")))
+    market_count = int(_float(replay_report.get("market_count")))
+    materially_negative = replayed_count > 0 and total_net < -0.01
+    return {
+        "market_count": market_count,
+        "replayed_market_count": replayed_count,
+        "profitable_market_count": profitable_count,
+        "total_net_pnl_usdc": round(total_net, 6),
+        "materially_negative": materially_negative,
+    }
+
+
+def _profit_driver_quality(
+    profit_drivers: dict[str, Any],
+    research_summary: dict[str, Any],
+) -> dict[str, Any]:
+    candidates = profit_drivers.get("live_canary_candidates")
+    if not isinstance(candidates, list):
+        candidates = []
+    drivers = profit_drivers.get("top_profit_drivers")
+    if not isinstance(drivers, list):
+        drivers = profit_drivers.get("markets")
+    if not isinstance(drivers, list):
+        drivers = []
+    totals = profit_drivers.get("totals") if isinstance(profit_drivers.get("totals"), dict) else {}
+    if not totals and isinstance(profit_drivers.get("profit_totals"), dict):
+        totals = profit_drivers["profit_totals"]
+
+    confirmed_candidate_count = sum(1 for row in candidates if _is_confirmed_profit_row(row))
+    simulated_candidate_count = sum(1 for row in drivers if _is_simulated_profit_row(row))
+    positive_driver_count = sum(
+        1
+        for row in drivers
+        if _float(
+            row.get(
+                "verified_net_usdc",
+                row.get("latest_verified_net_usdc", row.get("verified_net_window_usdc")),
+            )
+        )
+        > 0
+    )
+    confirmed_summary_count = int(_float(research_summary.get("live_canary_eligible_count")))
+    actual_reward_total = _float(totals.get("actual_reward_usdc", research_summary.get("actual_reward_total")))
+    realized_spread_total = _float(totals.get("realized_spread_usdc", research_summary.get("realized_spread_total")))
+    simulated_only = False
+    if positive_driver_count > 0 and confirmed_candidate_count <= 0:
+        simulated_only = simulated_candidate_count > 0 or actual_reward_total <= 0.0
+    if confirmed_summary_count > 0 and confirmed_candidate_count <= 0 and profit_drivers:
+        simulated_only = True
+
+    return {
+        "confirmed_candidate_count": max(confirmed_candidate_count, confirmed_summary_count if not profit_drivers else 0),
+        "profit_driver_candidate_count": len(candidates),
+        "positive_driver_count": positive_driver_count,
+        "simulated_positive_driver_count": simulated_candidate_count,
+        "actual_reward_total_usdc": round(actual_reward_total, 6),
+        "realized_spread_total_usdc": round(realized_spread_total, 6),
+        "simulated_only": simulated_only,
+    }
+
+
+def _is_confirmed_profit_row(row: Any) -> bool:
+    if not isinstance(row, dict):
+        return False
+    quality = str(row.get("profit_quality") or row.get("evidence_source") or "").upper()
+    if quality in {"CONFIRMED", "ACTUAL_REWARD", "REALIZED_SPREAD", "ACTUAL_REWARD_CONFIRMED", "CONFIRMED_SPREAD"}:
+        return True
+    if _float(row.get("actual_reward_usdc", row.get("actual_reward_window_usdc"))) > 0:
+        return True
+    if _float(row.get("realized_spread_usdc", row.get("spread_realized_usdc"))) > 0 and not _is_simulated_profit_row(row):
+        return True
+    return False
+
+
+def _is_simulated_profit_row(row: Any) -> bool:
+    if not isinstance(row, dict):
+        return False
+    quality = str(row.get("profit_quality") or row.get("evidence_source") or "").upper()
+    if "SIMULATED" in quality:
+        return True
+    return bool(row.get("simulated_fill"))
+
+
+def _live_data_blockers(
+    *,
+    live_canary_eligible_count: int,
+    profit_quality: dict[str, Any],
+    replay_health: dict[str, Any],
+) -> list[str]:
+    blockers: list[str] = []
+    if replay_health["materially_negative"]:
+        blockers.append("REPLAY_NET_NEGATIVE")
+    if live_canary_eligible_count > 0 and profit_quality["simulated_only"]:
+        blockers.append("SIMULATED_ONLY_PROFIT_DRIVER")
+    if live_canary_eligible_count > 0 and profit_quality["confirmed_candidate_count"] <= 0:
+        blockers.append("NO_CONFIRMED_PROFIT_DRIVER")
+    return blockers
+
+
+def _research_policy(
+    research_summary: dict[str, Any],
+    profit_quality: dict[str, Any],
+    replay_health: dict[str, Any],
+) -> dict[str, Any]:
+    focus_count = int(_float(research_summary.get("dry_run_focus_count")))
+    selected_positive = profit_quality["positive_driver_count"] > 0 or _float(research_summary.get("verified_net_total")) > 0
+    single_market_positive = int(_float(research_summary.get("profitable_market_count"))) <= 1 and selected_positive
+    should_broaden = focus_count > 0 and single_market_positive
+    if replay_health["materially_negative"]:
+        should_broaden = True
+    return {
+        "next_research_mode": "BROADEN_DRY_RUN_ONLY" if should_broaden else "STANDARD_RESEARCH",
+        "recommended_max_selected_markets": 3,
+        "recommended_dry_run_per_market_cap_usdc": 80.0 if should_broaden else 40.0,
+        "live_cap_unchanged_usdc": CANARY_PER_MARKET_CAP_USDC,
+        "reason": "single-market or replay-blocked evidence; broaden dry-run only"
+        if should_broaden
+        else "standard evidence collection",
+    }
+
+
 def _live_canary_command(*, target_live_markets: int, live_risk_usdc: float, cycles: int, interval_sec: int) -> list[str]:
     per_market_cap = min(CANARY_PER_MARKET_CAP_USDC, live_risk_usdc / max(1, target_live_markets))
     return [
@@ -295,6 +445,8 @@ def main() -> None:
     decision = build_autonomous_decision(
         research_summary=load_json(args.summary),
         live_pnl=load_json(args.live_pnl),
+        profit_drivers=load_json(args.profit_drivers),
+        replay_report=load_json(args.replay),
         max_live_risk_usdc=args.max_live_risk_usdc,
         live_cycles=args.live_cycles,
         live_interval_sec=args.live_interval_sec,

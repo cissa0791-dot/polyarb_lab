@@ -6,6 +6,7 @@ RUN_ID="${RUN_ID:-research-$(date -u +%Y%m%dT%H%M%SZ)}"
 CYCLES="${CYCLES:-240}"
 INTERVAL_SEC="${INTERVAL_SEC:-30}"
 MAX_SELECTED_MARKETS="${MAX_SELECTED_MARKETS:-3}"
+RESEARCH_PER_MARKET_CAP_USDC="${RESEARCH_PER_MARKET_CAP_USDC:-40}"
 OUT_DIR="${OUT_DIR:-data/reports}"
 PULL_FIRST="${PULL_FIRST:-0}"
 MANAGER_MODE="${MANAGER_MODE:-execute-live-canary}"
@@ -53,16 +54,20 @@ python scripts/run_evidence_research_pipeline.py \
   --snapshot-max-markets 80 \
   --snapshot-filtered-max 60 \
   --max-selected-markets '$MAX_SELECTED_MARKETS' \
+  --research-per-market-cap-usdc '$RESEARCH_PER_MARKET_CAP_USDC' \
   --out-dir '$OUT_DIR' \
   --verbose
 MANAGER_EXIT=0
-python scripts/run_autonomous_project_manager.py \
-  --mode '$MANAGER_MODE' \
-  --max-live-risk-usdc '$MAX_LIVE_RISK_USDC' || MANAGER_EXIT=\$?
 python scripts/analyze_research_profit_drivers.py \
   --evidence '$RUN_DIR/research_edge_observations_latest.jsonl' \
   --out '$RUN_DIR/research_profit_drivers_latest.json' \
   --markdown-out '$RUN_DIR/research_profit_drivers.md' || true
+python scripts/run_autonomous_project_manager.py \
+  --summary '$RUN_DIR/research_pipeline_summary_latest.json' \
+  --profit-drivers '$RUN_DIR/research_profit_drivers_latest.json' \
+  --replay '$RUN_DIR/research_replay_report_latest.json' \
+  --mode '$MANAGER_MODE' \
+  --max-live-risk-usdc '$MAX_LIVE_RISK_USDC' || MANAGER_EXIT=\$?
 python scripts/build_research_run_report.py \
   --run-dir '$RUN_DIR' \
   --out '$RUN_DIR/research_run_report.md'
@@ -76,4 +81,5 @@ echo "run_id: $RUN_ID"
 echo "attach: tmux attach -t $SESSION_NAME"
 echo "detach: Ctrl+B then d"
 echo "manager_mode: $MANAGER_MODE"
+echo "research_per_market_cap_usdc: $RESEARCH_PER_MARKET_CAP_USDC"
 echo "console_log: $CONSOLE_LOG"

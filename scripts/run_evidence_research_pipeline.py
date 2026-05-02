@@ -39,6 +39,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--snapshot-filtered-max", type=int, default=60)
     parser.add_argument("--max-selected-markets", type=int, default=3)
     parser.add_argument(
+        "--research-per-market-cap-usdc",
+        type=float,
+        default=40.0,
+        help="Dry-run research cap per selected market. This does not change live canary caps.",
+    )
+    parser.add_argument(
         "--research-min-reward-minus-drawdown-per-hour",
         type=float,
         default=0.0,
@@ -170,6 +176,11 @@ def run_pipeline(args: argparse.Namespace, *, command_runner: CommandRunner | No
     outputs["summary"]["partial_reason"] = partial_reason
     outputs["summary"]["scan_cycles_requested"] = max(1, int(args.cycles))
     outputs["summary"]["scan_interval_sec"] = max(0, int(args.interval_sec))
+    outputs["summary"]["max_selected_markets_requested"] = max(1, int(getattr(args, "max_selected_markets", 3)))
+    outputs["summary"]["research_per_market_cap_usdc"] = max(
+        1.0,
+        float(getattr(args, "research_per_market_cap_usdc", 40.0)),
+    )
     outputs["summary"]["quick"] = is_quick
     outputs["summary"]["merge_only"] = bool(getattr(args, "merge_only", False))
     outputs["summary"]["source_dir"] = str(Path(source_dir_arg)) if source_dir_arg else None
@@ -254,7 +265,10 @@ def _copy_outputs_to_latest(run_paths: dict[str, Path], latest_paths: dict[str, 
 
 def _scan_command(args: argparse.Namespace, paths: dict[str, Path]) -> list[str]:
     max_selected_markets = max(1, int(getattr(args, "max_selected_markets", 3)))
-    capital_usdc = 40 * max_selected_markets
+    per_market_cap_usdc = max(1.0, float(getattr(args, "research_per_market_cap_usdc", 40.0)))
+    capital_usdc = per_market_cap_usdc * max_selected_markets
+    capital_arg = _number_arg(capital_usdc)
+    per_market_cap_arg = _number_arg(per_market_cap_usdc)
     command = [
         sys.executable,
         str(ROOT / "scripts" / "run_auto_trade_profit.py"),
@@ -264,9 +278,9 @@ def _scan_command(args: argparse.Namespace, paths: dict[str, Path]) -> list[str]
         "--interval-sec",
         str(max(0, int(args.interval_sec))),
         "--capital",
-        str(capital_usdc),
+        capital_arg,
         "--per-market-cap",
-        "40",
+        per_market_cap_arg,
         "--max-markets",
         str(max_selected_markets),
         "--strategy-set",
@@ -282,11 +296,11 @@ def _scan_command(args: argparse.Namespace, paths: dict[str, Path]) -> list[str]
         "--target-inventory-usdc-per-market",
         "20",
         "--max-inventory-usdc-per-market",
-        "40",
+        per_market_cap_arg,
         "--max-total-inventory-usdc",
-        str(capital_usdc),
+        capital_arg,
         "--max-total-open-buy-usdc",
-        str(capital_usdc),
+        capital_arg,
         "--max-account-open-buy-orders",
         str(max_selected_markets),
         "--min-reward-minus-drawdown-per-hour",
@@ -396,6 +410,14 @@ def build_research_outputs(
     whitelist = [row for row in rows if row["recommended_action"] == "LIVE_CANARY_ELIGIBLE"]
     blacklist = [row for row in rows if row["recommended_action"] == "BLACKLIST"]
     focus = [row for row in rows if row["recommended_action"] == "DRY_RUN_FOCUS"]
+    positive_dry_run = [row for row in focus if _float(row.get("verified_net_window_usdc")) > 0.0]
+    blocked_high_score = [
+        row
+        for row in rows
+        if row["recommended_action"] in {"DRY_RUN_FOCUS", "OBSERVE_MORE"}
+        and _float(row.get("research_score")) >= 0.25
+    ]
+    avoid = [row for row in rows if row["recommended_action"] in {"BLACKLIST", "IGNORE"}]
     scale_recommendation = _clamped_scale_recommendation(
         requested=str(evidence_summary.get("scale_recommendation") or "DO_NOT_SCALE"),
         live_canary_eligible_count=len(whitelist),
@@ -429,6 +451,12 @@ def build_research_outputs(
         ),
         "replayed_market_count": replay_report.get("replayed_market_count", 0),
         "top_focus_markets": focus[:10],
+        "positive_dry_run_market_count": len(positive_dry_run),
+        "blocked_high_score_market_count": len(blocked_high_score),
+        "avoid_market_count": len(avoid),
+        "positive_dry_run_markets": positive_dry_run[:10],
+        "blocked_high_score_markets": blocked_high_score[:10],
+        "avoid_markets": avoid[:10],
         "output_paths": paths or {},
         "partial": False,
         "partial_reason": None,
@@ -444,6 +472,9 @@ def build_research_outputs(
             "report_type": "research_market_intel",
             "markets": rows,
             "by_market": {row["market_slug"]: row for row in rows},
+            "positive_dry_run_markets": positive_dry_run,
+            "blocked_high_score_markets": blocked_high_score,
+            "avoid_markets": avoid,
         },
         "whitelist": {"report_type": "research_whitelist", "markets": whitelist},
         "blacklist": {"report_type": "research_blacklist", "markets": blacklist},
@@ -579,6 +610,12 @@ def _truthy(value: Any) -> bool:
     if isinstance(value, str):
         return value.strip().lower() in {"1", "true", "yes", "y"}
     return False
+
+
+def _number_arg(value: float) -> str:
+    if float(value).is_integer():
+        return str(int(value))
+    return f"{value:.6f}".rstrip("0").rstrip(".")
 
 
 def _detect_contaminated_state(rows: Iterable[dict[str, Any]]) -> dict[str, Any]:
