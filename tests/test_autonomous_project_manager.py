@@ -65,6 +65,76 @@ class AutonomousProjectManagerTests(unittest.TestCase):
         self.assertIn("REPLAY_NET_NEGATIVE", decision["reason"])
         self.assertFalse(decision["can_execute_live"])
 
+    def test_simulated_positive_edge_allows_capped_micro_live_probe(self) -> None:
+        decision = build_autonomous_decision(
+            research_summary={
+                "scale_recommendation": "ALLOW_DRY_RUN_FOCUS",
+                "live_canary_eligible_count": 0,
+                "dry_run_focus_count": 6,
+                "actual_reward_confirmed_market_count": 0,
+                "live_ready_blockers": [
+                    "NO_LIVE_CANARY_ELIGIBLE",
+                    "SIMULATED_PROFIT_ONLY",
+                    "REPLAY_NOT_CONFIRMED",
+                    "NO_ACTUAL_REWARD_CONFIRMED",
+                ],
+            },
+            profit_drivers={
+                "top_profit_drivers": [
+                    {
+                        "market_slug": "probe-me",
+                        "verified_net_usdc": 0.2,
+                        "profit_quality": "SIMULATED_ONLY",
+                    },
+                    {
+                        "market_slug": "probe-me-too",
+                        "verified_net_usdc": 0.1,
+                        "profit_quality": "SIMULATED_ONLY",
+                    },
+                ]
+            },
+            replay_report={"replayed_market_count": 91, "total_net_pnl_usdc": -0.0775},
+            live_pnl={},
+            max_live_risk_usdc=20.0,
+            live_cycles=12,
+            live_interval_sec=5,
+        )
+
+        command = decision["live_command"]
+        self.assertEqual(decision["decision"], "START_MICRO_LIVE_PROBE")
+        self.assertTrue(decision["can_execute_live"])
+        self.assertEqual(decision["target_live_markets"], 1)
+        self.assertEqual(decision["max_live_risk_usdc"], 10.0)
+        self.assertIn("--live", command)
+        self.assertEqual(command[command.index("--capital") + 1], "10.00")
+        self.assertEqual(command[command.index("--max-markets") + 1], "1")
+        self.assertEqual(command[command.index("--inventory-policy") + 1], "auto")
+
+    def test_severely_negative_replay_blocks_micro_live_probe(self) -> None:
+        decision = build_autonomous_decision(
+            research_summary={
+                "scale_recommendation": "ALLOW_DRY_RUN_FOCUS",
+                "live_canary_eligible_count": 0,
+                "dry_run_focus_count": 6,
+                "live_ready_blockers": [
+                    "NO_LIVE_CANARY_ELIGIBLE",
+                    "SIMULATED_PROFIT_ONLY",
+                    "REPLAY_NOT_CONFIRMED",
+                    "NO_ACTUAL_REWARD_CONFIRMED",
+                ],
+            },
+            profit_drivers={
+                "top_profit_drivers": [
+                    {"market_slug": "too-risky", "verified_net_usdc": 0.2, "profit_quality": "SIMULATED_ONLY"}
+                ]
+            },
+            replay_report={"replayed_market_count": 20, "total_net_pnl_usdc": -0.32},
+            live_pnl={},
+        )
+
+        self.assertEqual(decision["decision"], "RUN_RESEARCH")
+        self.assertFalse(decision["can_execute_live"])
+
     def test_profit_driver_run_mismatch_blocks_live_canary(self) -> None:
         decision = build_autonomous_decision(
             research_summary={

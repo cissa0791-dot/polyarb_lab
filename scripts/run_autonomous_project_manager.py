@@ -14,7 +14,10 @@ if str(ROOT) not in sys.path:
 
 HUMAN_APPROVAL_RISK_LIMIT_USDC = 50.0
 CANARY_PER_MARKET_CAP_USDC = 20.0
+MICRO_PROBE_RISK_USDC = 10.0
 CANARY_STOP_LOSS_USDC = 1.0
+MICRO_PROBE_REPLAY_TOTAL_FLOOR_USDC = -0.10
+MICRO_PROBE_REPLAY_AVG_FLOOR_USDC = -0.0025
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -159,6 +162,32 @@ def build_autonomous_decision(
         return decision
 
     if summary_blockers or live_blockers:
+        if _micro_live_probe_allowed(
+            research_summary=research_summary,
+            profit_quality=profit_quality,
+            replay_health=replay_health,
+            summary_blockers=summary_blockers,
+            live_blockers=live_blockers,
+            dry_run_focus_count=dry_run_focus_count,
+        ):
+            live_risk = min(requested_risk, MICRO_PROBE_RISK_USDC, CANARY_PER_MARKET_CAP_USDC)
+            command = _live_canary_command(
+                target_live_markets=1,
+                live_risk_usdc=live_risk,
+                cycles=live_cycles,
+                interval_sec=live_interval_sec,
+            )
+            decision.update(
+                {
+                    "decision": "START_MICRO_LIVE_PROBE",
+                    "reason": "dry-run edge is positive but actual reward requires a capped live probe",
+                    "target_live_markets": 1,
+                    "max_live_risk_usdc": live_risk,
+                    "can_execute_live": True,
+                    "live_command": command,
+                }
+            )
+            return decision
         blockers = summary_blockers + live_blockers
         decision.update(
             {
@@ -354,6 +383,46 @@ def _live_data_blockers(
     return blockers
 
 
+def _micro_live_probe_allowed(
+    *,
+    research_summary: dict[str, Any],
+    profit_quality: dict[str, Any],
+    replay_health: dict[str, Any],
+    summary_blockers: list[str],
+    live_blockers: list[str],
+    dry_run_focus_count: int,
+) -> bool:
+    allowed_summary_blockers = {
+        "NO_LIVE_CANARY_ELIGIBLE",
+        "SIMULATED_PROFIT_ONLY",
+        "NO_ACTUAL_REWARD_CONFIRMED",
+        "REPLAY_NOT_CONFIRMED",
+    }
+    allowed_live_blockers = {"REPLAY_NET_NEGATIVE"}
+    if any(blocker not in allowed_summary_blockers for blocker in summary_blockers):
+        return False
+    if any(blocker not in allowed_live_blockers for blocker in live_blockers):
+        return False
+    if dry_run_focus_count <= 0:
+        return False
+    positive_driver_count = int(_float(profit_quality.get("positive_driver_count")))
+    simulated_profitable_count = int(_float(research_summary.get("simulated_profitable_market_count")))
+    if positive_driver_count <= 0 and _float(research_summary.get("verified_net_total")) <= 0.0:
+        return False
+    if max(positive_driver_count, simulated_profitable_count) < 2:
+        return False
+    if int(_float(research_summary.get("actual_reward_confirmed_market_count"))) > 0:
+        return False
+    replayed_count = max(1, int(_float(replay_health.get("replayed_market_count"))))
+    replay_total = _float(replay_health.get("total_net_pnl_usdc"))
+    replay_avg = replay_total / replayed_count
+    if replay_total < MICRO_PROBE_REPLAY_TOTAL_FLOOR_USDC:
+        return False
+    if replay_avg < MICRO_PROBE_REPLAY_AVG_FLOOR_USDC:
+        return False
+    return True
+
+
 def _run_id_matches(profit_run_id: Any, summary_run_id: Any) -> bool:
     if not summary_run_id:
         return True
@@ -431,7 +500,7 @@ def _live_canary_command(*, target_live_markets: int, live_risk_usdc: float, cyc
         "--min-live-order-size-shares",
         "5",
         "--inventory-policy",
-        "balanced",
+        "auto",
         "--enable-evidence-market-filter",
         "--evidence-market-intel-path",
         str(ROOT / "data" / "reports" / "research_evidence_market_intel_latest.json"),
