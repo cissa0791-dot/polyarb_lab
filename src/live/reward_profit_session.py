@@ -378,6 +378,9 @@ class RewardProfitSessionState:
     last_scan_diagnostics: dict[str, Any] = field(default_factory=dict)
     actual_reward_baseline_usdc: float = 0.0
     actual_reward_latest_usdc: float = 0.0
+    actual_reward_source: str = "NOT_CHECKED"
+    actual_reward_unavailable_reason: str | None = None
+    actual_reward_last_checked_ts: str | None = None
     reward_epoch_id: str | None = None
     account_open_buy_order_count: int = 0
     account_open_sell_order_count: int = 0
@@ -3795,13 +3798,24 @@ class RewardProfitSessionEngine:
         market_state.cooldown_until_ts = (now + timedelta(minutes=max(0.0, minutes))).isoformat()
 
     def _refresh_actual_reward(self, state: RewardProfitSessionState) -> None:
+        state.actual_reward_last_checked_ts = _utc_now().isoformat()
         if self.reward_client is None:
+            state.actual_reward_source = "UNAVAILABLE"
+            state.actual_reward_unavailable_reason = "NO_REWARD_CLIENT"
             return
         try:
             summary = self.reward_client.get_rewards_summary()
-        except RewardClientError:
+        except RewardClientError as exc:
+            state.actual_reward_source = "UNAVAILABLE"
+            state.actual_reward_unavailable_reason = f"REWARD_CLIENT_ERROR: {exc}"
             return
 
+        if bool(summary.get("dry_run")):
+            state.actual_reward_source = "DRY_RUN_SENTINEL"
+            state.actual_reward_unavailable_reason = "DRY_RUN_NO_REAL_REWARD"
+        else:
+            state.actual_reward_source = "REWARD_API_USER_EARNED_USD"
+            state.actual_reward_unavailable_reason = None
         current_earned = float(summary.get("user_earned_usd") or 0.0)
         if state.actual_reward_baseline_usdc == 0.0 and current_earned >= 0.0:
             state.actual_reward_baseline_usdc = current_earned
@@ -3907,6 +3921,9 @@ class RewardProfitSessionEngine:
             last_scan_diagnostics=dict(payload.get("last_scan_diagnostics") or {}),
             actual_reward_baseline_usdc=float(payload.get("actual_reward_baseline_usdc") or 0.0),
             actual_reward_latest_usdc=float(payload.get("actual_reward_latest_usdc") or 0.0),
+            actual_reward_source=str(payload.get("actual_reward_source") or "NOT_CHECKED"),
+            actual_reward_unavailable_reason=payload.get("actual_reward_unavailable_reason"),
+            actual_reward_last_checked_ts=payload.get("actual_reward_last_checked_ts"),
             reward_epoch_id=payload.get("reward_epoch_id"),
             selected_market_slugs=list(payload.get("selected_market_slugs") or []),
             last_arb_opportunities=list(payload.get("last_arb_opportunities") or []),
@@ -4175,6 +4192,10 @@ class RewardProfitSessionEngine:
                 "max_order_age_sec": round(max_order_age_sec, 3),
                 "reward_accrued_estimate_usdc": round(total_reward_est, 6),
                 "reward_accrued_actual_usdc": round(total_reward_actual, 6),
+                "actual_reward_source": state.actual_reward_source,
+                "actual_reward_unavailable_reason": state.actual_reward_unavailable_reason,
+                "actual_reward_last_checked_ts": state.actual_reward_last_checked_ts,
+                "actual_reward_attribution_method": "equal_split_across_active_quoting_markets",
                 "inventory_mtm_pnl_usdc": round(total_inventory_mtm, 6),
                 "inventory_realized_pnl_usdc": round(total_inventory_realized, 6),
                 "spread_realized_usdc": round(total_spread_realized, 6),

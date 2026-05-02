@@ -379,6 +379,12 @@ class RewardProfitSessionEngineTests(unittest.TestCase):
 
             self.assertGreater(market["reward_accrued_estimate_usdc"], 0.0)
             self.assertGreater(market["reward_accrued_actual_usdc"], 0.0)
+            self.assertEqual(pnl["summary"]["actual_reward_source"], "REWARD_API_USER_EARNED_USD")
+            self.assertIsNone(pnl["summary"]["actual_reward_unavailable_reason"])
+            self.assertEqual(
+                pnl["summary"]["actual_reward_attribution_method"],
+                "equal_split_across_active_quoting_markets",
+            )
 
     def test_mark_to_market_uses_bid_against_entry_cost(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -762,6 +768,8 @@ class RewardProfitSessionEngineTests(unittest.TestCase):
             self.assertTrue(pnl["markets"][0]["simulated_fill"])
             self.assertEqual(pnl["markets"][0]["simulated_spread_usdc"], 1.25)
             self.assertEqual(pnl["markets"][0]["actual_reward_usdc"], 0.0)
+            self.assertEqual(pnl["summary"]["actual_reward_source"], "UNAVAILABLE")
+            self.assertEqual(pnl["summary"]["actual_reward_unavailable_reason"], "NO_REWARD_CLIENT")
             self.assertFalse(pnl["markets"][0]["replay_confirmed"])
             self.assertEqual(pnl["summary"]["simulated_profitable_market_count"], 1)
             self.assertEqual(pnl["summary"]["actual_reward_confirmed_market_count"], 0)
