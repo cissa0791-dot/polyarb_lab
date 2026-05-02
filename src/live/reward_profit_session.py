@@ -1074,6 +1074,11 @@ class RewardProfitSessionEngine:
         try:
             for cycle_number in range(1, total_cycles + 1):
                 state = self.run_cycle(state)
+                cycle_pnl_report = self._build_pnl_report(state)
+                try:
+                    self._write_latest_reports(state, cycle_pnl_report)
+                except Exception as exc:
+                    state.last_scan_diagnostics["latest_report_write_error"] = str(exc)
                 if self.config.show_progress:
                     self._print_progress(cycle_number, total_cycles, started_monotonic, state)
                 if state.halted:
@@ -3762,16 +3767,10 @@ class RewardProfitSessionEngine:
     def _write_reports(self, state: RewardProfitSessionState, pnl_report: dict[str, Any]) -> None:
         out_dir = Path(self.config.out_dir)
         out_dir.mkdir(parents=True, exist_ok=True)
-        state_path = Path(self.config.state_path)
-        pnl_path = Path(self.config.pnl_path)
-        state_path.parent.mkdir(parents=True, exist_ok=True)
-        pnl_path.parent.mkdir(parents=True, exist_ok=True)
-
-        state_payload = asdict(state)
-        state_path.write_text(json.dumps(state_payload, indent=2, ensure_ascii=False), encoding="utf-8")
-        pnl_path.write_text(json.dumps(pnl_report, indent=2, ensure_ascii=False), encoding="utf-8")
+        self._write_latest_reports(state, pnl_report)
 
         stamp = _utc_now().strftime("%Y%m%dT%H%M%SZ")
+        state_payload = asdict(state)
         (out_dir / f"reward_profit_state_{stamp}.json").write_text(
             json.dumps(state_payload, indent=2, ensure_ascii=False),
             encoding="utf-8",
@@ -3780,6 +3779,16 @@ class RewardProfitSessionEngine:
             json.dumps(pnl_report, indent=2, ensure_ascii=False),
             encoding="utf-8",
         )
+
+    def _write_latest_reports(self, state: RewardProfitSessionState, pnl_report: dict[str, Any]) -> None:
+        state_path = Path(self.config.state_path)
+        pnl_path = Path(self.config.pnl_path)
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+        pnl_path.parent.mkdir(parents=True, exist_ok=True)
+
+        state_payload = asdict(state)
+        state_path.write_text(json.dumps(state_payload, indent=2, ensure_ascii=False), encoding="utf-8")
+        pnl_path.write_text(json.dumps(pnl_report, indent=2, ensure_ascii=False), encoding="utf-8")
 
 
 def _default_registry_provider(config: RewardProfitConfig) -> dict[str, Any]:

@@ -1085,6 +1085,28 @@ class RewardProfitSessionEngineTests(unittest.TestCase):
             self.assertIn("verified_net_after_reward_and_cost_usdc", payload["summary"])
             self.assertIn("fill_simulation", payload["markets"][0])
 
+    def test_run_refreshes_latest_reports_each_cycle(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            engine = self._engine(tmpdir)
+            engine.config.cycles = 3
+            writes = 0
+            original_write_latest = engine._write_latest_reports
+
+            def counted_write_latest(state, pnl_report):
+                nonlocal writes
+                writes += 1
+                original_write_latest(state, pnl_report)
+
+            engine._write_latest_reports = counted_write_latest  # type: ignore[method-assign]
+
+            state, pnl_report = engine.run()
+
+            self.assertEqual(writes, 4)
+            self.assertEqual(state.cycle_index, 3)
+            self.assertEqual(pnl_report["summary"]["cycle_index"], 3)
+            payload = json.loads(Path(engine.config.pnl_path).read_text(encoding="utf-8"))
+            self.assertEqual(payload["summary"]["cycle_index"], 3)
+
     def test_calibration_downshifts_optimistic_maker_take_share(self) -> None:
         pnl_payload = {
             "session_id": "s1",
