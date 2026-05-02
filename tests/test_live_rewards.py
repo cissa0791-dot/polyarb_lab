@@ -9,6 +9,8 @@ from __future__ import annotations
 import unittest
 from unittest.mock import MagicMock, patch
 
+import httpx
+
 from src.live.rewards import (
     EpochInfo,
     RewardClient,
@@ -222,6 +224,33 @@ class TestLiveUserRewards(unittest.TestCase):
         self.assertEqual(result["epoch_id"], "42")
         self.assertAlmostEqual(result["user_earned_usd"], 12.5)
         self.assertFalse(result["dry_run"])
+
+    def test_get_rewards_summary_falls_back_to_activity_yield(self) -> None:
+        client = _make_client(dry_run=False)
+
+        epoch_resp = MagicMock()
+        epoch_resp.status_code = 405
+        epoch_resp.raise_for_status.side_effect = httpx.HTTPStatusError(
+            "405",
+            request=MagicMock(),
+            response=MagicMock(status_code=405),
+        )
+
+        activity_resp = MagicMock()
+        activity_resp.json.return_value = [
+            {"type": "TRADE", "usdcSize": "99.0"},
+            {"type": "YIELD", "usdcSize": "1.25"},
+            {"type": "YIELD", "size": "0.75"},
+        ]
+        activity_resp.raise_for_status.return_value = None
+
+        with patch("httpx.get", side_effect=[epoch_resp, activity_resp]):
+            result = client.get_rewards_summary()
+
+        self.assertEqual(result["source"], "data_api_activity_yield")
+        self.assertEqual(result["epoch_id"], "data_api_activity_yield")
+        self.assertAlmostEqual(result["user_earned_usd"], 2.0)
+        self.assertIn("clob_rewards_error", result)
 
 
 # ---------------------------------------------------------------------------

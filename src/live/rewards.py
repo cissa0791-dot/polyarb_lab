@@ -36,6 +36,7 @@ from src.live.auth import LiveCredentials
 logger = logging.getLogger("polyarb.live.rewards")
 
 _CLOB_HOST = "https://clob.polymarket.com"
+_DATA_API_HOST = "https://data-api.polymarket.com"
 _TIMEOUT   = 15.0   # seconds
 
 
@@ -255,10 +256,29 @@ class RewardClient:
         Raises:
             RewardClientError: if either underlying call fails.
         """
-        epoch   = self.get_current_epoch()
-        summary = self.get_user_rewards(epoch_id=epoch.epoch_id)
+        try:
+            epoch = self.get_current_epoch()
+            summary = self.get_user_rewards(epoch_id=epoch.epoch_id)
+            source = "clob_rewards"
+            clob_error = None
+        except RewardClientError as exc:
+            clob_error = str(exc)
+            try:
+                summary = self._fetch_activity_yield_summary()
+            except RewardClientError as fallback_exc:
+                raise RewardClientError(
+                    f"get_rewards_summary failed via clob ({clob_error}) and activity fallback ({fallback_exc})"
+                ) from fallback_exc
+            epoch = EpochInfo(
+                epoch_id=summary.epoch_id,
+                start_date="N/A",
+                end_date="N/A",
+                total_rewards_usd=0.0,
+                raw=summary.raw,
+            )
+            source = "data_api_activity_yield"
 
-        return {
+        result = {
             "wallet_address":      self.address,
             "epoch_id":            epoch.epoch_id,
             "epoch_start":         epoch.start_date,
@@ -268,11 +288,68 @@ class RewardClient:
             "user_maker_vol_usd":  summary.maker_volume_usd,
             "user_share_pct":      summary.reward_share_pct,
             "dry_run":             self.dry_run,
+            "source":              source,
         }
+        if clob_error:
+            result["clob_rewards_error"] = clob_error
+        return result
 
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    def _fetch_activity_yield_summary(self, *, limit: int = 500, max_pages: int = 10) -> UserRewardSummary:
+        """Fallback actual reward source using data-api activity YIELD rows.
+
+        The CLOB rewards epoch endpoint has returned HTTP 405 in production.
+        Activity YIELD rows are cumulative enough for session delta tracking:
+        the session stores a baseline on first read and only attributes later
+        increases as actual reward.
+        """
+        rows: list[dict[str, Any]] = []
+        for page in range(max(1, max_pages)):
+            params = {"user": self.address, "limit": str(limit), "offset": str(page * limit)}
+            url = f"{_DATA_API_HOST}/activity"
+            try:
+                resp = httpx.get(url, params=params, timeout=_TIMEOUT)
+                resp.raise_for_status()
+                payload = resp.json()
+            except httpx.HTTPStatusError as exc:
+                raise RewardClientError(
+                    f"_fetch_activity_yield_summary HTTP {exc.response.status_code}"
+                ) from exc
+            except Exception as exc:
+                raise RewardClientError(f"_fetch_activity_yield_summary failed: {exc}") from exc
+
+            page_rows = payload
+            if isinstance(payload, dict):
+                page_rows = payload.get("data") or payload.get("activity") or []
+            if not isinstance(page_rows, list) or not page_rows:
+                break
+            rows.extend(dict(row) for row in page_rows if isinstance(row, dict))
+            if len(page_rows) < limit:
+                break
+
+        yield_rows = [row for row in rows if str(row.get("type") or "").upper() == "YIELD"]
+        earned = 0.0
+        for row in yield_rows:
+            try:
+                earned += float(row.get("usdcSize") or row.get("size") or 0.0)
+            except (TypeError, ValueError):
+                continue
+        return UserRewardSummary(
+            address=self.address,
+            epoch_id="data_api_activity_yield",
+            rewards_earned_usd=earned,
+            maker_volume_usd=0.0,
+            reward_share_pct=0.0,
+            raw={
+                "source": "data_api_activity_yield",
+                "activity_rows_scanned": len(rows),
+                "yield_rows": len(yield_rows),
+                "sample_yield_rows": yield_rows[:20],
+            },
+        )
 
     def _fetch_rewards_alternate(self, epoch_id: str) -> UserRewardSummary:
         """Fallback: query top-level /rewards with address filter."""
