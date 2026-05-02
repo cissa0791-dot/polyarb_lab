@@ -116,23 +116,35 @@ def _run_dir_status(run_dir: Path) -> dict[str, Any]:
     pipeline_summary = load_json(run_dir / "research_pipeline_summary_latest.json")
     evidence = run_dir / "research_edge_observations_latest.jsonl"
     snapshots = run_dir / "research_orderbook_snapshots_latest.jsonl"
+    latest_observation = _latest_observation_status(evidence)
+    selected_markets = (
+        summary.get("scan_diagnostics", {}).get("selected_markets")
+        if isinstance(summary.get("scan_diagnostics"), dict)
+        else None
+    )
     return {
         "run_id": run_dir.name,
         "completed": bool(pipeline_summary),
         "partial": pipeline_summary.get("partial") if pipeline_summary else None,
         "scale_recommendation": pipeline_summary.get("scale_recommendation") if pipeline_summary else None,
-        "cycle_index": summary.get("cycle_index"),
-        "selected_markets": summary.get("scan_diagnostics", {}).get("selected_markets")
-        if isinstance(summary.get("scan_diagnostics"), dict)
-        else None,
-        "active_quote_market_count": summary.get("active_quote_market_count"),
+        "cycle_index": _coalesce(summary.get("cycle_index"), latest_observation.get("cycle_index")),
+        "selected_markets": _coalesce(selected_markets, latest_observation.get("selected_markets")),
+        "active_quote_market_count": _coalesce(
+            summary.get("active_quote_market_count"), latest_observation.get("active_quote_market_count")
+        ),
         "eligible_candidates": summary.get("last_eligible_candidate_count"),
         "last_selection_reasons": summary.get("last_selection_reasons"),
         "last_filter_reasons": summary.get("last_filter_reasons"),
-        "verified_net_after_cost_usdc": summary.get("verified_net_after_reward_and_cost_usdc"),
-        "modeled_net_after_cost_usdc": summary.get("net_after_reward_and_cost_usdc"),
-        "bid_filled_shares": summary.get("bid_order_filled_shares"),
-        "ask_filled_shares": summary.get("ask_order_filled_shares"),
+        "verified_net_after_cost_usdc": _coalesce(
+            summary.get("verified_net_after_reward_and_cost_usdc"),
+            latest_observation.get("verified_net_after_cost_usdc"),
+        ),
+        "modeled_net_after_cost_usdc": _coalesce(
+            summary.get("net_after_reward_and_cost_usdc"), latest_observation.get("modeled_net_after_cost_usdc")
+        ),
+        "bid_filled_shares": _coalesce(summary.get("bid_order_filled_shares"), latest_observation.get("bid_filled_shares")),
+        "ask_filled_shares": _coalesce(summary.get("ask_order_filled_shares"), latest_observation.get("ask_filled_shares")),
+        "latest_market_slugs": latest_observation.get("latest_market_slugs", []),
         "evidence_rows": count_lines(evidence),
         "snapshot_rows": count_lines(snapshots),
         "evidence_bytes": evidence.stat().st_size if evidence.exists() else 0,
@@ -178,6 +190,7 @@ def print_status(status: dict[str, Any]) -> None:
             print(f"{key}: {current.get(key)}")
         print(f"last_selection_reasons: {current.get('last_selection_reasons')}")
         print(f"last_filter_reasons: {current.get('last_filter_reasons')}")
+        print(f"latest_market_slugs: {current.get('latest_market_slugs')}")
 
     print()
     print("== root latest ==")
@@ -194,6 +207,68 @@ def _arg_value(argv: list[str], name: str) -> str | None:
     if value_index >= len(argv):
         return None
     return argv[value_index]
+
+
+def _latest_observation_status(evidence_path: Path) -> dict[str, Any]:
+    if not evidence_path.exists():
+        return {}
+    latest_cycle: int | None = None
+    rows: list[dict[str, Any]] = []
+    try:
+        handle = evidence_path.open(encoding="utf-8")
+    except OSError:
+        return {}
+    with handle:
+        for line in handle:
+            if not line.strip():
+                continue
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if row.get("row_type") != "market_observation":
+                continue
+            cycle = _int(row.get("cycle_index"))
+            if cycle is None:
+                continue
+            if latest_cycle is None or cycle > latest_cycle:
+                latest_cycle = cycle
+                rows = [row]
+            elif cycle == latest_cycle:
+                rows.append(row)
+    if latest_cycle is None:
+        return {}
+    return {
+        "cycle_index": latest_cycle,
+        "selected_markets": len(rows),
+        "active_quote_market_count": sum(1 for row in rows if row.get("status") == "QUOTING"),
+        "verified_net_after_cost_usdc": round(sum(_float(row.get("verified_net_window_usdc")) for row in rows), 6),
+        "modeled_net_after_cost_usdc": round(sum(_float(row.get("net_after_reward_and_cost_usdc")) for row in rows), 6),
+        "bid_filled_shares": round(sum(_float(row.get("bid_order_filled_size")) for row in rows), 6),
+        "ask_filled_shares": round(sum(_float(row.get("ask_order_filled_size")) for row in rows), 6),
+        "latest_market_slugs": [row.get("market_slug") for row in rows if row.get("market_slug")],
+    }
+
+
+def _coalesce(*values: Any) -> Any:
+    for value in values:
+        if value is not None:
+            return value
+    return None
+
+
+def _int(value: Any) -> int | None:
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def _float(value: Any) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def main() -> None:
