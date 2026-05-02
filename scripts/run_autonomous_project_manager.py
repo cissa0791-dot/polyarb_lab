@@ -308,6 +308,9 @@ def _profit_driver_quality(
         "actual_reward_total_usdc": round(actual_reward_total, 6),
         "realized_spread_total_usdc": round(realized_spread_total, 6),
         "simulated_only": simulated_only,
+        "run_id": profit_drivers.get("run_id"),
+        "expected_run_id": research_summary.get("run_id"),
+        "run_id_matches": _run_id_matches(profit_drivers.get("run_id"), research_summary.get("run_id")),
     }
 
 
@@ -342,11 +345,19 @@ def _live_data_blockers(
     blockers: list[str] = []
     if replay_health["materially_negative"]:
         blockers.append("REPLAY_NET_NEGATIVE")
+    if profit_quality["expected_run_id"] and not profit_quality["run_id_matches"]:
+        blockers.append("PROFIT_DRIVER_RUN_MISMATCH")
     if live_canary_eligible_count > 0 and profit_quality["simulated_only"]:
         blockers.append("SIMULATED_ONLY_PROFIT_DRIVER")
     if live_canary_eligible_count > 0 and profit_quality["confirmed_candidate_count"] <= 0:
         blockers.append("NO_CONFIRMED_PROFIT_DRIVER")
     return blockers
+
+
+def _run_id_matches(profit_run_id: Any, summary_run_id: Any) -> bool:
+    if not summary_run_id:
+        return True
+    return bool(profit_run_id) and str(profit_run_id) == str(summary_run_id)
 
 
 def _research_policy(

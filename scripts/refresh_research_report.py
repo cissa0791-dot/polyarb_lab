@@ -41,6 +41,7 @@ def refresh_reports(
         return {"refreshed": False, "reason": "NO_EVIDENCE_FILE", "run_dir": str(selected_run_dir)}
 
     profit_report = analyze_profit_drivers(load_jsonl(evidence_path), top=max(1, int(top)))
+    profit_report["run_id"] = selected_run_dir.name
     profit_json = selected_run_dir / "research_profit_drivers_latest.json"
     profit_md = selected_run_dir / "research_profit_drivers.md"
     run_report = selected_run_dir / "research_run_report.md"

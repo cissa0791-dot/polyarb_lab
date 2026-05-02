@@ -65,6 +65,26 @@ class AutonomousProjectManagerTests(unittest.TestCase):
         self.assertIn("REPLAY_NET_NEGATIVE", decision["reason"])
         self.assertFalse(decision["can_execute_live"])
 
+    def test_profit_driver_run_mismatch_blocks_live_canary(self) -> None:
+        decision = build_autonomous_decision(
+            research_summary={
+                "run_id": "research-new",
+                "scale_recommendation": "ALLOW_CANARY_ONLY",
+                "live_canary_eligible_count": 1,
+                "dry_run_focus_count": 0,
+                "live_ready_blockers": [],
+            },
+            profit_drivers={
+                "run_id": "research-old",
+                "live_canary_candidates": [{"profit_quality": "CONFIRMED"}],
+            },
+            replay_report={"replayed_market_count": 20, "total_net_pnl_usdc": 0.0},
+            live_pnl={},
+        )
+
+        self.assertEqual(decision["decision"], "RUN_RESEARCH")
+        self.assertIn("PROFIT_DRIVER_RUN_MISMATCH", decision["reason"])
+
     def test_simulated_profit_driver_blocks_live_canary(self) -> None:
         decision = build_autonomous_decision(
             research_summary={

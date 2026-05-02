@@ -61,7 +61,8 @@ MANAGER_EXIT=0
 python scripts/analyze_research_profit_drivers.py \
   --evidence '$RUN_DIR/research_edge_observations_latest.jsonl' \
   --out '$RUN_DIR/research_profit_drivers_latest.json' \
-  --markdown-out '$RUN_DIR/research_profit_drivers.md' || true
+  --markdown-out '$RUN_DIR/research_profit_drivers.md' \
+  --run-id '$RUN_ID' || true
 python scripts/run_autonomous_project_manager.py \
   --summary '$RUN_DIR/research_pipeline_summary_latest.json' \
   --profit-drivers '$RUN_DIR/research_profit_drivers_latest.json' \

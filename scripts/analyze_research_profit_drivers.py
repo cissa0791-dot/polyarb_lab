@@ -18,6 +18,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--out", default=None, help="Optional JSON output path.")
     parser.add_argument("--markdown-out", default=None, help="Optional Markdown report path.")
+    parser.add_argument("--run-id", default=None, help="Research run id represented by this report.")
     parser.add_argument("--top", type=int, default=10)
     return parser.parse_args(argv)
 
@@ -392,6 +393,8 @@ def _truthy(value: Any) -> bool:
 def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
     report = analyze_profit_drivers(load_jsonl(Path(args.evidence)), top=max(1, int(args.top)))
+    if args.run_id:
+        report["run_id"] = args.run_id
     if args.out:
         out_path = Path(args.out)
         out_path.parent.mkdir(parents=True, exist_ok=True)
