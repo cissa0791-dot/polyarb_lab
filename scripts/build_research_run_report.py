@@ -42,7 +42,8 @@ def build_report(*, out_dir: Path, run_dir: Path | None = None, proc_root: Path 
         lines.extend(
             [
                 f"- Completed: {current.get('completed')}",
-                f"- Cycle: {current.get('cycle_index')}",
+                f"- Cycle: {current.get('cycle_index')} / {current.get('cycles_requested')}",
+                f"- Progress / ETA floor seconds: {current.get('progress_pct')}% / {current.get('eta_seconds_floor')}",
                 f"- Selected / active / eligible: {current.get('selected_markets')} / "
                 f"{current.get('active_quote_market_count')} / {current.get('eligible_candidates')}",
                 f"- Verified net after cost: {current.get('verified_net_after_cost_usdc')}",
@@ -115,12 +116,16 @@ def build_report(*, out_dir: Path, run_dir: Path | None = None, proc_root: Path 
     lines.extend(["", "## Operator Notes", ""])
     if status.get("active_research_process_count"):
         lines.append("- Research is still running; do not interpret root latest files as final until the run completes.")
+        lines.append("- Next prompt: 目前无需手动操作；如果要检查，只问“项目状态”。")
     elif pipeline_summary and pipeline_summary.get("live_canary_eligible_count", 0):
         lines.append("- Research is complete and has live candidates; autonomous manager can decide canary under hard caps.")
+        lines.append("- Next prompt: 检查 autonomous decision，并说明是否允许 20 USDC live canary。")
     elif pipeline_summary:
         lines.append("- Research is complete but live gate is blocked; continue dry-run focus or adjust strategy filters.")
+        lines.append("- Next prompt: 根据最新 report 继续优化 dry-run focus，不要切 live。")
     else:
         lines.append("- No completed pipeline summary is available for this run yet.")
+        lines.append("- Next prompt: 先刷新 research status，再决定是否重启 watcher。")
 
     return "\n".join(lines) + "\n"
 

@@ -65,6 +65,10 @@ class ResearchStatusTests(unittest.TestCase):
             current = status["current_run"]
             self.assertEqual(current["run_id"], run_id)
             self.assertEqual(current["cycle_index"], 7)
+            self.assertEqual(current["cycles_requested"], 240)
+            self.assertEqual(current["cycles_remaining"], 233)
+            self.assertEqual(current["eta_seconds_floor"], 6990)
+            self.assertAlmostEqual(current["progress_pct"], 2.92)
             self.assertEqual(current["selected_markets"], 1)
             self.assertEqual(current["active_quote_market_count"], 1)
             self.assertEqual(current["evidence_rows"], 2)

@@ -375,6 +375,8 @@ def _research_policy(
         "next_research_mode": "BROADEN_DRY_RUN_ONLY" if should_broaden else "STANDARD_RESEARCH",
         "recommended_max_selected_markets": 3,
         "recommended_dry_run_per_market_cap_usdc": 80.0 if should_broaden else 40.0,
+        "recommended_cycles": 120 if should_broaden else 240,
+        "recommended_interval_sec": 20 if should_broaden else 30,
         "live_cap_unchanged_usdc": CANARY_PER_MARKET_CAP_USDC,
         "reason": "single-market or replay-blocked evidence; broaden dry-run only"
         if should_broaden

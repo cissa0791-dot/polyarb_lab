@@ -105,9 +105,36 @@ def build_status(out_dir: Path, proc_root: Path = Path("/proc")) -> dict[str, An
     }
     if run_dir:
         status["current_run"] = _run_dir_status(run_dir)
+        active_process = _active_process_for_run(run_dir.name, active)
+        if active_process:
+            _add_active_eta(status["current_run"], active_process)
     else:
         status["current_run"] = {}
     return status
+
+
+def _active_process_for_run(run_id: str, active: list[dict[str, Any]]) -> dict[str, Any] | None:
+    for process in active:
+        if str(process.get("run_id") or "") == run_id:
+            return process
+    return active[-1] if active else None
+
+
+def _add_active_eta(current: dict[str, Any], process: dict[str, Any]) -> None:
+    cycles_requested = _int(process.get("cycles"))
+    interval_sec = _int(process.get("interval_sec"))
+    cycle_index = _int(current.get("cycle_index"))
+    if cycles_requested is None or cycles_requested <= 0:
+        return
+    current["cycles_requested"] = cycles_requested
+    if cycle_index is not None:
+        cycles_remaining = max(0, cycles_requested - cycle_index)
+        current["cycles_remaining"] = cycles_remaining
+        current["progress_pct"] = round(min(100.0, max(0.0, cycle_index / cycles_requested * 100.0)), 2)
+        if interval_sec is not None and interval_sec >= 0:
+            current["eta_seconds_floor"] = cycles_remaining * interval_sec
+    if interval_sec is not None:
+        current["interval_sec"] = interval_sec
 
 
 def _run_dir_status(run_dir: Path) -> dict[str, Any]:
@@ -181,6 +208,10 @@ def print_status(status: dict[str, Any]) -> None:
             "partial",
             "scale_recommendation",
             "cycle_index",
+            "cycles_requested",
+            "cycles_remaining",
+            "progress_pct",
+            "eta_seconds_floor",
             "selected_markets",
             "active_quote_market_count",
             "eligible_candidates",
