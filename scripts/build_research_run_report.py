@@ -28,6 +28,7 @@ def build_report(*, out_dir: Path, run_dir: Path | None = None, proc_root: Path 
     current = status.get("current_run") if isinstance(status.get("current_run"), dict) else {}
     pipeline_summary = load_json(selected_run_dir / "research_pipeline_summary_latest.json") if selected_run_dir else {}
     market_intel = load_json(selected_run_dir / "research_market_intel_latest.json") if selected_run_dir else {}
+    profit_drivers = load_json(selected_run_dir / "research_profit_drivers_latest.json") if selected_run_dir else {}
     decision = load_json(out_dir / "autonomous_decision_latest.json")
 
     lines = [
@@ -81,6 +82,14 @@ def build_report(*, out_dir: Path, run_dir: Path | None = None, proc_root: Path 
                 f"- Can execute live: {decision.get('can_execute_live')}",
             ]
         )
+
+    if profit_drivers:
+        lines.extend(["", "## Profit Drivers", ""])
+        lines.append(f"- Profit totals: {_compact_json(profit_drivers.get('profit_totals'))}")
+        lines.append(f"- Latest selection reasons: {_compact_json(profit_drivers.get('latest_selection_reasons'))}")
+        lines.append(f"- Latest filter reasons: {_compact_json(profit_drivers.get('latest_filter_reasons'))}")
+        for action in profit_drivers.get("strategy_actions") or []:
+            lines.append(f"- {action}")
 
     markets = market_intel.get("markets") if isinstance(market_intel.get("markets"), list) else []
     if markets:

@@ -59,6 +59,10 @@ MANAGER_EXIT=0
 python scripts/run_autonomous_project_manager.py \
   --mode '$MANAGER_MODE' \
   --max-live-risk-usdc '$MAX_LIVE_RISK_USDC' || MANAGER_EXIT=\$?
+python scripts/analyze_research_profit_drivers.py \
+  --evidence '$RUN_DIR/research_edge_observations_latest.jsonl' \
+  --out '$RUN_DIR/research_profit_drivers_latest.json' \
+  --markdown-out '$RUN_DIR/research_profit_drivers.md' || true
 python scripts/build_research_run_report.py \
   --run-dir '$RUN_DIR' \
   --out '$RUN_DIR/research_run_report.md'
