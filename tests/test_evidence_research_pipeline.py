@@ -7,6 +7,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from typing import Callable
 
 from scripts.analyze_live_edge_evidence import build_live_edge_summary, load_jsonl as load_evidence_jsonl
 from scripts.replay_live_orderbook_snapshots import build_replay_report, load_jsonl as load_snapshot_jsonl
@@ -23,6 +24,52 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class EvidenceResearchPipelineTests(unittest.TestCase):
+    def _fake_research_runner(self) -> tuple[Callable[[list[str]], None], list[list[str]]]:
+        commands: list[list[str]] = []
+
+        def fake_runner(command: list[str]) -> None:
+            commands.append(command)
+            joined = " ".join(command)
+            if "run_auto_trade_profit.py" in joined:
+                evidence_path = Path(command[command.index("--edge-evidence-path") + 1])
+                snapshot_path = Path(command[command.index("--orderbook-snapshot-path") + 1])
+                evidence_path.write_text(
+                    json.dumps(
+                        {
+                            "row_type": "market_observation",
+                            "market_slug": "m1",
+                            "event_slug": "e1",
+                            "token_id": "tok-m1",
+                            "actual_reward_usdc": 0.0,
+                            "spread_realized_usdc": 0.0,
+                            "verified_net_window_usdc": -0.00001,
+                            "fill_rate_window": 0.0,
+                            "order_reject_count": 0,
+                        }
+                    )
+                    + "\n",
+                    encoding="utf-8",
+                )
+                snapshot_path.write_text("", encoding="utf-8")
+                return
+            if "analyze_live_edge_evidence.py" in joined:
+                evidence_path = Path(command[command.index("--evidence") + 1])
+                out_path = Path(command[command.index("--out") + 1])
+                intel_path = Path(command[command.index("--market-intel-out") + 1])
+                summary = build_live_edge_summary(load_evidence_jsonl(str(evidence_path)))
+                out_path.write_text(json.dumps(summary), encoding="utf-8")
+                intel_path.write_text(json.dumps(summary["market_intel"]), encoding="utf-8")
+                return
+            if "replay_live_orderbook_snapshots.py" in joined:
+                snapshot_path = Path(command[command.index("--snapshots") + 1])
+                out_path = Path(command[command.index("--out") + 1])
+                replay = build_replay_report(load_snapshot_jsonl(str(snapshot_path)))
+                out_path.write_text(json.dumps(replay), encoding="utf-8")
+                return
+            raise AssertionError(f"unexpected command: {command}")
+
+        return fake_runner, commands
+
     def test_research_merger_outputs_allowed_actions(self) -> None:
         evidence_summary = build_live_edge_summary(
             [
@@ -442,6 +489,56 @@ class EvidenceResearchPipelineTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0)
         self.assertIn("--state-path", result.stdout)
         self.assertIn("--pnl-path", result.stdout)
+
+    def test_quick_pipeline_writes_quick_latest_without_overwriting_full_latest(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            full_latest = Path(tmpdir) / "research_pipeline_summary_latest.json"
+            full_latest.write_text('{"keep":"full"}', encoding="utf-8")
+            args = parse_args(["--quick", "--run-id", "smoke", "--out-dir", tmpdir])
+            fake_runner, _commands = self._fake_research_runner()
+
+            summary = run_pipeline(args, command_runner=fake_runner)
+
+            self.assertTrue(summary["quick"])
+            self.assertEqual(summary["run_id"], "quick-smoke")
+            self.assertEqual(json.loads(full_latest.read_text(encoding="utf-8")), {"keep": "full"})
+            self.assertTrue((Path(tmpdir) / "research_quick_pipeline_summary_latest.json").exists())
+            self.assertFalse((Path(tmpdir) / "research_runs" / "quick-smoke" / "research_pipeline_summary_latest.json").exists())
+            self.assertTrue((Path(tmpdir) / "research_runs" / "quick-smoke" / "research_quick_pipeline_summary_latest.json").exists())
+
+    def test_pipeline_archives_existing_latest_before_full_update(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            old_latest = Path(tmpdir) / "research_pipeline_summary_latest.json"
+            old_latest.write_text('{"old":true}', encoding="utf-8")
+            args = parse_args(["--cycles", "1", "--interval-sec", "0", "--run-id", "full-r1", "--out-dir", tmpdir])
+            fake_runner, _commands = self._fake_research_runner()
+
+            summary = run_pipeline(args, command_runner=fake_runner)
+
+            archive = Path(tmpdir) / "research_runs" / "full-r1" / "archive_before_latest_update" / "research_pipeline_summary_latest.json"
+            self.assertEqual(summary["run_id"], "full-r1")
+            self.assertTrue(archive.exists())
+            self.assertEqual(json.loads(archive.read_text(encoding="utf-8")), {"old": True})
+            self.assertEqual(json.loads(old_latest.read_text(encoding="utf-8"))["run_id"], "full-r1")
+
+    def test_merge_only_rebuilds_reports_without_running_scan(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            evidence = Path(tmpdir) / "research_edge_observations_latest.jsonl"
+            snapshots = Path(tmpdir) / "research_orderbook_snapshots_latest.jsonl"
+            evidence.write_text(
+                json.dumps({"row_type": "market_observation", "market_slug": "m1", "verified_net_window_usdc": 0.0}) + "\n",
+                encoding="utf-8",
+            )
+            snapshots.write_text("", encoding="utf-8")
+            args = parse_args(["--merge-only", "--run-id", "recover-r1", "--out-dir", tmpdir])
+            fake_runner, commands = self._fake_research_runner()
+
+            summary = run_pipeline(args, command_runner=fake_runner)
+
+            self.assertTrue(summary["merge_only"])
+            self.assertFalse(any("run_auto_trade_profit.py" in " ".join(command) for command in commands))
+            self.assertTrue((Path(tmpdir) / "research_runs" / "recover-r1" / "research_edge_observations_latest.jsonl").exists())
+            self.assertTrue((Path(tmpdir) / "research_pipeline_summary_latest.json").exists())
 
 
 if __name__ == "__main__":

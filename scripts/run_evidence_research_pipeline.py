@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
 import subprocess
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
@@ -37,6 +39,28 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--snapshot-filtered-max", type=int, default=60)
     parser.add_argument("--max-selected-markets", type=int, default=3)
     parser.add_argument("--out-dir", type=str, default=str(ROOT / "data" / "reports"))
+    parser.add_argument(
+        "--run-id",
+        type=str,
+        default=None,
+        help="Stable identifier for this research run. Defaults to a UTC timestamp.",
+    )
+    parser.add_argument(
+        "--merge-only",
+        action="store_true",
+        help="Skip the scan and rebuild reports from existing evidence/snapshot files.",
+    )
+    parser.add_argument(
+        "--source-dir",
+        type=str,
+        default=None,
+        help="Directory containing existing research files for --merge-only. Defaults to latest files in --out-dir.",
+    )
+    parser.add_argument(
+        "--no-archive-existing",
+        action="store_true",
+        help="Do not copy existing latest research files into the run archive before updating latest.",
+    )
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args(argv)
     if args.live:
@@ -61,45 +85,45 @@ def run_pipeline(args: argparse.Namespace, *, command_runner: CommandRunner | No
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    paths = {
-        "evidence": out_dir / "research_edge_observations_latest.jsonl",
-        "snapshots": out_dir / "research_orderbook_snapshots_latest.jsonl",
-        "evidence_summary": out_dir / "research_live_edge_summary_latest.json",
-        "evidence_market_intel": out_dir / "research_evidence_market_intel_latest.json",
-        "replay": out_dir / "research_replay_report_latest.json",
-        "pipeline_summary": out_dir / "research_pipeline_summary_latest.json",
-        "market_intel": out_dir / "research_market_intel_latest.json",
-        "whitelist": out_dir / "research_whitelist_latest.json",
-        "blacklist": out_dir / "research_blacklist_latest.json",
-        "state": out_dir / "research_auto_trade_state_latest.json",
-        "pnl": out_dir / "research_auto_trade_pnl_latest.json",
-    }
-    for path in paths.values():
-        if path.exists():
-            path.unlink()
+    is_quick = bool(getattr(args, "quick", False))
+    prefix = "research_quick" if is_quick else "research"
+    run_id = _normalise_run_id(getattr(args, "run_id", None), quick=is_quick)
+    run_dir = out_dir / "research_runs" / run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+    latest_paths = _research_paths(out_dir, prefix=prefix)
+    run_paths = _research_paths(run_dir, prefix=prefix)
+    source_dir_arg = getattr(args, "source_dir", None)
+    if bool(getattr(args, "merge_only", False)):
+        source_paths = _research_paths(Path(source_dir_arg), prefix=prefix) if source_dir_arg else latest_paths
+        _copy_existing_inputs_for_merge(source_paths, run_paths)
+    else:
+        _clean_run_outputs(run_paths)
+        if not bool(getattr(args, "no_archive_existing", False)):
+            _archive_latest_outputs(latest_paths, run_dir / "archive_before_latest_update")
 
     runner = command_runner or _default_command_runner
     partial = False
     partial_reason = None
-    try:
-        runner(_scan_command(args, paths))
-    except (KeyboardInterrupt, PipelineInterrupted):
-        partial = True
-        partial_reason = "SCAN_INTERRUPTED"
-        print(
-            "Scan interrupted; building partial evidence/replay reports from data collected so far.",
-            file=sys.stderr,
-        )
+    if not bool(getattr(args, "merge_only", False)):
+        try:
+            runner(_scan_command(args, run_paths))
+        except (KeyboardInterrupt, PipelineInterrupted):
+            partial = True
+            partial_reason = "SCAN_INTERRUPTED"
+            print(
+                "Scan interrupted; building partial evidence/replay reports from data collected so far.",
+                file=sys.stderr,
+            )
     runner(
         [
             sys.executable,
             str(ROOT / "scripts" / "analyze_live_edge_evidence.py"),
             "--evidence",
-            str(paths["evidence"]),
+            str(run_paths["evidence"]),
             "--out",
-            str(paths["evidence_summary"]),
+            str(run_paths["evidence_summary"]),
             "--market-intel-out",
-            str(paths["evidence_market_intel"]),
+            str(run_paths["evidence_market_intel"]),
         ]
     )
     runner(
@@ -107,41 +131,107 @@ def run_pipeline(args: argparse.Namespace, *, command_runner: CommandRunner | No
             sys.executable,
             str(ROOT / "scripts" / "replay_live_orderbook_snapshots.py"),
             "--snapshots",
-            str(paths["snapshots"]),
+            str(run_paths["snapshots"]),
             "--out",
-            str(paths["replay"]),
+            str(run_paths["replay"]),
         ]
     )
 
-    evidence_summary = load_json(paths["evidence_summary"])
-    replay_report = load_json(paths["replay"])
-    evidence_rows = load_evidence_jsonl(str(paths["evidence"]))
+    evidence_summary = load_json(run_paths["evidence_summary"])
+    replay_report = load_json(run_paths["replay"])
+    evidence_rows = load_evidence_jsonl(str(run_paths["evidence"]))
     arb_rows = [row for row in evidence_rows if row.get("row_type") == "arb_opportunity"]
     contamination = _detect_contaminated_state(evidence_rows)
     outputs = build_research_outputs(
         evidence_summary=evidence_summary,
         replay_report=replay_report,
         arb_rows=arb_rows,
-        paths={key: str(path) for key, path in paths.items()},
+        paths={key: str(path) for key, path in run_paths.items()},
     )
     outputs["summary"]["partial"] = partial
     outputs["summary"]["partial_reason"] = partial_reason
     outputs["summary"]["scan_cycles_requested"] = max(1, int(args.cycles))
     outputs["summary"]["scan_interval_sec"] = max(0, int(args.interval_sec))
+    outputs["summary"]["quick"] = is_quick
+    outputs["summary"]["merge_only"] = bool(getattr(args, "merge_only", False))
+    outputs["summary"]["source_dir"] = str(Path(source_dir_arg)) if source_dir_arg else None
+    outputs["summary"]["run_id"] = run_id
+    outputs["summary"]["run_dir"] = str(run_dir)
+    outputs["summary"]["latest_prefix"] = prefix
     outputs["summary"]["fresh_state"] = True
-    outputs["summary"]["state_path"] = str(paths["state"])
-    outputs["summary"]["pnl_path"] = str(paths["pnl"])
+    outputs["summary"]["state_path"] = str(run_paths["state"])
+    outputs["summary"]["pnl_path"] = str(run_paths["pnl"])
     outputs["summary"]["contaminated_state_detected"] = bool(contamination["contaminated_state_detected"])
     outputs["summary"]["contamination_reason"] = contamination["contamination_reason"]
     outputs["summary"]["initial_filled_shares"] = contamination["initial_filled_shares"]
     if contamination["contaminated_state_detected"]:
         outputs["summary"]["scale_recommendation"] = "DO_NOT_SCALE"
 
-    _write_json(paths["pipeline_summary"], outputs["summary"])
-    _write_json(paths["market_intel"], outputs["market_intel"])
-    _write_json(paths["whitelist"], outputs["whitelist"])
-    _write_json(paths["blacklist"], outputs["blacklist"])
+    _write_json(run_paths["pipeline_summary"], outputs["summary"])
+    _write_json(run_paths["market_intel"], outputs["market_intel"])
+    _write_json(run_paths["whitelist"], outputs["whitelist"])
+    _write_json(run_paths["blacklist"], outputs["blacklist"])
+    _copy_outputs_to_latest(run_paths, latest_paths)
     return outputs["summary"]
+
+
+def _research_paths(base_dir: Path, *, prefix: str) -> dict[str, Path]:
+    return {
+        "evidence": base_dir / f"{prefix}_edge_observations_latest.jsonl",
+        "snapshots": base_dir / f"{prefix}_orderbook_snapshots_latest.jsonl",
+        "evidence_summary": base_dir / f"{prefix}_live_edge_summary_latest.json",
+        "evidence_market_intel": base_dir / f"{prefix}_evidence_market_intel_latest.json",
+        "replay": base_dir / f"{prefix}_replay_report_latest.json",
+        "pipeline_summary": base_dir / f"{prefix}_pipeline_summary_latest.json",
+        "market_intel": base_dir / f"{prefix}_market_intel_latest.json",
+        "whitelist": base_dir / f"{prefix}_whitelist_latest.json",
+        "blacklist": base_dir / f"{prefix}_blacklist_latest.json",
+        "state": base_dir / f"{prefix}_auto_trade_state_latest.json",
+        "pnl": base_dir / f"{prefix}_auto_trade_pnl_latest.json",
+    }
+
+
+def _normalise_run_id(value: str | None, *, quick: bool) -> str:
+    raw = value or datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    safe = "".join(char if char.isalnum() or char in {"-", "_"} else "-" for char in raw.strip())
+    safe = safe.strip("-_") or datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    return f"quick-{safe}" if quick and not safe.startswith("quick-") else safe
+
+
+def _clean_run_outputs(paths: dict[str, Path]) -> None:
+    for path in paths.values():
+        if path.exists():
+            path.unlink()
+
+
+def _archive_latest_outputs(paths: dict[str, Path], archive_dir: Path) -> None:
+    existing = [path for path in paths.values() if path.exists()]
+    if not existing:
+        return
+    archive_dir.mkdir(parents=True, exist_ok=True)
+    for path in existing:
+        shutil.copy2(path, archive_dir / path.name)
+
+
+def _copy_existing_inputs_for_merge(source_paths: dict[str, Path], run_paths: dict[str, Path]) -> None:
+    for key in ("evidence", "snapshots", "state", "pnl"):
+        source = source_paths[key]
+        destination = run_paths[key]
+        if not source.exists():
+            continue
+        if source.resolve() == destination.resolve():
+            continue
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, destination)
+
+
+def _copy_outputs_to_latest(run_paths: dict[str, Path], latest_paths: dict[str, Path]) -> None:
+    for key, source in run_paths.items():
+        if not source.exists():
+            continue
+        destination = latest_paths[key]
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, destination)
 
 
 def _scan_command(args: argparse.Namespace, paths: dict[str, Path]) -> list[str]:
@@ -536,6 +626,9 @@ def main() -> None:
                 "scale_recommendation": summary["scale_recommendation"],
                 "partial": summary.get("partial", False),
                 "partial_reason": summary.get("partial_reason"),
+                "run_id": summary.get("run_id"),
+                "run_dir": summary.get("run_dir"),
+                "live_ready_blockers": summary.get("live_ready_blockers", []),
             },
             indent=2,
         )
