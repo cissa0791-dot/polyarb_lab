@@ -4,7 +4,7 @@ import argparse
 import json
 import subprocess
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +20,8 @@ CANARY_STOP_LOSS_USDC = 1.0
 MICRO_PROBE_REPLAY_TOTAL_FLOOR_USDC = -0.10
 MICRO_PROBE_REPLAY_AVG_FLOOR_USDC = -0.0025
 LIVE_PROBE_ROOT = ROOT / "data" / "reports" / "live_probe_runs"
+DEFAULT_LIVE_PNL = ROOT / "data" / "reports" / "auto_trade_profit_pnl_latest.json"
+LIVE_RATE_LIMIT_COOLDOWN_MINUTES = 60
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -31,7 +33,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--live-pnl",
-        default=str(ROOT / "data" / "reports" / "auto_trade_profit_pnl_latest.json"),
+        default=str(DEFAULT_LIVE_PNL),
         help="Latest live/canary PnL report, if one exists.",
     )
     parser.add_argument(
@@ -277,9 +279,20 @@ def _live_health(live_pnl: dict[str, Any], *, max_live_risk_usdc: float) -> dict
     rate_limit_detected = _is_live_rate_limit_error(account_sync_error) or any(
         _is_live_rate_limit_error(error) for error in market_errors
     )
+    generated_ts = _parse_utc_ts(summary.get("generated_ts"))
+    rate_limit_cooldown_until = (
+        generated_ts + timedelta(minutes=LIVE_RATE_LIMIT_COOLDOWN_MINUTES)
+        if generated_ts is not None and rate_limit_detected
+        else None
+    )
+    rate_limit_cooldown_active = (
+        rate_limit_detected
+        if rate_limit_cooldown_until is None
+        else datetime.now(timezone.utc) < rate_limit_cooldown_until
+    )
 
     pause_reason = None
-    if mode == "LIVE" and rate_limit_detected:
+    if mode == "LIVE" and rate_limit_detected and rate_limit_cooldown_active:
         pause_reason = "CLOB_RATE_LIMIT"
     elif mode == "LIVE" and verified_net <= -CANARY_STOP_LOSS_USDC:
         pause_reason = "VERIFIED_LIVE_NET_STOP"
@@ -302,6 +315,11 @@ def _live_health(live_pnl: dict[str, Any], *, max_live_risk_usdc: float) -> dict
         "order_reject_count": order_reject_count,
         "account_order_sync_error": account_sync_error or None,
         "rate_limit_detected": rate_limit_detected,
+        "rate_limit_cooldown_active": rate_limit_cooldown_active,
+        "rate_limit_cooldown_minutes": LIVE_RATE_LIMIT_COOLDOWN_MINUTES if rate_limit_detected else 0,
+        "rate_limit_cooldown_until_ts": rate_limit_cooldown_until.isoformat()
+        if rate_limit_cooldown_until is not None
+        else None,
     }
 
 
@@ -515,6 +533,42 @@ def _is_live_rate_limit_error(value: Any) -> bool:
     return any(marker in text for marker in markers)
 
 
+def _parse_utc_ts(value: Any) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    if text.endswith("Z"):
+        text = f"{text[:-1]}+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def latest_live_probe_pnl(root: Path = LIVE_PROBE_ROOT) -> Path | None:
+    if not root.exists():
+        return None
+    candidates = [path for path in root.glob("*/auto_trade_pnl.json") if path.is_file()]
+    if not candidates:
+        return None
+    return max(candidates, key=lambda path: path.stat().st_mtime)
+
+
+def resolve_live_pnl_path(path: str | Path) -> Path:
+    requested = Path(path)
+    if requested != DEFAULT_LIVE_PNL:
+        return requested
+    probe = latest_live_probe_pnl()
+    if probe is None:
+        return requested
+    if not requested.exists() or probe.stat().st_mtime >= requested.stat().st_mtime:
+        return probe
+    return requested
+
+
 def _live_canary_command(
     *,
     target_live_markets: int,
@@ -605,15 +659,17 @@ def _float(value: Any, default: float = 0.0) -> float:
 
 def main() -> None:
     args = parse_args()
+    live_pnl_path = resolve_live_pnl_path(args.live_pnl)
     decision = build_autonomous_decision(
         research_summary=load_json(args.summary),
-        live_pnl=load_json(args.live_pnl),
+        live_pnl=load_json(live_pnl_path),
         profit_drivers=load_json(args.profit_drivers),
         replay_report=load_json(args.replay),
         max_live_risk_usdc=args.max_live_risk_usdc,
         live_cycles=args.live_cycles,
         live_interval_sec=args.live_interval_sec,
     )
+    decision.setdefault("inputs", {})["live_pnl_path"] = str(live_pnl_path)
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(json.dumps(decision, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")

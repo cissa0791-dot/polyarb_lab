@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import os
 import sys
+import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
-from scripts.run_autonomous_project_manager import build_autonomous_decision
+from scripts.run_autonomous_project_manager import build_autonomous_decision, latest_live_probe_pnl
 
 
 class AutonomousProjectManagerTests(unittest.TestCase):
@@ -139,6 +143,45 @@ class AutonomousProjectManagerTests(unittest.TestCase):
         self.assertEqual(decision["decision"], "PAUSE_LIVE")
         self.assertEqual(decision["reason"], "CLOB_RATE_LIMIT")
         self.assertFalse(decision["can_execute_live"])
+
+    def test_old_live_rate_limit_expires_after_cooldown(self) -> None:
+        old_ts = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
+        decision = build_autonomous_decision(
+            research_summary={
+                "scale_recommendation": "ALLOW_CANARY_ONLY",
+                "live_canary_eligible_count": 1,
+                "dry_run_focus_count": 0,
+                "live_ready_blockers": [],
+            },
+            live_pnl={
+                "summary": {
+                    "mode": "LIVE",
+                    "generated_ts": old_ts,
+                    "verified_net_after_reward_and_cost_usdc": 0.05,
+                    "account_inventory_usdc": 0.0,
+                    "account_open_buy_usdc": 0.0,
+                    "account_order_sync_error": "Cloudflare error code: 1015 You are being rate limited",
+                },
+                "markets": [],
+            },
+        )
+
+        self.assertNotEqual(decision["decision"], "PAUSE_LIVE")
+        self.assertFalse(decision["inputs"]["live_health"]["rate_limit_cooldown_active"])
+
+    def test_latest_live_probe_pnl_picks_newest_probe_report(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            older = root / "probe-a" / "auto_trade_pnl.json"
+            newer = root / "probe-b" / "auto_trade_pnl.json"
+            older.parent.mkdir()
+            newer.parent.mkdir()
+            older.write_text("{}", encoding="utf-8")
+            newer.write_text("{}", encoding="utf-8")
+            os.utime(older, (100.0, 100.0))
+            os.utime(newer, (200.0, 200.0))
+
+            self.assertEqual(latest_live_probe_pnl(root), newer)
 
     def test_severely_negative_replay_blocks_micro_live_probe(self) -> None:
         decision = build_autonomous_decision(
