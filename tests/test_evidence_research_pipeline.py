@@ -413,6 +413,9 @@ class EvidenceResearchPipelineTests(unittest.TestCase):
         self.assertEqual(args.cycles, 10)
         self.assertEqual(args.interval_sec, 5)
         self.assertEqual(args.max_selected_markets, 3)
+        self.assertEqual(args.research_min_reward_minus_drawdown_per_hour, 0.0)
+        self.assertEqual(args.research_min_projected_net_at_horizon_usdc, 0.0)
+        self.assertEqual(args.research_max_true_break_even_hours, 2.5)
 
     def test_scan_command_keeps_progress_visible(self) -> None:
         args = argparse.Namespace(
@@ -441,6 +444,9 @@ class EvidenceResearchPipelineTests(unittest.TestCase):
         self.assertEqual(command[command.index("--capital") + 1], "120")
         self.assertEqual(command[command.index("--max-total-open-buy-usdc") + 1], "120")
         self.assertEqual(command[command.index("--max-account-open-buy-orders") + 1], "3")
+        self.assertEqual(command[command.index("--min-reward-minus-drawdown-per-hour") + 1], "0.0")
+        self.assertEqual(command[command.index("--min-projected-net-at-horizon-usdc") + 1], "0.0")
+        self.assertEqual(command[command.index("--max-true-break-even-hours") + 1], "2.5")
 
     def test_scan_command_allows_single_selected_market_override(self) -> None:
         args = argparse.Namespace(
@@ -466,6 +472,30 @@ class EvidenceResearchPipelineTests(unittest.TestCase):
         self.assertEqual(command[command.index("--capital") + 1], "40")
         self.assertEqual(command[command.index("--max-total-open-buy-usdc") + 1], "40")
         self.assertEqual(command[command.index("--max-account-open-buy-orders") + 1], "1")
+
+    def test_scan_command_allows_research_filter_overrides(self) -> None:
+        args = parse_args(
+            [
+                "--research-min-reward-minus-drawdown-per-hour",
+                "0.01",
+                "--research-min-projected-net-at-horizon-usdc",
+                "0.02",
+                "--research-max-true-break-even-hours",
+                "4",
+            ]
+        )
+        paths = {
+            "evidence": Path("evidence.jsonl"),
+            "snapshots": Path("snapshots.jsonl"),
+            "state": Path("research_state.json"),
+            "pnl": Path("research_pnl.json"),
+        }
+
+        command = _scan_command(args, paths)
+
+        self.assertEqual(command[command.index("--min-reward-minus-drawdown-per-hour") + 1], "0.01")
+        self.assertEqual(command[command.index("--min-projected-net-at-horizon-usdc") + 1], "0.02")
+        self.assertEqual(command[command.index("--max-true-break-even-hours") + 1], "4.0")
 
     def test_pipeline_rejects_live_flag(self) -> None:
         result = subprocess.run(

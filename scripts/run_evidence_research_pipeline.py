@@ -38,6 +38,24 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--snapshot-max-markets", type=int, default=80)
     parser.add_argument("--snapshot-filtered-max", type=int, default=60)
     parser.add_argument("--max-selected-markets", type=int, default=3)
+    parser.add_argument(
+        "--research-min-reward-minus-drawdown-per-hour",
+        type=float,
+        default=0.0,
+        help="Dry-run research filter only. Live/canary commands keep their own stricter defaults.",
+    )
+    parser.add_argument(
+        "--research-min-projected-net-at-horizon-usdc",
+        type=float,
+        default=0.0,
+        help="Dry-run research filter only. Lower values broaden observation without placing live orders.",
+    )
+    parser.add_argument(
+        "--research-max-true-break-even-hours",
+        type=float,
+        default=2.5,
+        help="Dry-run research filter only. Live/canary commands keep their own stricter defaults.",
+    )
     parser.add_argument("--out-dir", type=str, default=str(ROOT / "data" / "reports"))
     parser.add_argument(
         "--run-id",
@@ -271,6 +289,12 @@ def _scan_command(args: argparse.Namespace, paths: dict[str, Path]) -> list[str]
         str(capital_usdc),
         "--max-account-open-buy-orders",
         str(max_selected_markets),
+        "--min-reward-minus-drawdown-per-hour",
+        str(float(getattr(args, "research_min_reward_minus_drawdown_per_hour", 0.0))),
+        "--min-projected-net-at-horizon-usdc",
+        str(float(getattr(args, "research_min_projected_net_at_horizon_usdc", 0.0))),
+        "--max-true-break-even-hours",
+        str(float(getattr(args, "research_max_true_break_even_hours", 2.5))),
         "--min-live-order-size-shares",
         "5",
         "--inventory-policy",
