@@ -132,9 +132,15 @@ def _run_dir_status(run_dir: Path) -> dict[str, Any]:
         "active_quote_market_count": _coalesce(
             summary.get("active_quote_market_count"), latest_observation.get("active_quote_market_count")
         ),
-        "eligible_candidates": summary.get("last_eligible_candidate_count"),
-        "last_selection_reasons": summary.get("last_selection_reasons"),
-        "last_filter_reasons": summary.get("last_filter_reasons"),
+        "eligible_candidates": _coalesce(
+            summary.get("last_eligible_candidate_count"), latest_observation.get("eligible_candidates")
+        ),
+        "last_selection_reasons": _coalesce(
+            summary.get("last_selection_reasons"), latest_observation.get("last_selection_reasons")
+        ),
+        "last_filter_reasons": _coalesce(
+            summary.get("last_filter_reasons"), latest_observation.get("last_filter_reasons")
+        ),
         "verified_net_after_cost_usdc": _coalesce(
             summary.get("verified_net_after_reward_and_cost_usdc"),
             latest_observation.get("verified_net_after_cost_usdc"),
@@ -213,6 +219,8 @@ def _latest_observation_status(evidence_path: Path) -> dict[str, Any]:
     if not evidence_path.exists():
         return {}
     latest_cycle: int | None = None
+    latest_summary_cycle: int | None = None
+    latest_summary: dict[str, Any] | None = None
     rows: list[dict[str, Any]] = []
     try:
         handle = evidence_path.open(encoding="utf-8")
@@ -226,7 +234,14 @@ def _latest_observation_status(evidence_path: Path) -> dict[str, Any]:
                 row = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            if row.get("row_type") != "market_observation":
+            row_type = row.get("row_type")
+            if row_type == "cycle_summary":
+                cycle = _int(row.get("cycle_index"))
+                if cycle is not None and (latest_summary_cycle is None or cycle >= latest_summary_cycle):
+                    latest_summary_cycle = cycle
+                    latest_summary = row
+                continue
+            if row_type != "market_observation":
                 continue
             cycle = _int(row.get("cycle_index"))
             if cycle is None:
@@ -236,6 +251,27 @@ def _latest_observation_status(evidence_path: Path) -> dict[str, Any]:
                 rows = [row]
             elif cycle == latest_cycle:
                 rows.append(row)
+    if latest_summary_cycle is not None and (latest_cycle is None or latest_summary_cycle >= latest_cycle):
+        summary = latest_summary or {}
+        scan_diagnostics = summary.get("scan_diagnostics") if isinstance(summary.get("scan_diagnostics"), dict) else {}
+        selected_slugs = summary.get("selected_market_slugs")
+        if not isinstance(selected_slugs, list):
+            selected_slugs = []
+        return {
+            "cycle_index": latest_summary_cycle,
+            "selected_markets": _coalesce(
+                summary.get("selected_market_count"), scan_diagnostics.get("selected_markets"), len(selected_slugs)
+            ),
+            "active_quote_market_count": summary.get("active_quote_market_count"),
+            "eligible_candidates": summary.get("eligible_candidate_count"),
+            "last_selection_reasons": summary.get("last_selection_reasons"),
+            "last_filter_reasons": summary.get("last_filter_reasons"),
+            "verified_net_after_cost_usdc": summary.get("verified_net_after_reward_and_cost_usdc"),
+            "modeled_net_after_cost_usdc": summary.get("net_after_reward_and_cost_usdc"),
+            "bid_filled_shares": summary.get("bid_order_filled_shares"),
+            "ask_filled_shares": summary.get("ask_order_filled_shares"),
+            "latest_market_slugs": [str(slug) for slug in selected_slugs if slug],
+        }
     if latest_cycle is None:
         return {}
     return {

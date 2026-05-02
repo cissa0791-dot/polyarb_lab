@@ -1592,6 +1592,42 @@ class RewardProfitSessionEngine:
             return
         rows: list[dict[str, Any]] = []
         summary = dict(pnl_report.get("summary") or {})
+        rows.append(
+            {
+                "row_type": "cycle_summary",
+                "ts": now.isoformat(),
+                "session_id": state.session_id,
+                "cycle_index": state.cycle_index,
+                "mode": state.mode,
+                "selected_market_slugs": list(state.selected_market_slugs),
+                "selected_market_count": len(state.selected_market_slugs),
+                "active_quote_market_count": summary.get("active_quote_market_count"),
+                "eligible_candidate_count": summary.get("last_eligible_candidate_count"),
+                "scanned_candidate_count": summary.get("last_scanned_candidate_count"),
+                "last_selection_reasons": dict(summary.get("last_selection_reasons") or {}),
+                "last_filter_reasons": dict(summary.get("last_filter_reasons") or {}),
+                "scan_diagnostics": dict(summary.get("scan_diagnostics") or {}),
+                "top_action": summary.get("top_action"),
+                "top_strategy_id": summary.get("top_strategy_id"),
+                "profit_gate_status": summary.get("profit_gate_status"),
+                "profit_gate_reason": summary.get("profit_gate_reason"),
+                "scale_gate_status": summary.get("scale_gate_status"),
+                "scale_gate_reason": summary.get("scale_gate_reason"),
+                "reward_accrued_estimate_usdc": summary.get("reward_accrued_estimate_usdc"),
+                "reward_accrued_actual_usdc": summary.get("reward_accrued_actual_usdc"),
+                "spread_realized_usdc": summary.get("spread_realized_usdc"),
+                "cost_proxy_usdc": summary.get("cost_proxy_usdc"),
+                "net_after_reward_and_cost_usdc": summary.get("net_after_reward_and_cost_usdc"),
+                "verified_net_after_reward_and_cost_usdc": summary.get(
+                    "verified_net_after_reward_and_cost_usdc"
+                ),
+                "bid_order_filled_shares": summary.get("bid_order_filled_shares"),
+                "ask_order_filled_shares": summary.get("ask_order_filled_shares"),
+                "account_inventory_usdc": summary.get("account_inventory_usdc"),
+                "account_open_buy_usdc": summary.get("account_open_buy_usdc"),
+                "account_open_sell_usdc": summary.get("account_open_sell_usdc"),
+            }
+        )
         for market in pnl_report.get("markets") or []:
             if not isinstance(market, dict):
                 continue
@@ -1658,8 +1694,6 @@ class RewardProfitSessionEngine:
                 }
             )
 
-        if not rows:
-            return
         try:
             path = Path(path_text)
             path.parent.mkdir(parents=True, exist_ok=True)

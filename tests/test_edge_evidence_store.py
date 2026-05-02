@@ -88,10 +88,15 @@ class EdgeEvidenceStoreTests(unittest.TestCase):
             )
 
             rows = [json.loads(line) for line in evidence_path.read_text(encoding="utf-8").splitlines()]
-            self.assertEqual(rows[0]["row_type"], "market_observation")
-            self.assertEqual(rows[0]["market_slug"], "m1")
-            self.assertIn("decision_trace", rows[0])
-            self.assertIn("fill_rate_window", rows[0])
+            self.assertEqual(rows[0]["row_type"], "cycle_summary")
+            self.assertEqual(rows[0]["selected_market_count"], 1)
+            self.assertEqual(rows[0]["active_quote_market_count"], 0)
+            self.assertEqual(rows[0]["eligible_candidate_count"], 1)
+            self.assertEqual(rows[0]["selected_market_slugs"], ["m1"])
+            self.assertEqual(rows[1]["row_type"], "market_observation")
+            self.assertEqual(rows[1]["market_slug"], "m1")
+            self.assertIn("decision_trace", rows[1])
+            self.assertIn("fill_rate_window", rows[1])
 
     def test_run_cycle_records_selected_orderbook_snapshot(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

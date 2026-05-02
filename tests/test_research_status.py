@@ -136,6 +136,67 @@ class ResearchStatusTests(unittest.TestCase):
             self.assertEqual(current["ask_filled_shares"], 1.5)
             self.assertEqual(current["latest_market_slugs"], ["m1", "m2"])
 
+    def test_status_prefers_cycle_summary_evidence_when_pnl_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            out_dir = root / "reports"
+            run_id = "research-cycle-summary"
+            run_dir = out_dir / "research_runs" / run_id
+            proc_root = root / "proc"
+            proc_dir = proc_root / "9876"
+            run_dir.mkdir(parents=True)
+            proc_dir.mkdir(parents=True)
+            rows = [
+                {
+                    "row_type": "market_observation",
+                    "cycle_index": 7,
+                    "market_slug": "old",
+                    "status": "QUOTING",
+                    "verified_net_window_usdc": 0.01,
+                },
+                {
+                    "row_type": "cycle_summary",
+                    "cycle_index": 8,
+                    "selected_market_slugs": ["m1"],
+                    "selected_market_count": 1,
+                    "active_quote_market_count": 1,
+                    "eligible_candidate_count": 4,
+                    "last_selection_reasons": {"SELECT_PER_MARKET_CAP": 2, "SELECTED": 1},
+                    "last_filter_reasons": {"REWARD_MINUS_DRAWDOWN": 12},
+                    "verified_net_after_reward_and_cost_usdc": 0.123,
+                    "net_after_reward_and_cost_usdc": 0.456,
+                    "bid_order_filled_shares": 9.0,
+                    "ask_order_filled_shares": 8.0,
+                },
+            ]
+            (run_dir / "research_edge_observations_latest.jsonl").write_text(
+                "".join(json.dumps(row) + "\n" for row in rows),
+                encoding="utf-8",
+            )
+            argv = [
+                "python",
+                "scripts/run_evidence_research_pipeline.py",
+                "--run-id",
+                run_id,
+                "--out-dir",
+                str(out_dir),
+            ]
+            (proc_dir / "cmdline").write_bytes(b"\0".join(part.encode("utf-8") for part in argv) + b"\0")
+
+            current = build_status(out_dir, proc_root)["current_run"]
+
+            self.assertEqual(current["cycle_index"], 8)
+            self.assertEqual(current["selected_markets"], 1)
+            self.assertEqual(current["active_quote_market_count"], 1)
+            self.assertEqual(current["eligible_candidates"], 4)
+            self.assertEqual(current["last_selection_reasons"]["SELECT_PER_MARKET_CAP"], 2)
+            self.assertEqual(current["last_filter_reasons"]["REWARD_MINUS_DRAWDOWN"], 12)
+            self.assertAlmostEqual(current["verified_net_after_cost_usdc"], 0.123)
+            self.assertAlmostEqual(current["modeled_net_after_cost_usdc"], 0.456)
+            self.assertEqual(current["bid_filled_shares"], 9.0)
+            self.assertEqual(current["ask_filled_shares"], 8.0)
+            self.assertEqual(current["latest_market_slugs"], ["m1"])
+
 
 if __name__ == "__main__":
     unittest.main()
