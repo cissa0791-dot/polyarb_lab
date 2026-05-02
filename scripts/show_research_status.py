@@ -61,6 +61,8 @@ def active_research_processes(proc_root: Path = Path("/proc")) -> list[dict[str,
                 "out_dir": _arg_value(argv, "--out-dir"),
                 "cycles": _arg_value(argv, "--cycles"),
                 "interval_sec": _arg_value(argv, "--interval-sec"),
+                "max_selected_markets": _arg_value(argv, "--max-selected-markets"),
+                "research_per_market_cap_usdc": _arg_value(argv, "--research-per-market-cap-usdc"),
                 "argv": argv,
             }
         )
@@ -96,6 +98,8 @@ def build_status(out_dir: Path, proc_root: Path = Path("/proc")) -> dict[str, An
                 "run_id": process.get("run_id"),
                 "cycles": process.get("cycles"),
                 "interval_sec": process.get("interval_sec"),
+                "max_selected_markets": process.get("max_selected_markets"),
+                "research_per_market_cap_usdc": process.get("research_per_market_cap_usdc"),
             }
             for process in active
         ],
@@ -108,6 +112,7 @@ def build_status(out_dir: Path, proc_root: Path = Path("/proc")) -> dict[str, An
         active_process = _active_process_for_run(run_dir.name, active)
         if active_process:
             _add_active_eta(status["current_run"], active_process)
+        _add_selection_pressure(status["current_run"])
     else:
         status["current_run"] = {}
     return status
@@ -121,6 +126,12 @@ def _active_process_for_run(run_id: str, active: list[dict[str, Any]]) -> dict[s
 
 
 def _add_active_eta(current: dict[str, Any], process: dict[str, Any]) -> None:
+    max_selected = _int(process.get("max_selected_markets"))
+    if max_selected is not None:
+        current["max_selected_markets"] = max_selected
+    research_cap = _float_or_none(process.get("research_per_market_cap_usdc"))
+    if research_cap is not None:
+        current["research_per_market_cap_usdc"] = research_cap
     cycles_requested = _int(process.get("cycles"))
     interval_sec = _int(process.get("interval_sec"))
     cycle_index = _int(current.get("cycle_index"))
@@ -135,6 +146,49 @@ def _add_active_eta(current: dict[str, Any], process: dict[str, Any]) -> None:
             current["eta_seconds_floor"] = cycles_remaining * interval_sec
     if interval_sec is not None:
         current["interval_sec"] = interval_sec
+
+
+def _add_selection_pressure(current: dict[str, Any]) -> None:
+    selection = current.get("last_selection_reasons") if isinstance(current.get("last_selection_reasons"), dict) else {}
+    filters = current.get("last_filter_reasons") if isinstance(current.get("last_filter_reasons"), dict) else {}
+    selected_count = _int(current.get("selected_markets")) or 0
+    target = _int(current.get("max_selected_markets"))
+    per_market_cap_block = _int(selection.get("SELECT_PER_MARKET_CAP")) or 0
+    zero_size_reject = _int(selection.get("SELECT_ZERO_SIZE_REJECT")) or 0
+    event_limit_block = _int(selection.get("SELECT_EVENT_LIMIT")) or 0
+    max_market_block = _int(selection.get("SELECT_MAX_MARKETS")) or 0
+    top_filter_reason = None
+    top_filter_count = 0
+    for reason, count_value in filters.items():
+        count = _int(count_value) or 0
+        if count > top_filter_count:
+            top_filter_reason = str(reason)
+            top_filter_count = count
+
+    suggestion = "collect more data"
+    if target is not None and selected_count < target and per_market_cap_block > 0:
+        suggestion = "increase dry-run per-market cap only; keep live caps unchanged"
+    elif max_market_block > 0:
+        suggestion = "selection cap is binding; broaden dry-run selected markets only if active stays healthy"
+    elif zero_size_reject > 0:
+        suggestion = "keep rotating zero-size candidates; do not lower live minimum order size"
+    elif event_limit_block > 0:
+        suggestion = "diversify event selection or raise dry-run event cap"
+    elif top_filter_reason:
+        suggestion = f"inspect filter pressure: {top_filter_reason}"
+
+    current["selection_pressure"] = {
+        "selected_target": target,
+        "selected_count": selected_count,
+        "under_selected": target is not None and selected_count < target,
+        "per_market_cap_block_count": per_market_cap_block,
+        "zero_size_reject_count": zero_size_reject,
+        "event_limit_block_count": event_limit_block,
+        "max_markets_block_count": max_market_block,
+        "top_filter_reason": top_filter_reason,
+        "top_filter_count": top_filter_count,
+        "suggested_next_action": suggestion,
+    }
 
 
 def _run_dir_status(run_dir: Path) -> dict[str, Any]:
@@ -215,6 +269,8 @@ def print_status(status: dict[str, Any]) -> None:
             "selected_markets",
             "active_quote_market_count",
             "eligible_candidates",
+            "max_selected_markets",
+            "research_per_market_cap_usdc",
             "verified_net_after_cost_usdc",
             "modeled_net_after_cost_usdc",
             "bid_filled_shares",
@@ -227,6 +283,7 @@ def print_status(status: dict[str, Any]) -> None:
             print(f"{key}: {current.get(key)}")
         print(f"last_selection_reasons: {current.get('last_selection_reasons')}")
         print(f"last_filter_reasons: {current.get('last_filter_reasons')}")
+        print(f"selection_pressure: {current.get('selection_pressure')}")
         print(f"latest_market_slugs: {current.get('latest_market_slugs')}")
 
     print()
@@ -336,6 +393,13 @@ def _float(value: Any) -> float:
         return float(value)
     except (TypeError, ValueError):
         return 0.0
+
+
+def _float_or_none(value: Any) -> float | None:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def main() -> None:

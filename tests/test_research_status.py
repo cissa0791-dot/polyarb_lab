@@ -55,6 +55,10 @@ class ResearchStatusTests(unittest.TestCase):
                 "240",
                 "--interval-sec",
                 "30",
+                "--max-selected-markets",
+                "3",
+                "--research-per-market-cap-usdc",
+                "80",
             ]
             (proc_dir / "cmdline").write_bytes(b"\0".join(part.encode("utf-8") for part in argv) + b"\0")
 
@@ -74,6 +78,10 @@ class ResearchStatusTests(unittest.TestCase):
             self.assertEqual(current["evidence_rows"], 2)
             self.assertEqual(current["snapshot_rows"], 1)
             self.assertEqual(current["last_selection_reasons"]["SELECT_ZERO_SIZE_REJECT"], 2)
+            self.assertEqual(current["max_selected_markets"], 3)
+            self.assertEqual(current["research_per_market_cap_usdc"], 80.0)
+            self.assertTrue(current["selection_pressure"]["under_selected"])
+            self.assertEqual(current["selection_pressure"]["zero_size_reject_count"], 2)
 
     def test_status_falls_back_to_latest_evidence_when_pnl_missing(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -126,6 +134,8 @@ class ResearchStatusTests(unittest.TestCase):
                 run_id,
                 "--out-dir",
                 str(out_dir),
+                "--max-selected-markets",
+                "3",
             ]
             (proc_dir / "cmdline").write_bytes(b"\0".join(part.encode("utf-8") for part in argv) + b"\0")
 
@@ -184,6 +194,8 @@ class ResearchStatusTests(unittest.TestCase):
                 run_id,
                 "--out-dir",
                 str(out_dir),
+                "--max-selected-markets",
+                "3",
             ]
             (proc_dir / "cmdline").write_bytes(b"\0".join(part.encode("utf-8") for part in argv) + b"\0")
 
@@ -195,6 +207,11 @@ class ResearchStatusTests(unittest.TestCase):
             self.assertEqual(current["eligible_candidates"], 4)
             self.assertEqual(current["last_selection_reasons"]["SELECT_PER_MARKET_CAP"], 2)
             self.assertEqual(current["last_filter_reasons"]["REWARD_MINUS_DRAWDOWN"], 12)
+            self.assertEqual(current["selection_pressure"]["per_market_cap_block_count"], 2)
+            self.assertEqual(
+                current["selection_pressure"]["suggested_next_action"],
+                "increase dry-run per-market cap only; keep live caps unchanged",
+            )
             self.assertAlmostEqual(current["verified_net_after_cost_usdc"], 0.123)
             self.assertAlmostEqual(current["modeled_net_after_cost_usdc"], 0.456)
             self.assertEqual(current["bid_filled_shares"], 9.0)
