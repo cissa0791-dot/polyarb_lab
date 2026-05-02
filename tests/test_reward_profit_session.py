@@ -2049,6 +2049,52 @@ class RewardProfitSessionEngineTests(unittest.TestCase):
             self.assertIsNone(market.ask_order_id)
             self.assertEqual(manager.submitted, [])
 
+    def test_auto_inventory_policy_allows_dry_run_dust_to_accumulate(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = RewardProfitConfig(
+                out_dir=tmpdir,
+                state_path=str(Path(tmpdir) / "s.json"),
+                pnl_path=str(Path(tmpdir) / "p.json"),
+                max_entry_cost_usdc=10.0,
+                max_entry_cost_pct=1.0,
+                max_break_even_hours=100.0,
+                entry_mode="maker_first",
+                action_mode="optimal",
+                live=False,
+                inventory_policy="auto",
+                inventory_dust_shares=0.01,
+                min_live_order_size_shares=5.0,
+                target_inventory_usdc_per_market=20.0,
+            )
+            engine = RewardProfitSessionEngine(
+                config,
+                reward_client_factory=lambda dry_run: None,
+                order_manager=_CountingOrderManager(),
+                registry_provider=lambda cfg: {"events": []},
+            )
+            cand = _candidate(market_slug="m1", quote_size=10.0, reward_hour=0.5, drawdown_hour=0.01)
+            state = engine._load_state()
+            state.markets["m1"] = RewardMarketState(
+                event_slug=cand.event_slug,
+                event_title=cand.event_title,
+                market_slug=cand.market_slug,
+                question=cand.question,
+                token_id=cand.token_id,
+                status=RewardMarketStatus.QUOTING.value,
+                inventory_shares=0.01306,
+                avg_inventory_cost=cand.best_ask,
+            )
+
+            state = engine.run_cycle(state, scanned_candidates=[cand], cycle_ts=datetime(2026, 4, 24, tzinfo=timezone.utc))
+            market = state.markets["m1"]
+
+            self.assertEqual(market.inventory_exit_action, "DUST_HOLD")
+            self.assertEqual(market.stuck_inventory_status, "DUST_HOLD")
+            self.assertIsNone(market.buy_block_reason)
+            self.assertTrue(market.allow_bid_with_inventory)
+            self.assertEqual(market.action, "PLACE_BID")
+            self.assertGreater(market.final_order_size, 0.0)
+
     def test_auto_inventory_policy_holds_for_reward_and_allows_balanced_quote(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             manager = _LiveLifecycleOrderManager()

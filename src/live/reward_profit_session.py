@@ -2902,13 +2902,19 @@ class RewardProfitSessionEngine:
                 "why_not_live": why_not_live,
             }
         if sellable_inventory <= 0.0:
-            why_not_live.append("DUST_INVENTORY")
+            allow_dust_bid = (
+                not self.config.live
+                and inventory_usdc < target_usdc - 1e-9
+                and reward_hold_ev > 0.0
+            )
+            if not allow_dust_bid:
+                why_not_live.append("DUST_INVENTORY")
             return {
                 "exit_action": "DUST_HOLD",
                 "exit_reason": "BELOW_MIN_LIVE_ORDER_SIZE",
                 "stuck_status": "DUST_HOLD",
-                "allow_bid": False,
-                "buy_block_reason": "DUST_INVENTORY",
+                "allow_bid": allow_dust_bid,
+                "buy_block_reason": None if allow_dust_bid else "DUST_INVENTORY",
                 "protected_ask_price": None,
                 "reward_hold_ev_usdc": reward_hold_ev,
                 "why_not_live": why_not_live,
@@ -3057,7 +3063,9 @@ class RewardProfitSessionEngine:
                 allow_bid = bool(auto_decision["allow_bid"])
                 buy_block_reason = auto_decision["buy_block_reason"]
                 exit_action = str(auto_decision["exit_action"])
-                if exit_action in {"DUST_HOLD", "STRANDED_MONITOR"}:
+                if exit_action == "DUST_HOLD":
+                    action = "PLACE_BID" if allow_bid else "HOLD"
+                elif exit_action == "STRANDED_MONITOR":
                     action = "HOLD"
                 elif exit_action == "HOLD_FOR_REWARD":
                     action = "BALANCED_QUOTE" if allow_bid else "PLACE_ASK"
