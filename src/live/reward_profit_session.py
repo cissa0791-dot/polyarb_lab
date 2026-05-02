@@ -381,6 +381,7 @@ class RewardProfitSessionState:
     actual_reward_source: str = "NOT_CHECKED"
     actual_reward_unavailable_reason: str | None = None
     actual_reward_last_checked_ts: str | None = None
+    actual_reward_attribution_method: str = "not_attributed"
     reward_epoch_id: str | None = None
     account_open_buy_order_count: int = 0
     account_open_sell_order_count: int = 0
@@ -3828,15 +3829,32 @@ class RewardProfitSessionEngine:
         for market in active_markets:
             market.last_actual_reward_delta_usdc = 0.0
         if not active_markets:
+            state.actual_reward_attribution_method = "no_active_quoting_markets"
             return
         if delta <= self.config.min_actual_reward_delta_usdc:
             for market in active_markets:
                 if market.last_reward_rate >= self.config.min_daily_reward_for_actual_gate_usdc:
                     market.actual_reward_zero_cycles += 1
+            state.actual_reward_attribution_method = "no_new_reward_delta"
             return
-        per_market = delta / len(active_markets)
+        weights = {
+            market.market_slug: max(
+                0.0,
+                market.reward_accrued_estimate_usdc - market.reward_estimate_at_last_actual_usdc,
+            )
+            for market in active_markets
+        }
+        total_weight = sum(weights.values())
+        if total_weight > 1e-9:
+            state.actual_reward_attribution_method = "estimated_reward_since_last_actual_weighted"
+        else:
+            state.actual_reward_attribution_method = "equal_split_across_active_quoting_markets"
         correlation_entries: list[dict[str, Any]] = []
         for market in active_markets:
+            if total_weight > 1e-9:
+                per_market = delta * (weights[market.market_slug] / total_weight)
+            else:
+                per_market = delta / len(active_markets)
             market.last_actual_reward_delta_usdc = round(per_market, 6)
             market.actual_reward_zero_cycles = 0
             market.reward_accrued_actual_usdc = round(market.reward_accrued_actual_usdc + per_market, 6)
@@ -3924,6 +3942,7 @@ class RewardProfitSessionEngine:
             actual_reward_source=str(payload.get("actual_reward_source") or "NOT_CHECKED"),
             actual_reward_unavailable_reason=payload.get("actual_reward_unavailable_reason"),
             actual_reward_last_checked_ts=payload.get("actual_reward_last_checked_ts"),
+            actual_reward_attribution_method=str(payload.get("actual_reward_attribution_method") or "not_attributed"),
             reward_epoch_id=payload.get("reward_epoch_id"),
             selected_market_slugs=list(payload.get("selected_market_slugs") or []),
             last_arb_opportunities=list(payload.get("last_arb_opportunities") or []),
@@ -4195,7 +4214,7 @@ class RewardProfitSessionEngine:
                 "actual_reward_source": state.actual_reward_source,
                 "actual_reward_unavailable_reason": state.actual_reward_unavailable_reason,
                 "actual_reward_last_checked_ts": state.actual_reward_last_checked_ts,
-                "actual_reward_attribution_method": "equal_split_across_active_quoting_markets",
+                "actual_reward_attribution_method": state.actual_reward_attribution_method,
                 "inventory_mtm_pnl_usdc": round(total_inventory_mtm, 6),
                 "inventory_realized_pnl_usdc": round(total_inventory_realized, 6),
                 "spread_realized_usdc": round(total_spread_realized, 6),

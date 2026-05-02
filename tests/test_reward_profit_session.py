@@ -14,6 +14,7 @@ from src.live.reward_profit_session import (
     RewardProfitConfig,
     RewardProfitSelector,
     RewardProfitSessionEngine,
+    RewardProfitSessionState,
     _sellable_token_size,
 )
 from src.live.client import LiveOpenOrder, LiveOrderStatus
@@ -385,6 +386,53 @@ class RewardProfitSessionEngineTests(unittest.TestCase):
                 pnl["summary"]["actual_reward_attribution_method"],
                 "equal_split_across_active_quoting_markets",
             )
+
+    def test_actual_reward_uses_estimated_reward_weighted_attribution(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            reward_client = _FakeRewardClient(user_earned_usd=13.0)
+            engine = self._engine(tmpdir, reward_client=reward_client)
+            now = datetime(2026, 4, 24, 0, 0, tzinfo=timezone.utc).isoformat()
+            state = RewardProfitSessionState(
+                session_id="reward_profit_test",
+                mode="LIVE",
+                started_ts=now,
+                updated_ts=now,
+                actual_reward_baseline_usdc=10.0,
+                actual_reward_latest_usdc=10.0,
+            )
+            state.markets = {
+                "m1": RewardMarketState(
+                    event_slug="e1",
+                    event_title=None,
+                    market_slug="m1",
+                    question=None,
+                    token_id="t1",
+                    status=RewardMarketStatus.QUOTING.value,
+                    reward_accrued_estimate_usdc=3.0,
+                    reward_estimate_at_last_actual_usdc=1.0,
+                ),
+                "m2": RewardMarketState(
+                    event_slug="e2",
+                    event_title=None,
+                    market_slug="m2",
+                    question=None,
+                    token_id="t2",
+                    status=RewardMarketStatus.QUOTING.value,
+                    reward_accrued_estimate_usdc=1.0,
+                    reward_estimate_at_last_actual_usdc=0.0,
+                ),
+            }
+
+            engine._refresh_actual_reward(state)
+
+            self.assertEqual(
+                state.actual_reward_attribution_method,
+                "estimated_reward_since_last_actual_weighted",
+            )
+            self.assertAlmostEqual(state.markets["m1"].reward_accrued_actual_usdc, 2.0, places=6)
+            self.assertAlmostEqual(state.markets["m2"].reward_accrued_actual_usdc, 1.0, places=6)
+            self.assertAlmostEqual(state.markets["m1"].reward_actual_vs_estimate_ratio, 1.0, places=6)
+            self.assertAlmostEqual(state.markets["m2"].reward_actual_vs_estimate_ratio, 1.0, places=6)
 
     def test_mark_to_market_uses_bid_against_entry_cost(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
