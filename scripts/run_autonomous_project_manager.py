@@ -308,6 +308,7 @@ def main() -> None:
     if args.mode == "execute-live-canary":
         if not decision["can_execute_live"]:
             raise SystemExit(f"live execution blocked: {decision['reason']}")
+        subprocess.run([sys.executable, str(ROOT / "scripts" / "check_polymarket_auth.py")], cwd=str(ROOT), check=True)
         subprocess.run(decision["live_command"], cwd=str(ROOT), check=True)
 
 

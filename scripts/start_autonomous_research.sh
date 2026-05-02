@@ -8,6 +8,8 @@ INTERVAL_SEC="${INTERVAL_SEC:-30}"
 MAX_SELECTED_MARKETS="${MAX_SELECTED_MARKETS:-3}"
 OUT_DIR="${OUT_DIR:-data/reports}"
 PULL_FIRST="${PULL_FIRST:-0}"
+MANAGER_MODE="${MANAGER_MODE:-execute-live-canary}"
+MAX_LIVE_RISK_USDC="${MAX_LIVE_RISK_USDC:-40}"
 
 cd "$(dirname "$0")/.."
 
@@ -46,10 +48,13 @@ python scripts/run_evidence_research_pipeline.py \
   --max-selected-markets '$MAX_SELECTED_MARKETS' \
   --out-dir '$OUT_DIR' \
   --verbose
-python scripts/run_autonomous_project_manager.py --mode print-live-command
+python scripts/run_autonomous_project_manager.py \
+  --mode '$MANAGER_MODE' \
+  --max-live-risk-usdc '$MAX_LIVE_RISK_USDC'
 "
 
 echo "started tmux session: $SESSION_NAME"
 echo "run_id: $RUN_ID"
 echo "attach: tmux attach -t $SESSION_NAME"
 echo "detach: Ctrl+B then d"
+echo "manager_mode: $MANAGER_MODE"
