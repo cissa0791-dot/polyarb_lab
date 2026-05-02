@@ -104,11 +104,41 @@ class AutonomousProjectManagerTests(unittest.TestCase):
         self.assertEqual(decision["decision"], "START_MICRO_LIVE_PROBE")
         self.assertTrue(decision["can_execute_live"])
         self.assertEqual(decision["target_live_markets"], 1)
-        self.assertEqual(decision["max_live_risk_usdc"], 10.0)
+        self.assertEqual(decision["max_live_risk_usdc"], 20.0)
         self.assertIn("--live", command)
-        self.assertEqual(command[command.index("--capital") + 1], "10.00")
+        self.assertEqual(command[command.index("--capital") + 1], "20.00")
         self.assertEqual(command[command.index("--max-markets") + 1], "1")
         self.assertEqual(command[command.index("--inventory-policy") + 1], "auto")
+        self.assertIn("--reset-state", command)
+        self.assertIn("--state-path", command)
+        self.assertIn("live_probe_runs", command[command.index("--state-path") + 1])
+        self.assertIn("--pnl-path", command)
+        self.assertIn("live_probe_runs", command[command.index("--pnl-path") + 1])
+        self.assertTrue(decision["fresh_live_state"])
+
+    def test_live_rate_limit_forces_pause(self) -> None:
+        decision = build_autonomous_decision(
+            research_summary={
+                "scale_recommendation": "ALLOW_CANARY_ONLY",
+                "live_canary_eligible_count": 1,
+                "dry_run_focus_count": 0,
+                "live_ready_blockers": [],
+            },
+            live_pnl={
+                "summary": {
+                    "mode": "LIVE",
+                    "verified_net_after_reward_and_cost_usdc": 0.05,
+                    "account_inventory_usdc": 0.0,
+                    "account_open_buy_usdc": 0.0,
+                    "account_order_sync_error": "Cloudflare error code: 1015 You are being rate limited",
+                },
+                "markets": [],
+            },
+        )
+
+        self.assertEqual(decision["decision"], "PAUSE_LIVE")
+        self.assertEqual(decision["reason"], "CLOB_RATE_LIMIT")
+        self.assertFalse(decision["can_execute_live"])
 
     def test_severely_negative_replay_blocks_micro_live_probe(self) -> None:
         decision = build_autonomous_decision(

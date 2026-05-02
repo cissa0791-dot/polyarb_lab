@@ -32,6 +32,23 @@ def _safe_float(value: Any, default: float = 0.0) -> float:
         return default
 
 
+def _is_live_rate_limit_error(value: Any) -> bool:
+    text = str(value or "").lower()
+    if not text:
+        return False
+    markers = (
+        "cloudflare",
+        "error code: 1015",
+        " 1015",
+        "rate limited",
+        "rate-limit",
+        "too many requests",
+        "http 429",
+        "status code 429",
+    )
+    return any(marker in text for marker in markers)
+
+
 class RewardMarketStatus(str, Enum):
     SCANNED = "SCANNED"
     SELECTED = "SELECTED"
@@ -1424,6 +1441,14 @@ class RewardProfitSessionEngine:
         self.evidence_market_intel = self._load_evidence_market_intel()
         self._live_inventory_balance_cache = {}
         self._sync_account_order_summary(state)
+        if state.halted:
+            state.last_scanned_candidate_count = 0
+            state.last_eligible_candidate_count = 0
+            state.last_filter_reasons = {}
+            state.last_selection_reasons = {}
+            state.selected_market_slugs = []
+            state.last_scan_diagnostics["halt_before_scan"] = state.halt_reason
+            return state
 
         if scanned_candidates is None:
             registry = self.registry_provider(self.config)
@@ -1476,8 +1501,12 @@ class RewardProfitSessionEngine:
             state.last_scan_diagnostics = scan_diagnostics
             self._sync_account_order_summary(state)
             pnl_report = self._build_pnl_report(state)
-            state.halted = pnl_report["summary"]["net_after_reward_and_cost_usdc"] <= -abs(self.config.max_daily_loss)
-            state.halt_reason = "MAX_DAILY_LOSS" if state.halted else None
+            daily_loss_halt = pnl_report["summary"]["net_after_reward_and_cost_usdc"] <= -abs(self.config.max_daily_loss)
+            if daily_loss_halt:
+                state.halted = True
+                state.halt_reason = state.halt_reason or "MAX_DAILY_LOSS"
+            elif not state.halted:
+                state.halt_reason = None
             state.cycle_history.append(
                 {
                     "cycle_index": state.cycle_index,
@@ -1521,7 +1550,11 @@ class RewardProfitSessionEngine:
         state.selected_market_slugs = [item.market_slug for item in selected]
 
         self._cancel_unselected_live_buy_orders(state, selected)
+        if state.halted:
+            return state
         self._refresh_actual_reward(state)
+        if state.halted:
+            return state
 
         for market_slug, market_state in list(state.markets.items()):
             if market_slug not in selected_by_slug and market_state.status not in {RewardMarketStatus.CLOSED.value, RewardMarketStatus.PAUSED.value}:
@@ -1540,12 +1573,26 @@ class RewardProfitSessionEngine:
                 state.markets[candidate.market_slug] = market_state
 
             self._sync_live_market_state(market_state, candidate, now)
+            if _is_live_rate_limit_error(market_state.last_order_error):
+                state.halted = True
+                state.halt_reason = "CLOB_RATE_LIMIT"
+                state.last_scan_diagnostics["live_api_guard"] = "CLOB_RATE_LIMIT"
+                break
             self._advance_market_state(state, market_state, candidate, now)
+            if _is_live_rate_limit_error(market_state.last_order_error):
+                state.halted = True
+                state.halt_reason = "CLOB_RATE_LIMIT"
+                state.last_scan_diagnostics["live_api_guard"] = "CLOB_RATE_LIMIT"
+                break
 
         self._sync_account_order_summary(state)
         pnl_report = self._build_pnl_report(state)
-        state.halted = pnl_report["summary"]["net_after_reward_and_cost_usdc"] <= -abs(self.config.max_daily_loss)
-        state.halt_reason = "MAX_DAILY_LOSS" if state.halted else None
+        daily_loss_halt = pnl_report["summary"]["net_after_reward_and_cost_usdc"] <= -abs(self.config.max_daily_loss)
+        if daily_loss_halt:
+            state.halted = True
+            state.halt_reason = state.halt_reason or "MAX_DAILY_LOSS"
+        elif not state.halted:
+            state.halt_reason = None
         state.cycle_history.append(
             {
                 "cycle_index": state.cycle_index,
@@ -1616,6 +1663,11 @@ class RewardProfitSessionEngine:
             )
             if should_pre_sync_inventory:
                 self._sync_live_market_state(market_state, candidate, now)
+                if _is_live_rate_limit_error(market_state.last_order_error):
+                    state.halted = True
+                    state.halt_reason = "CLOB_RATE_LIMIT"
+                    state.last_scan_diagnostics["live_api_guard"] = "CLOB_RATE_LIMIT"
+                    break
             prepared = self._prepare_candidate_for_execution(state, market_state, candidate)
             if self._is_zero_size_selection_reject(prepared):
                 selection_reasons["SELECT_ZERO_SIZE_REJECT"] = selection_reasons.get("SELECT_ZERO_SIZE_REJECT", 0) + 1
@@ -2507,6 +2559,10 @@ class RewardProfitSessionEngine:
         except Exception as exc:
             state.account_order_sync_error = f"account open order sync failed: {exc}"
             state.last_scan_diagnostics["account_order_sync_error"] = state.account_order_sync_error
+            if _is_live_rate_limit_error(state.account_order_sync_error):
+                state.halted = True
+                state.halt_reason = "CLOB_RATE_LIMIT"
+                state.last_scan_diagnostics["live_api_guard"] = "CLOB_RATE_LIMIT"
             return []
 
         dust = max(0.0, float(self.config.inventory_dust_shares))
@@ -3817,6 +3873,10 @@ class RewardProfitSessionEngine:
         except RewardClientError as exc:
             state.actual_reward_source = "UNAVAILABLE"
             state.actual_reward_unavailable_reason = f"REWARD_CLIENT_ERROR: {exc}"
+            if self.config.live and _is_live_rate_limit_error(exc):
+                state.halted = True
+                state.halt_reason = "CLOB_RATE_LIMIT"
+                state.last_scan_diagnostics["live_api_guard"] = "CLOB_RATE_LIMIT"
             return
 
         if bool(summary.get("dry_run")):

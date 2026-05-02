@@ -4,6 +4,7 @@ import argparse
 import json
 import subprocess
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -14,10 +15,11 @@ if str(ROOT) not in sys.path:
 
 HUMAN_APPROVAL_RISK_LIMIT_USDC = 50.0
 CANARY_PER_MARKET_CAP_USDC = 20.0
-MICRO_PROBE_RISK_USDC = 10.0
+MICRO_PROBE_RISK_USDC = 20.0
 CANARY_STOP_LOSS_USDC = 1.0
 MICRO_PROBE_REPLAY_TOTAL_FLOOR_USDC = -0.10
 MICRO_PROBE_REPLAY_AVG_FLOOR_USDC = -0.0025
+LIVE_PROBE_ROOT = ROOT / "data" / "reports" / "live_probe_runs"
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -171,11 +173,13 @@ def build_autonomous_decision(
             dry_run_focus_count=dry_run_focus_count,
         ):
             live_risk = min(requested_risk, MICRO_PROBE_RISK_USDC, CANARY_PER_MARKET_CAP_USDC)
+            live_paths = _live_run_paths("micro_probe", research_summary)
             command = _live_canary_command(
                 target_live_markets=1,
                 live_risk_usdc=live_risk,
                 cycles=live_cycles,
                 interval_sec=live_interval_sec,
+                live_paths=live_paths,
             )
             decision.update(
                 {
@@ -185,6 +189,11 @@ def build_autonomous_decision(
                     "max_live_risk_usdc": live_risk,
                     "can_execute_live": True,
                     "live_command": command,
+                    "fresh_live_state": True,
+                    "live_state_path": str(live_paths["state"]),
+                    "live_pnl_path": str(live_paths["pnl"]),
+                    "live_edge_evidence_path": str(live_paths["edge_evidence"]),
+                    "live_orderbook_snapshot_path": str(live_paths["orderbook_snapshots"]),
                 }
             )
             return decision
@@ -224,11 +233,13 @@ def build_autonomous_decision(
         return decision
 
     live_risk = min(requested_risk, CANARY_PER_MARKET_CAP_USDC * target_live_markets)
+    live_paths = _live_run_paths(next_decision.lower(), research_summary)
     command = _live_canary_command(
         target_live_markets=target_live_markets,
         live_risk_usdc=live_risk,
         cycles=live_cycles,
         interval_sec=live_interval_sec,
+        live_paths=live_paths,
     )
     decision.update(
         {
@@ -238,6 +249,11 @@ def build_autonomous_decision(
             "max_live_risk_usdc": live_risk,
             "can_execute_live": True,
             "live_command": command,
+            "fresh_live_state": True,
+            "live_state_path": str(live_paths["state"]),
+            "live_pnl_path": str(live_paths["pnl"]),
+            "live_edge_evidence_path": str(live_paths["edge_evidence"]),
+            "live_orderbook_snapshot_path": str(live_paths["orderbook_snapshots"]),
         }
     )
     return decision
@@ -252,9 +268,20 @@ def _live_health(live_pnl: dict[str, Any], *, max_live_risk_usdc: float) -> dict
     account_open_buy = _float(summary.get("account_open_buy_usdc"))
     open_buy_count = int(_float(summary.get("account_open_buy_order_count")))
     order_reject_count = sum(int(_float(market.get("order_reject_count"))) for market in markets if isinstance(market, dict))
+    account_sync_error = str(summary.get("account_order_sync_error") or "")
+    market_errors = [
+        str(market.get("last_order_error") or "")
+        for market in markets
+        if isinstance(market, dict) and market.get("last_order_error")
+    ]
+    rate_limit_detected = _is_live_rate_limit_error(account_sync_error) or any(
+        _is_live_rate_limit_error(error) for error in market_errors
+    )
 
     pause_reason = None
-    if mode == "LIVE" and verified_net <= -CANARY_STOP_LOSS_USDC:
+    if mode == "LIVE" and rate_limit_detected:
+        pause_reason = "CLOB_RATE_LIMIT"
+    elif mode == "LIVE" and verified_net <= -CANARY_STOP_LOSS_USDC:
         pause_reason = "VERIFIED_LIVE_NET_STOP"
     elif mode == "LIVE" and order_reject_count > 0:
         pause_reason = "ORDER_REJECT_STOP"
@@ -273,6 +300,8 @@ def _live_health(live_pnl: dict[str, Any], *, max_live_risk_usdc: float) -> dict
         "account_open_buy_usdc": round(account_open_buy, 6),
         "account_open_buy_order_count": open_buy_count,
         "order_reject_count": order_reject_count,
+        "account_order_sync_error": account_sync_error or None,
+        "rate_limit_detected": rate_limit_detected,
     }
 
 
@@ -453,7 +482,47 @@ def _research_policy(
     }
 
 
-def _live_canary_command(*, target_live_markets: int, live_risk_usdc: float, cycles: int, interval_sec: int) -> list[str]:
+def _live_run_paths(kind: str, research_summary: dict[str, Any]) -> dict[str, Path]:
+    raw_run_id = str(research_summary.get("run_id") or "").strip()
+    if not raw_run_id:
+        raw_run_id = datetime.now(timezone.utc).strftime("manual-%Y%m%dT%H%M%SZ")
+    safe_run_id = "".join(ch if ch.isalnum() or ch in {"-", "_"} else "-" for ch in raw_run_id)
+    safe_kind = "".join(ch if ch.isalnum() or ch in {"-", "_"} else "-" for ch in kind.strip() or "live_probe")
+    run_dir = LIVE_PROBE_ROOT / f"{safe_run_id}-{safe_kind}"
+    return {
+        "dir": run_dir,
+        "state": run_dir / "auto_trade_state.json",
+        "pnl": run_dir / "auto_trade_pnl.json",
+        "edge_evidence": run_dir / "live_edge_observations.jsonl",
+        "orderbook_snapshots": run_dir / "live_orderbook_snapshots.jsonl",
+    }
+
+
+def _is_live_rate_limit_error(value: Any) -> bool:
+    text = str(value or "").lower()
+    if not text:
+        return False
+    markers = (
+        "cloudflare",
+        "error code: 1015",
+        " 1015",
+        "rate limited",
+        "rate-limit",
+        "too many requests",
+        "http 429",
+        "status code 429",
+    )
+    return any(marker in text for marker in markers)
+
+
+def _live_canary_command(
+    *,
+    target_live_markets: int,
+    live_risk_usdc: float,
+    cycles: int,
+    interval_sec: int,
+    live_paths: dict[str, Path],
+) -> list[str]:
     per_market_cap = min(CANARY_PER_MARKET_CAP_USDC, live_risk_usdc / max(1, target_live_markets))
     return [
         sys.executable,
@@ -493,6 +562,18 @@ def _live_canary_command(*, target_live_markets: int, live_risk_usdc: float, cyc
         f"{CANARY_STOP_LOSS_USDC:.2f}",
         "--max-order-rejects-per-hour",
         "1",
+        "--state-path",
+        str(live_paths["state"]),
+        "--pnl-path",
+        str(live_paths["pnl"]),
+        "--reset-state",
+        "--edge-evidence-path",
+        str(live_paths["edge_evidence"]),
+        "--record-orderbook-snapshots",
+        "--orderbook-snapshot-path",
+        str(live_paths["orderbook_snapshots"]),
+        "--orderbook-snapshot-max-markets",
+        "20",
         "--target-inventory-usdc-per-market",
         f"{per_market_cap / 2.0:.2f}",
         "--max-inventory-usdc-per-market",
@@ -542,6 +623,9 @@ def main() -> None:
     if args.mode == "execute-live-canary":
         if not decision["can_execute_live"]:
             raise SystemExit(f"live execution blocked: {decision['reason']}")
+        live_dir = decision.get("live_state_path")
+        if live_dir:
+            Path(str(live_dir)).parent.mkdir(parents=True, exist_ok=True)
         subprocess.run([sys.executable, str(ROOT / "scripts" / "check_polymarket_auth.py")], cwd=str(ROOT), check=True)
         subprocess.run(decision["live_command"], cwd=str(ROOT), check=True)
 

@@ -65,6 +65,18 @@ class ResearchRunReportTests(unittest.TestCase):
             )
             (run_dir / "research_edge_observations_latest.jsonl").write_text("{}\n", encoding="utf-8")
             (run_dir / "research_orderbook_snapshots_latest.jsonl").write_text("{}\n{}\n", encoding="utf-8")
+            (out_dir / "autonomous_decision_latest.json").write_text(
+                json.dumps(
+                    {
+                        "decision": "START_MICRO_LIVE_PROBE",
+                        "reason": "dry-run edge is positive but actual reward requires a capped live probe",
+                        "target_live_markets": 1,
+                        "max_live_risk_usdc": 20.0,
+                        "can_execute_live": True,
+                    }
+                ),
+                encoding="utf-8",
+            )
 
             report = build_report(out_dir=out_dir, run_dir=run_dir, proc_root=root / "missing-proc")
 
@@ -74,6 +86,7 @@ class ResearchRunReportTests(unittest.TestCase):
             self.assertIn("Scale recommendation: ALLOW_DRY_RUN_FOCUS", report)
             self.assertIn("NO_ACTUAL_REWARD_CONFIRMED", report)
             self.assertIn("m1 | DRY_RUN_FOCUS", report)
+            self.assertIn("isolated capped micro live probe", report)
 
 
 if __name__ == "__main__":

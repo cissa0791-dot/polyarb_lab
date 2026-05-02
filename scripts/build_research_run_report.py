@@ -117,6 +117,9 @@ def build_report(*, out_dir: Path, run_dir: Path | None = None, proc_root: Path 
     if status.get("active_research_process_count"):
         lines.append("- Research is still running; do not interpret root latest files as final until the run completes.")
         lines.append("- Next prompt: 目前无需手动操作；如果要检查，只问“项目状态”。")
+    elif decision.get("decision") == "START_MICRO_LIVE_PROBE":
+        lines.append("- Research is complete; confirmed reward is still missing, but manager allows an isolated capped micro live probe.")
+        lines.append("- Next prompt: 检查 isolated micro live probe output；不要用默认 live latest 当作本轮证据。")
     elif pipeline_summary and pipeline_summary.get("live_canary_eligible_count", 0):
         lines.append("- Research is complete and has live candidates; autonomous manager can decide canary under hard caps.")
         lines.append("- Next prompt: 检查 autonomous decision，并说明是否允许 20 USDC live canary。")

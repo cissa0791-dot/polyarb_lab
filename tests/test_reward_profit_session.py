@@ -150,6 +150,14 @@ class _OrderVersionMismatchManager(RewardOrderManager):
         return []
 
 
+class _RateLimitOrderManager(RewardOrderManager):
+    def __init__(self):
+        super().__init__(live=True)
+
+    def get_all_open_orders(self):
+        raise RuntimeError("Cloudflare error code: 1015 You are being rate limited")
+
+
 def _candidate(
     *,
     market_slug: str,
@@ -362,6 +370,38 @@ class RewardProfitSessionEngineTests(unittest.TestCase):
             state = engine.run_cycle(state, scanned_candidates=[], cycle_ts=cycle_ts + timedelta(minutes=1))
             self.assertEqual(state.markets["m1"].status, RewardMarketStatus.PAUSED.value)
             self.assertEqual(state.markets["m1"].capital_in_use_usdc, 0.0)
+
+    def test_live_rate_limit_halts_before_scan(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = RewardProfitConfig(
+                out_dir=tmpdir,
+                state_path=str(Path(tmpdir) / "state.json"),
+                pnl_path=str(Path(tmpdir) / "pnl.json"),
+                capital_limit_usdc=20.0,
+                per_market_cap_usdc=20.0,
+                max_markets=1,
+                max_daily_loss=1.0,
+                max_entry_cost_usdc=10.0,
+                max_entry_cost_pct=1.0,
+                max_break_even_hours=100.0,
+                live=True,
+            )
+            engine = RewardProfitSessionEngine(
+                config,
+                reward_client_factory=lambda dry_run: _FakeRewardClient(),
+                order_manager=_RateLimitOrderManager(),
+                registry_provider=lambda cfg: {"events": []},
+            )
+
+            state = engine.run_cycle(
+                scanned_candidates=[_candidate(market_slug="m1")],
+                cycle_ts=datetime(2026, 4, 24, 0, 0, tzinfo=timezone.utc),
+            )
+
+            self.assertTrue(state.halted)
+            self.assertEqual(state.halt_reason, "CLOB_RATE_LIMIT")
+            self.assertEqual(state.selected_market_slugs, [])
+            self.assertEqual(state.last_scan_diagnostics["live_api_guard"], "CLOB_RATE_LIMIT")
 
     def test_reward_actual_and_estimate_are_tracked_separately(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
