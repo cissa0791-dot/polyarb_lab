@@ -312,7 +312,7 @@ def _scan_command(args: argparse.Namespace, paths: dict[str, Path]) -> list[str]
         "--min-live-order-size-shares",
         "5",
         "--inventory-policy",
-        "balanced",
+        "auto",
         "--inventory-dust-shares",
         "0.01",
         "--profit-evidence-mode",

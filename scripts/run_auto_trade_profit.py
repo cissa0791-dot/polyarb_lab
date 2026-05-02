@@ -131,9 +131,9 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--inventory-policy",
-        choices=["sell_only", "balanced"],
+        choices=["sell_only", "balanced", "auto"],
         default="sell_only",
-        help="Live inventory handling. sell_only blocks new buys while inventory exists; balanced allows two-sided quoting until inventory limits are hit.",
+        help="Live inventory handling. sell_only blocks new buys while inventory exists; balanced allows two-sided quoting until inventory limits are hit; auto chooses dust hold, reward hold, protected sell, or reprice sell.",
     )
     parser.add_argument("--event-limit", type=int, default=200)
     parser.add_argument("--market-limit", type=int, default=400)

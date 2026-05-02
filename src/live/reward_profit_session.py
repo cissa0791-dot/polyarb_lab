@@ -88,6 +88,8 @@ class RewardProfitCandidate:
     profit_score: float = 0.0
     fill_probability_score: float = 0.0
     total_score: float = 0.0
+    fill_realism_score: float = 0.0
+    reward_first_score: float = 0.0
     action: str = "PLACE_BID"
     action_score: float = 0.0
     quote_bid_reason: str = "LEGACY_QUOTE"
@@ -118,6 +120,7 @@ class RewardProfitCandidate:
     risk_reject_reason: str | None = None
     scale_gate_status: str = "PROBATION"
     scale_gate_reason: str = "NO_LIVE_EVIDENCE_YET"
+    why_not_live: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -314,6 +317,15 @@ class RewardMarketState:
     protected_sell_order_id: str | None = None
     canceled_buy_count: int = 0
     preserved_sell_count: int = 0
+    inventory_exit_action: str = "NONE"
+    inventory_exit_reason: str | None = None
+    stuck_inventory_status: str = "NONE"
+    reward_hold_ev_usdc: float = 0.0
+    protected_ask_price: float | None = None
+    fill_realism_score: float = 0.0
+    reward_first_score: float = 0.0
+    reward_zone_live_seconds: float = 0.0
+    why_not_live: list[str] = field(default_factory=list)
     inventory_dust_shares: float = 0.0001
     min_order_size_shares: float = 0.0
     action: str = "HOLD"
@@ -539,6 +551,19 @@ def _order_notional(order: LiveOpenOrder) -> float:
     return max(0.0, float(order.price or 0.0) * float(order.size_remaining or 0.0))
 
 
+def _reward_selection_sort_key(item: RewardProfitCandidate) -> tuple[Any, ...]:
+    return (
+        -float(getattr(item, "reward_first_score", 0.0) or 0.0),
+        -float(getattr(item, "fill_realism_score", 0.0) or 0.0),
+        -float(item.total_score or 0.0),
+        -float(item.profit_score or 0.0),
+        -float(item.fill_probability_score or 0.0),
+        float(item.true_break_even_hours or 999999.0),
+        float(item.capital_basis_usdc or 0.0),
+        item.market_slug,
+    )
+
+
 def _make_order_intent(
     *,
     candidate_id: str,
@@ -730,14 +755,7 @@ class RewardProfitSelector:
 
         ordered = sorted(
             candidates,
-            key=lambda item: (
-                -item.total_score,
-                -item.profit_score,
-                -item.fill_probability_score,
-                item.true_break_even_hours,
-                item.capital_basis_usdc,
-                item.market_slug,
-            ),
+            key=_reward_selection_sort_key,
         )
         for candidate in ordered:
             if len(selected) >= max_markets:
@@ -957,7 +975,42 @@ class RewardProfitSelector:
             _clamp((activity_factor * 0.45) + (spread_width_score * 0.25) + (depth_score * 0.20) + (reward_size_score * 0.10), 0.0, 1.0),
             6,
         )
-        total_score = round((profit_score * 0.60) + (fill_probability_score * 0.40), 6)
+        reward_zone_score = _clamp(1.0 - (quote_spread / max(reward_max_spread, 1e-9)), 0.0, 1.0)
+        min_size_pressure_score = _clamp(float(self.per_market_cap_usdc) / max(capital_basis_usdc, 1e-9), 0.0, 1.0)
+        reward_yield_denominator = max(float(getattr(self, "min_reward_per_dollar_inventory_per_hour", 0.0) or 0.0), 0.0005)
+        reward_yield_score = _clamp(
+            reward_per_dollar_inventory_per_hour / max(reward_yield_denominator * 2.0, 1e-9),
+            0.0,
+            1.0,
+        )
+        fill_realism_score = round(
+            _clamp(
+                (activity_factor * 0.30)
+                + (depth_score * 0.30)
+                + (reward_zone_score * 0.25)
+                + (min_size_pressure_score * 0.15),
+                0.0,
+                1.0,
+            ),
+            6,
+        )
+        reward_first_score = round(
+            _clamp(
+                (reward_yield_score * 0.35)
+                + (fill_realism_score * 0.30)
+                + (reward_zone_score * 0.20)
+                + (min_size_pressure_score * 0.10)
+                + (liquidity_factor * 0.05)
+                - ((1.0 - spread_width_score) * 0.10),
+                0.0,
+                1.0,
+            ),
+            6,
+        )
+        total_score = round(
+            (reward_first_score * 0.55) + (profit_score * 0.25) + (fill_realism_score * 0.20),
+            6,
+        )
 
         requested_improvement = self.quote_improvement_cents / 100.0
         if requested_improvement > 0.0:
@@ -1026,6 +1079,8 @@ class RewardProfitSelector:
             profit_score=profit_score,
             fill_probability_score=fill_probability_score,
             total_score=total_score,
+            fill_realism_score=fill_realism_score,
+            reward_first_score=reward_first_score,
             liquidity_factor=round(liquidity_factor, 6),
             activity_factor=round(activity_factor, 6),
         )
@@ -1168,6 +1223,8 @@ class RewardProfitSessionEngine:
                 and existing.order_reject_count >= self.config.max_order_rejects_per_hour
             ):
                 return "ORDER_REJECT_LIMIT"
+        if self._candidate_has_auto_inventory(item, state=state):
+            return None
         if self.config.max_entry_cost_usdc > 0.0 and item.immediate_entry_cost_usdc > self.config.max_entry_cost_usdc + 1e-9:
             return "ENTRY_COST_USDC"
         if self.config.max_entry_cost_pct > 0.0 and item.immediate_entry_cost_pct > self.config.max_entry_cost_pct + 1e-9:
@@ -1218,6 +1275,37 @@ class RewardProfitSessionEngine:
         if self._candidate_blocked_by_market_intel(item):
             return "MARKET_INTEL_RISK"
         return None
+
+    def _candidate_live_inventory_shares(
+        self,
+        item: RewardProfitCandidate,
+        *,
+        state: RewardProfitSessionState | None = None,
+    ) -> float:
+        if not self.config.live or str(self.config.inventory_policy or "").lower() != "auto":
+            return 0.0
+        if state is not None:
+            existing = state.markets.get(item.market_slug)
+            if existing is not None and existing.inventory_shares > self.config.inventory_dust_shares + 1e-9:
+                return float(existing.inventory_shares)
+        cache = getattr(self, "_live_inventory_balance_cache", None)
+        if isinstance(cache, dict) and item.token_id in cache:
+            return float(cache[item.token_id])
+        try:
+            balance = max(0.0, float(self.order_manager.get_token_balance(item.token_id)))
+        except Exception:
+            balance = 0.0
+        if isinstance(cache, dict):
+            cache[item.token_id] = balance
+        return balance
+
+    def _candidate_has_auto_inventory(
+        self,
+        item: RewardProfitCandidate,
+        *,
+        state: RewardProfitSessionState | None = None,
+    ) -> bool:
+        return self._candidate_live_inventory_shares(item, state=state) > self.config.inventory_dust_shares + 1e-9
 
     @staticmethod
     def _market_in_cooldown(market_state: RewardMarketState, now: datetime) -> bool:
@@ -1330,6 +1418,7 @@ class RewardProfitSessionEngine:
         state.cycle_index += 1
         state.updated_ts = now.isoformat()
         self.evidence_market_intel = self._load_evidence_market_intel()
+        self._live_inventory_balance_cache = {}
         self._sync_account_order_summary(state)
 
         if scanned_candidates is None:
@@ -1479,29 +1568,24 @@ class RewardProfitSessionEngine:
 
         ordered = sorted(
             candidates,
-            key=lambda item: (
-                -item.total_score,
-                -item.profit_score,
-                -item.fill_probability_score,
-                item.true_break_even_hours,
-                item.capital_basis_usdc,
-                item.market_slug,
-            ),
+            key=_reward_selection_sort_key,
         )
         for candidate in ordered:
-            if len(selected) >= self.config.max_markets:
+            inventory_shares = self._candidate_live_inventory_shares(candidate, state=state)
+            has_auto_inventory = inventory_shares > self.config.inventory_dust_shares + 1e-9
+            if len(selected) >= self.config.max_markets and not has_auto_inventory:
                 selection_reasons["SELECT_MAX_MARKETS"] = selection_reasons.get("SELECT_MAX_MARKETS", 0) + 1
                 self._record_selection_blocker(blocked_candidates, candidate, "SELECT_MAX_MARKETS")
                 continue
-            if candidate.capital_basis_usdc > self.config.per_market_cap_usdc:
+            if not has_auto_inventory and candidate.capital_basis_usdc > self.config.per_market_cap_usdc:
                 selection_reasons["SELECT_PER_MARKET_CAP"] = selection_reasons.get("SELECT_PER_MARKET_CAP", 0) + 1
                 self._record_selection_blocker(blocked_candidates, candidate, "SELECT_PER_MARKET_CAP")
                 continue
-            if total_capital + candidate.capital_basis_usdc > self.config.capital_limit_usdc + 1e-9:
+            if not has_auto_inventory and total_capital + candidate.capital_basis_usdc > self.config.capital_limit_usdc + 1e-9:
                 selection_reasons["SELECT_CAPITAL_LIMIT"] = selection_reasons.get("SELECT_CAPITAL_LIMIT", 0) + 1
                 self._record_selection_blocker(blocked_candidates, candidate, "SELECT_CAPITAL_LIMIT")
                 continue
-            if event_counts.get(candidate.event_slug, 0) >= self.config.max_markets_per_event:
+            if not has_auto_inventory and event_counts.get(candidate.event_slug, 0) >= self.config.max_markets_per_event:
                 selection_reasons["SELECT_EVENT_LIMIT"] = selection_reasons.get("SELECT_EVENT_LIMIT", 0) + 1
                 self._record_selection_blocker(blocked_candidates, candidate, "SELECT_EVENT_LIMIT")
                 continue
@@ -1519,19 +1603,35 @@ class RewardProfitSessionEngine:
             else:
                 add_market_state = False
 
+            should_pre_sync_inventory = (
+                self.config.live
+                and (
+                    has_auto_inventory
+                    or self.config.inventory_manager_only
+                )
+            )
+            if should_pre_sync_inventory:
+                self._sync_live_market_state(market_state, candidate, now)
             prepared = self._prepare_candidate_for_execution(state, market_state, candidate)
             if self._is_zero_size_selection_reject(prepared):
                 selection_reasons["SELECT_ZERO_SIZE_REJECT"] = selection_reasons.get("SELECT_ZERO_SIZE_REJECT", 0) + 1
                 self._record_selection_blocker(blocked_candidates, prepared, "SELECT_ZERO_SIZE_REJECT")
-                if not add_market_state:
+                keep_rejected_diagnostic = (
+                    self.config.live
+                    and prepared.risk_reject_reason != "RISK_CAP_BELOW_REWARD_MIN_SIZE"
+                )
+                if keep_rejected_diagnostic:
+                    if add_market_state:
+                        state.markets[candidate.market_slug] = market_state
                     self._record_candidate_decision(market_state, prepared)
                 continue
 
             if add_market_state:
                 state.markets[candidate.market_slug] = market_state
             selected.append(prepared)
-            total_capital += candidate.capital_basis_usdc
-            event_counts[candidate.event_slug] = event_counts.get(candidate.event_slug, 0) + 1
+            if not has_auto_inventory:
+                total_capital += candidate.capital_basis_usdc
+                event_counts[candidate.event_slug] = event_counts.get(candidate.event_slug, 0) + 1
 
         if selected:
             selection_reasons["SELECTED"] = len(selected)
@@ -1560,6 +1660,8 @@ class RewardProfitSessionEngine:
                 "total_score": round(float(candidate.total_score), 6),
                 "profit_score": round(float(candidate.profit_score), 6),
                 "fill_probability_score": round(float(candidate.fill_probability_score), 6),
+                "fill_realism_score": round(float(candidate.fill_realism_score), 6),
+                "reward_first_score": round(float(candidate.reward_first_score), 6),
                 "expected_net_edge_per_hour": round(float(candidate.expected_net_edge_per_hour), 6),
                 "true_break_even_hours": round(float(candidate.true_break_even_hours), 6),
                 "risk_reject_reason": candidate.risk_reject_reason,
@@ -1580,7 +1682,9 @@ class RewardProfitSessionEngine:
     def _is_zero_size_selection_reject(candidate: RewardProfitCandidate) -> bool:
         if candidate.final_order_size > 1e-9:
             return False
-        return candidate.risk_reject_reason == "RISK_CAP_BELOW_REWARD_MIN_SIZE"
+        if candidate.risk_reject_reason == "RISK_CAP_BELOW_REWARD_MIN_SIZE":
+            return True
+        return candidate.action in {"SKIP", "HOLD"}
 
     @staticmethod
     def _record_candidate_decision(market_state: RewardMarketState, candidate: RewardProfitCandidate) -> None:
@@ -1615,6 +1719,10 @@ class RewardProfitSessionEngine:
         market_state.risk_reject_reason = candidate.risk_reject_reason
         market_state.scale_gate_status = candidate.scale_gate_status
         market_state.scale_gate_reason = candidate.scale_gate_reason
+        market_state.fill_realism_score = candidate.fill_realism_score
+        market_state.reward_first_score = candidate.reward_first_score
+        market_state.reward_zone_live_seconds = round(market_state.hours_in_reward_zone * 3600.0, 3)
+        market_state.why_not_live = list(candidate.why_not_live)
 
     def _append_edge_observations(
         self,
@@ -1705,6 +1813,15 @@ class RewardProfitSessionEngine:
                     "strategy_id": market.get("strategy_id"),
                     "decision_trace": list(market.get("decision_trace") or []),
                     "risk_reject_reason": market.get("risk_reject_reason"),
+                    "inventory_exit_action": market.get("inventory_exit_action"),
+                    "inventory_exit_reason": market.get("inventory_exit_reason"),
+                    "stuck_inventory_status": market.get("stuck_inventory_status"),
+                    "reward_hold_ev_usdc": market.get("reward_hold_ev_usdc"),
+                    "protected_ask_price": market.get("protected_ask_price"),
+                    "fill_realism_score": market.get("fill_realism_score"),
+                    "reward_first_score": market.get("reward_first_score"),
+                    "reward_zone_live_seconds": market.get("reward_zone_live_seconds"),
+                    "why_not_live": list(market.get("why_not_live") or []),
                     "scale_gate_status": market.get("scale_gate_status"),
                     "scale_gate_reason": market.get("scale_gate_reason"),
                     "profit_gate_status": market.get("profit_gate_status"),
@@ -1864,6 +1981,8 @@ class RewardProfitSessionEngine:
             "filter_reason": filter_reason,
             "total_score": candidate.total_score,
             "profit_score": candidate.profit_score,
+            "fill_realism_score": candidate.fill_realism_score,
+            "reward_first_score": candidate.reward_first_score,
             "expected_net_edge_per_hour": candidate.expected_net_edge_per_hour,
             "reward_daily_rate": candidate.reward_daily_rate,
             "selected": candidate.market_slug in state.selected_market_slugs,
@@ -1878,6 +1997,13 @@ class RewardProfitSessionEngine:
             "open_ask_order_id": context.get("ask_order_id"),
             "live_open_buy_order_count": context.get("live_open_buy_order_count", 0),
             "live_open_sell_order_count": context.get("live_open_sell_order_count", 0),
+            "inventory_exit_action": context.get("inventory_exit_action"),
+            "inventory_exit_reason": context.get("inventory_exit_reason"),
+            "stuck_inventory_status": context.get("stuck_inventory_status"),
+            "reward_hold_ev_usdc": context.get("reward_hold_ev_usdc"),
+            "protected_ask_price": context.get("protected_ask_price"),
+            "reward_zone_live_seconds": context.get("reward_zone_live_seconds"),
+            "why_not_live": list(context.get("why_not_live") or []),
             "decision_trace": list(candidate.decision_trace or []),
         }
 
@@ -1946,6 +2072,13 @@ class RewardProfitSessionEngine:
             "ask_order_id": market_state.ask_order_id,
             "live_open_buy_order_count": market_state.live_open_buy_order_count,
             "live_open_sell_order_count": market_state.live_open_sell_order_count,
+            "inventory_exit_action": market_state.inventory_exit_action,
+            "inventory_exit_reason": market_state.inventory_exit_reason,
+            "stuck_inventory_status": market_state.stuck_inventory_status,
+            "reward_hold_ev_usdc": market_state.reward_hold_ev_usdc,
+            "protected_ask_price": market_state.protected_ask_price,
+            "reward_zone_live_seconds": market_state.reward_zone_live_seconds,
+            "why_not_live": list(market_state.why_not_live),
         }
 
     def _advance_market_state(
@@ -1998,6 +2131,10 @@ class RewardProfitSessionEngine:
         market_state.risk_reject_reason = candidate.risk_reject_reason
         market_state.scale_gate_status = candidate.scale_gate_status
         market_state.scale_gate_reason = candidate.scale_gate_reason
+        market_state.fill_realism_score = candidate.fill_realism_score
+        market_state.reward_first_score = candidate.reward_first_score
+        market_state.reward_zone_live_seconds = round(market_state.hours_in_reward_zone * 3600.0, 3)
+        market_state.why_not_live = list(candidate.why_not_live)
 
         self._refresh_live_order_marks(market_state, now)
         self._enforce_live_synced_inventory_floor(market_state)
@@ -2073,6 +2210,7 @@ class RewardProfitSessionEngine:
 
         if market_state.status == RewardMarketStatus.QUOTING.value:
             market_state.hours_in_reward_zone = round(market_state.hours_in_reward_zone + dt_hours, 6)
+            market_state.reward_zone_live_seconds = round(market_state.hours_in_reward_zone * 3600.0, 3)
             market_state.reward_accrued_estimate_usdc = round(
                 market_state.reward_accrued_estimate_usdc + candidate.expected_reward_per_hour_lower * dt_hours,
                 6,
@@ -2180,7 +2318,9 @@ class RewardProfitSessionEngine:
         )
         has_balance = balance > dust + 1e-9
         has_inventory = sellable > 0.0
-        balanced_inventory = self.config.inventory_policy == "balanced"
+        policy = str(self.config.inventory_policy or "sell_only").lower()
+        balanced_inventory = policy == "balanced"
+        auto_inventory = policy == "auto"
         if has_balance:
             previous_inventory_value = market_state.inventory_shares * market_state.avg_inventory_cost
             external_delta = max(0.0, balance - market_state.inventory_shares)
@@ -2191,19 +2331,37 @@ class RewardProfitSessionEngine:
                 market_state.avg_inventory_cost = round(total_cost / balance, 6)
             market_state.inventory_shares = round(balance, 6)
             if has_inventory:
-                market_state.inventory_mode = "balanced" if balanced_inventory else "sell_only"
-                market_state.buy_block_reason = None if balanced_inventory else "INVENTORY_PRESENT"
-                market_state.allow_bid_with_inventory = balanced_inventory
+                if auto_inventory:
+                    market_state.inventory_mode = "auto"
+                    market_state.buy_block_reason = None
+                    market_state.allow_bid_with_inventory = True
+                else:
+                    market_state.inventory_mode = "balanced" if balanced_inventory else "sell_only"
+                    market_state.buy_block_reason = None if balanced_inventory else "INVENTORY_PRESENT"
+                    market_state.allow_bid_with_inventory = balanced_inventory
             else:
-                market_state.inventory_mode = "normal"
-                market_state.buy_block_reason = None
-                market_state.allow_bid_with_inventory = True
+                if auto_inventory:
+                    market_state.inventory_mode = "auto"
+                    market_state.inventory_exit_action = "DUST_HOLD"
+                    market_state.inventory_exit_reason = "BELOW_MIN_LIVE_ORDER_SIZE"
+                    market_state.stuck_inventory_status = "DUST_HOLD"
+                    market_state.buy_block_reason = "DUST_INVENTORY"
+                    market_state.allow_bid_with_inventory = False
+                else:
+                    market_state.inventory_mode = "normal"
+                    market_state.buy_block_reason = None
+                    market_state.allow_bid_with_inventory = True
                 market_state.sell_cover_size = 0.0
         else:
             market_state.inventory_shares = 0.0
             market_state.inventory_mode = "normal"
             market_state.buy_block_reason = None
             market_state.allow_bid_with_inventory = False
+            market_state.inventory_exit_action = "NONE"
+            market_state.inventory_exit_reason = None
+            market_state.stuck_inventory_status = "NONE"
+            market_state.reward_hold_ev_usdc = 0.0
+            market_state.protected_ask_price = None
 
         buys = [order for order in open_orders if order.side == "BUY" and order.size_remaining > 1e-9]
         sells = [order for order in open_orders if order.side == "SELL" and order.size_remaining > 1e-9]
@@ -2227,7 +2385,7 @@ class RewardProfitSessionEngine:
 
         if has_inventory:
             limit_reached = self._inventory_limit_reached(market_state, candidate)
-            if not balanced_inventory or limit_reached:
+            if (not balanced_inventory and not auto_inventory) or limit_reached:
                 for order in buys:
                     if self.order_manager.cancel_order(order.order_id):
                         market_state.cancel_count += 1
@@ -2261,7 +2419,7 @@ class RewardProfitSessionEngine:
             else:
                 market_state.ask_order_id = None
                 market_state.sell_cover_size = round(sellable, 6)
-            if not balanced_inventory or limit_reached:
+            if (not balanced_inventory and not auto_inventory) or limit_reached:
                 return
 
         if market_state.inventory_shares <= dust + 1e-9:
@@ -2296,6 +2454,11 @@ class RewardProfitSessionEngine:
         market_state.buy_block_reason = None
         market_state.allow_bid_with_inventory = False
         market_state.sell_cover_size = 0.0
+        market_state.inventory_exit_action = "NONE"
+        market_state.inventory_exit_reason = None
+        market_state.stuck_inventory_status = "NONE"
+        market_state.reward_hold_ev_usdc = 0.0
+        market_state.protected_ask_price = None
         market_state.ask_order_id = None
         market_state.ask_order_created_ts = None
         market_state.ask_order_price = None
@@ -2465,6 +2628,21 @@ class RewardProfitSessionEngine:
             min_order_size_shares=market_state.min_order_size_shares,
         )
         has_tradeable_inventory = sellable_inventory > 0.0
+        if (
+            self.config.live
+            and str(self.config.inventory_policy or "").lower() == "auto"
+            and market_state.inventory_exit_action in {"DUST_HOLD", "STRANDED_MONITOR"}
+        ):
+            market_state.allow_bid_with_inventory = False
+            if market_state.bid_order_id:
+                self._cancel_side_order(
+                    market_state,
+                    "bid",
+                    market_state.inventory_exit_action,
+                    count_requote=False,
+                )
+                market_state.canceled_buy_count += 1
+            return None, market_state.ask_order_id if has_tradeable_inventory else None
         if self.config.live and (self.config.disable_new_buys or self.config.inventory_manager_only):
             market_state.allow_bid_with_inventory = False
             market_state.buy_block_reason = (
@@ -2664,6 +2842,145 @@ class RewardProfitSessionEngine:
             stale_order_penalty_per_hour=round(0.0005 * max(0, int(market_state.no_fill_requote_count)), 6),
         )
 
+    def _protected_exit_price(
+        self,
+        market_state: RewardMarketState,
+        candidate: RewardProfitCandidate,
+        sellable_inventory: float,
+    ) -> float:
+        tick = _tick_size_value(candidate.tick_size)
+        avg_cost = float(market_state.avg_inventory_cost or candidate.quote_bid or candidate.best_bid)
+        max_loss = max(0.0, float(self.config.max_drawdown_per_market or 0.0))
+        loss_floor = avg_cost
+        if sellable_inventory > 0.0 and max_loss > 0.0:
+            loss_floor = max(0.0, avg_cost - (max_loss / sellable_inventory))
+        floor_price = max(float(candidate.best_bid) + tick, loss_floor)
+        target_price = max(float(candidate.quote_ask or 0.0), floor_price)
+        return round(_clamp(target_price, tick, 1.0), 6)
+
+    def _auto_inventory_exit_decision(
+        self,
+        state: RewardProfitSessionState,
+        market_state: RewardMarketState,
+        candidate: RewardProfitCandidate,
+        *,
+        raw_inventory_shares: float,
+        sellable_inventory: float,
+        inventory_usdc: float,
+        target_usdc: float,
+    ) -> dict[str, Any]:
+        protected_price = self._protected_exit_price(market_state, candidate, sellable_inventory)
+        horizon = max(0.0, float(self.config.projection_horizon_hours or self.config.kelly_horizon_hours or 1.0))
+        reward_hold_ev = round(
+            max(0.0, candidate.expected_reward_per_hour_lower - candidate.expected_drawdown_cost_per_hour) * horizon,
+            6,
+        )
+        why_not_live: list[str] = []
+        if not self.config.live:
+            why_not_live.append("DRY_RUN_MODE")
+        if candidate.profit_gate_status in {"SOFT_FAIL", "HARD_FAIL"}:
+            why_not_live.append(f"PROFIT_GATE_{candidate.profit_gate_status}")
+        if state.account_order_sync_error:
+            why_not_live.append("ACCOUNT_SYNC_ERROR")
+        if market_state.order_reject_count > 0:
+            why_not_live.append("ORDER_REJECT_HISTORY")
+
+        dust = max(0.0, float(self.config.inventory_dust_shares))
+        if raw_inventory_shares <= dust + 1e-9:
+            return {
+                "exit_action": "NONE",
+                "exit_reason": "NO_INVENTORY",
+                "stuck_status": "NONE",
+                "allow_bid": False,
+                "buy_block_reason": None,
+                "protected_ask_price": None,
+                "reward_hold_ev_usdc": 0.0,
+                "why_not_live": why_not_live,
+            }
+        if sellable_inventory <= 0.0:
+            why_not_live.append("DUST_INVENTORY")
+            return {
+                "exit_action": "DUST_HOLD",
+                "exit_reason": "BELOW_MIN_LIVE_ORDER_SIZE",
+                "stuck_status": "DUST_HOLD",
+                "allow_bid": False,
+                "buy_block_reason": "DUST_INVENTORY",
+                "protected_ask_price": None,
+                "reward_hold_ev_usdc": reward_hold_ev,
+                "why_not_live": why_not_live,
+            }
+        if candidate.best_bid <= 0.0 or candidate.best_ask <= candidate.best_bid:
+            why_not_live.append("NO_VALID_EXIT_BOOK")
+            return {
+                "exit_action": "STRANDED_MONITOR",
+                "exit_reason": "NO_VALID_BID_OR_PAUSED_BOOK",
+                "stuck_status": "STRANDED_MONITOR",
+                "allow_bid": False,
+                "buy_block_reason": "STRANDED_INVENTORY",
+                "protected_ask_price": None,
+                "reward_hold_ev_usdc": reward_hold_ev,
+                "why_not_live": why_not_live,
+            }
+
+        limit_reached = self._inventory_limit_reached(market_state, candidate)
+        if limit_reached:
+            why_not_live.append("INVENTORY_LIMIT")
+            return {
+                "exit_action": "PROTECTED_SELL",
+                "exit_reason": "INVENTORY_LIMIT",
+                "stuck_status": "NONE",
+                "allow_bid": False,
+                "buy_block_reason": "INVENTORY_LIMIT",
+                "protected_ask_price": protected_price,
+                "reward_hold_ev_usdc": reward_hold_ev,
+                "why_not_live": why_not_live,
+            }
+
+        ask_stale = (
+            market_state.ask_order_id is not None
+            and float(self.config.live_order_max_age_sec or 0.0) > 0.0
+            and market_state.ask_order_age_sec >= float(self.config.live_order_max_age_sec)
+        )
+        if ask_stale:
+            return {
+                "exit_action": "REPRICE_SELL",
+                "exit_reason": "STALE_SELL_ORDER",
+                "stuck_status": "NONE",
+                "allow_bid": False,
+                "buy_block_reason": "REPRICE_SELL",
+                "protected_ask_price": protected_price,
+                "reward_hold_ev_usdc": reward_hold_ev,
+                "why_not_live": why_not_live,
+            }
+
+        min_coverage = max(0.0, float(self.config.min_inventory_risk_coverage_ratio or 0.0))
+        coverage_ok = min_coverage <= 0.0 or market_state.inventory_risk_coverage_ratio >= min_coverage
+        reward_covers_risk = reward_hold_ev > 0.0 and candidate.reward_minus_drawdown_per_hour > 0.0 and coverage_ok
+        allow_bid = bool(reward_covers_risk and target_usdc > 0.0 and inventory_usdc < target_usdc - 1e-9)
+        if reward_covers_risk:
+            return {
+                "exit_action": "HOLD_FOR_REWARD",
+                "exit_reason": "REWARD_COVERS_INVENTORY_RISK",
+                "stuck_status": "NONE",
+                "allow_bid": allow_bid,
+                "buy_block_reason": None if allow_bid else "AUTO_REWARD_HOLD_NO_ADD",
+                "protected_ask_price": protected_price,
+                "reward_hold_ev_usdc": reward_hold_ev,
+                "why_not_live": why_not_live,
+            }
+
+        why_not_live.append("REWARD_DOES_NOT_COVER_INVENTORY_RISK")
+        return {
+            "exit_action": "PROTECTED_SELL",
+            "exit_reason": "REWARD_DOES_NOT_COVER_INVENTORY_RISK",
+            "stuck_status": "NONE",
+            "allow_bid": False,
+            "buy_block_reason": "AUTO_PROTECTED_SELL",
+            "protected_ask_price": protected_price,
+            "reward_hold_ev_usdc": reward_hold_ev,
+            "why_not_live": why_not_live,
+        }
+
     def _candidate_with_optimal_action(
         self,
         state: RewardProfitSessionState,
@@ -2712,9 +3029,41 @@ class RewardProfitSessionEngine:
         action = "PLACE_BID"
         buy_block_reason = None
         allow_bid = inventory_shares <= dust
-        if inventory_shares > dust:
-            allow_bid = bool(self.config.inventory_policy == "balanced" and inventory_usdc < target_usdc - 1e-9)
-            action = "BALANCED_QUOTE" if allow_bid else "PLACE_ASK"
+        auto_decision: dict[str, Any] | None = None
+        if str(self.config.inventory_policy or "").lower() == "auto" and raw_inventory_shares > dust:
+            auto_decision = self._auto_inventory_exit_decision(
+                state,
+                market_state,
+                candidate,
+                raw_inventory_shares=raw_inventory_shares,
+                sellable_inventory=sellable_inventory,
+                inventory_usdc=inventory_usdc,
+                target_usdc=target_usdc,
+            )
+            market_state.inventory_exit_action = str(auto_decision["exit_action"])
+            market_state.inventory_exit_reason = str(auto_decision["exit_reason"])
+            market_state.stuck_inventory_status = str(auto_decision["stuck_status"])
+            market_state.reward_hold_ev_usdc = float(auto_decision["reward_hold_ev_usdc"])
+            market_state.protected_ask_price = auto_decision["protected_ask_price"]
+            market_state.why_not_live = list(auto_decision.get("why_not_live") or [])
+            if auto_decision["protected_ask_price"] is not None:
+                candidate = replace(candidate, quote_ask=float(auto_decision["protected_ask_price"]))
+        if raw_inventory_shares > dust:
+            if auto_decision is not None:
+                allow_bid = bool(auto_decision["allow_bid"])
+                buy_block_reason = auto_decision["buy_block_reason"]
+                exit_action = str(auto_decision["exit_action"])
+                if exit_action in {"DUST_HOLD", "STRANDED_MONITOR"}:
+                    action = "HOLD"
+                elif exit_action == "HOLD_FOR_REWARD":
+                    action = "BALANCED_QUOTE" if allow_bid else "PLACE_ASK"
+                elif exit_action == "REPRICE_SELL":
+                    action = "PLACE_ASK"
+                else:
+                    action = "PLACE_ASK"
+            else:
+                allow_bid = bool(self.config.inventory_policy == "balanced" and inventory_usdc < target_usdc - 1e-9)
+                action = "BALANCED_QUOTE" if allow_bid else "PLACE_ASK"
         if max_market_usdc > 0.0 and inventory_usdc >= max_market_usdc - 1e-9:
             action = "REDUCE_ONLY_SELL"
             allow_bid = False
@@ -2789,11 +3138,14 @@ class RewardProfitSessionEngine:
         decision_trace.append(f"action={action}")
         decision_trace.append(f"final_order_size={final_size:.6f}")
 
-        market_state.allow_bid_with_inventory = allow_bid and inventory_shares > dust
+        market_state.allow_bid_with_inventory = allow_bid and raw_inventory_shares > dust
         if not allow_bid:
             market_state.buy_block_reason = buy_block_reason
-        if inventory_shares > dust:
-            market_state.inventory_mode = "balanced" if allow_bid else "sell_only"
+        if raw_inventory_shares > dust:
+            if auto_decision is not None:
+                market_state.inventory_mode = "auto"
+            else:
+                market_state.inventory_mode = "balanced" if allow_bid else "sell_only"
         elif action == "SKIP":
             market_state.inventory_mode = "normal"
 
@@ -2831,6 +3183,7 @@ class RewardProfitSessionEngine:
             risk_reject_reason=buy_block_reason,
             scale_gate_status=scale_gate_status,
             scale_gate_reason=scale_gate_reason,
+            why_not_live=list(market_state.why_not_live),
         )
 
     def _profit_gate_status(
@@ -3055,6 +3408,10 @@ class RewardProfitSessionEngine:
                     reason = "CANCEL_ASK_NO_INVENTORY"
                 else:
                     reason = "STALE_UNFILLED_ASK" if stale else "REQUOTE_ASK_PRICE_MOVED"
+                    if str(self.config.inventory_policy or "").lower() == "auto":
+                        market_state.inventory_exit_action = "REPRICE_SELL"
+                        market_state.inventory_exit_reason = reason
+                        market_state.stuck_inventory_status = "NONE"
                 self._cancel_side_order(market_state, "ask", reason)
 
     def _refresh_live_order_marks(self, market_state: RewardMarketState, now: datetime) -> None:
@@ -3720,6 +4077,19 @@ class RewardProfitSessionEngine:
                 "protected_sell_order_id": market.protected_sell_order_id,
                 "canceled_buy_count": market.canceled_buy_count,
                 "preserved_sell_count": market.preserved_sell_count,
+                "inventory_exit_action": market.inventory_exit_action,
+                "inventory_exit_reason": market.inventory_exit_reason,
+                "stuck_inventory_status": market.stuck_inventory_status,
+                "reward_hold_ev_usdc": round(market.reward_hold_ev_usdc, 6),
+                "protected_ask_price": (
+                    round(float(market.protected_ask_price), 6)
+                    if market.protected_ask_price is not None
+                    else None
+                ),
+                "fill_realism_score": round(market.fill_realism_score, 6),
+                "reward_first_score": round(market.reward_first_score, 6),
+                "reward_zone_live_seconds": round(market.reward_zone_live_seconds, 3),
+                "why_not_live": list(market.why_not_live),
             }
             market_rows.append(market_row)
 
@@ -3740,7 +4110,8 @@ class RewardProfitSessionEngine:
         selected_market_rows = [
             state.markets[slug] for slug in state.selected_market_slugs if slug in state.markets
         ]
-        top_market = max(selected_market_rows, key=lambda market: market.action_score, default=None)
+        reportable_market_rows = selected_market_rows or list(state.markets.values())
+        top_market = max(reportable_market_rows, key=lambda market: market.action_score, default=None)
         if not inventory_modes:
             summary_inventory_mode = "normal"
         elif len(inventory_modes) == 1:

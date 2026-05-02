@@ -452,6 +452,7 @@ class EvidenceResearchPipelineTests(unittest.TestCase):
         self.assertEqual(command[command.index("--min-reward-minus-drawdown-per-hour") + 1], "0.0")
         self.assertEqual(command[command.index("--min-projected-net-at-horizon-usdc") + 1], "0.0")
         self.assertEqual(command[command.index("--max-true-break-even-hours") + 1], "2.5")
+        self.assertEqual(command[command.index("--inventory-policy") + 1], "auto")
 
     def test_scan_command_allows_single_selected_market_override(self) -> None:
         args = argparse.Namespace(
