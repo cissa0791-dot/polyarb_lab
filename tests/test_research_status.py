@@ -133,6 +133,53 @@ class ResearchStatusTests(unittest.TestCase):
             self.assertEqual(status["current_run"]["run_id"], "main-run")
             self.assertEqual(status["current_run"]["cycle_index"], 11)
 
+    def test_completed_main_run_does_not_borrow_parallel_active_eta(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            out_dir = root / "reports"
+            parallel_out = root / "reports_parallel" / "sweep"
+            main_run = out_dir / "research_runs" / "main-complete"
+            parallel_run = parallel_out / "research_runs" / "parallel-active"
+            proc_root = root / "proc"
+            proc_parallel = proc_root / "200"
+            main_run.mkdir(parents=True)
+            parallel_run.mkdir(parents=True)
+            proc_parallel.mkdir(parents=True)
+            (main_run / "research_auto_trade_pnl_latest.json").write_text(
+                json.dumps({"summary": {"cycle_index": 120}}),
+                encoding="utf-8",
+            )
+            (main_run / "research_pipeline_summary_latest.json").write_text(
+                json.dumps({"scan_cycles_requested": 120, "scan_interval_sec": 20}),
+                encoding="utf-8",
+            )
+            (parallel_run / "research_auto_trade_pnl_latest.json").write_text(
+                json.dumps({"summary": {"cycle_index": 3}}),
+                encoding="utf-8",
+            )
+            parallel_argv = [
+                "python",
+                "scripts/run_evidence_research_pipeline.py",
+                "--run-id",
+                "parallel-active",
+                "--out-dir",
+                str(parallel_out),
+                "--cycles",
+                "36",
+                "--interval-sec",
+                "10",
+            ]
+            (proc_parallel / "cmdline").write_bytes(
+                b"\0".join(part.encode("utf-8") for part in parallel_argv) + b"\0"
+            )
+
+            current = build_status(out_dir, proc_root)["current_run"]
+
+            self.assertEqual(current["run_id"], "main-complete")
+            self.assertEqual(current["cycle_index"], 120)
+            self.assertNotIn("cycles_requested", current)
+            self.assertNotIn("progress_pct", current)
+
     def test_status_falls_back_to_latest_evidence_when_pnl_missing(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

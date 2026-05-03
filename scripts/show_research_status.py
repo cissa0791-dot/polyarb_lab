@@ -118,7 +118,7 @@ def build_status(out_dir: Path, proc_root: Path = Path("/proc")) -> dict[str, An
     }
     if run_dir:
         status["current_run"] = _run_dir_status(run_dir)
-        active_process = _active_process_for_run(run_dir.name, active)
+        active_process = _active_process_for_run(run_dir, active)
         if active_process:
             _add_active_eta(status["current_run"], active_process)
         _add_selection_pressure(status["current_run"])
@@ -127,11 +127,19 @@ def build_status(out_dir: Path, proc_root: Path = Path("/proc")) -> dict[str, An
     return status
 
 
-def _active_process_for_run(run_id: str, active: list[dict[str, Any]]) -> dict[str, Any] | None:
+def _active_process_for_run(run_dir: Path, active: list[dict[str, Any]]) -> dict[str, Any] | None:
+    run_id = run_dir.name
+    out_dir = run_dir.parents[1] if len(run_dir.parents) > 1 else run_dir.parent
     for process in active:
-        if str(process.get("run_id") or "") == run_id:
+        process_out = Path(str(process.get("out_dir") or out_dir))
+        if str(process.get("run_id") or "") == run_id and _same_path(process_out, out_dir):
             return process
-    return active[-1] if active else None
+    for process in active:
+        process_run_id = str(process.get("run_id") or "")
+        process_out = Path(str(process.get("out_dir") or out_dir))
+        if not process_run_id and _same_path(process_out, out_dir):
+            return process
+    return None
 
 
 def _add_active_eta(current: dict[str, Any], process: dict[str, Any]) -> None:
