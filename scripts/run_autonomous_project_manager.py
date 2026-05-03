@@ -279,7 +279,7 @@ def _live_health(live_pnl: dict[str, Any], *, max_live_risk_usdc: float) -> dict
     rate_limit_detected = _is_live_rate_limit_error(account_sync_error) or any(
         _is_live_rate_limit_error(error) for error in market_errors
     )
-    generated_ts = _parse_utc_ts(summary.get("generated_ts"))
+    generated_ts = _parse_utc_ts(summary.get("generated_ts") or live_pnl.get("generated_ts"))
     rate_limit_cooldown_until = (
         generated_ts + timedelta(minutes=LIVE_RATE_LIMIT_COOLDOWN_MINUTES)
         if generated_ts is not None and rate_limit_detected

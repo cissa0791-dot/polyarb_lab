@@ -169,6 +169,32 @@ class AutonomousProjectManagerTests(unittest.TestCase):
         self.assertNotEqual(decision["decision"], "PAUSE_LIVE")
         self.assertFalse(decision["inputs"]["live_health"]["rate_limit_cooldown_active"])
 
+    def test_old_live_rate_limit_uses_top_level_generated_ts(self) -> None:
+        old_ts = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
+        decision = build_autonomous_decision(
+            research_summary={
+                "scale_recommendation": "ALLOW_CANARY_ONLY",
+                "live_canary_eligible_count": 1,
+                "dry_run_focus_count": 0,
+                "live_ready_blockers": [],
+            },
+            live_pnl={
+                "generated_ts": old_ts,
+                "summary": {
+                    "mode": "LIVE",
+                    "verified_net_after_reward_and_cost_usdc": 0.05,
+                    "account_inventory_usdc": 0.0,
+                    "account_open_buy_usdc": 0.0,
+                    "account_order_sync_error": "Cloudflare error code: 1015 You are being rate limited",
+                },
+                "markets": [],
+            },
+        )
+
+        self.assertNotEqual(decision["decision"], "PAUSE_LIVE")
+        self.assertFalse(decision["inputs"]["live_health"]["rate_limit_cooldown_active"])
+        self.assertIsNotNone(decision["inputs"]["live_health"]["rate_limit_cooldown_until_ts"])
+
     def test_latest_live_probe_pnl_picks_newest_probe_report(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
