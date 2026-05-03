@@ -58,6 +58,37 @@ class LiveClientError(Exception):
     """Raised when a live CLOB write operation fails or is called incorrectly."""
 
 
+def clean_live_error_message(value: Any, *, max_len: int = 500) -> str:
+    """Return a compact live API error message without huge HTML bodies."""
+    text = str(value or "")
+    if not text:
+        return ""
+
+    lower = text.lower()
+    labels: list[str] = []
+    if "cloudflare" in lower or "error code: 1015" in lower or " 1015" in lower:
+        labels.append("Cloudflare rate limit")
+    if "status=429" in lower or "http 429" in lower or "status code 429" in lower or "too many requests" in lower:
+        labels.append("HTTP 429")
+
+    # py_clob_client_v2 can include a full Cloudflare HTML page in exception
+    # text. Keep the useful prefix and discard the body.
+    cut_at = len(text)
+    for marker in ("<!doctype", "<html", "<body", "\n<html"):
+        idx = lower.find(marker)
+        if idx >= 0:
+            cut_at = min(cut_at, idx)
+    text = text[:cut_at]
+    text = " ".join(text.replace("\r", " ").replace("\n", " ").split())
+
+    prefix = " / ".join(dict.fromkeys(labels))
+    if prefix and prefix.lower() not in text.lower():
+        text = f"{prefix}: {text}" if text else prefix
+    if len(text) > max_len:
+        text = text[: max_len - 3].rstrip() + "..."
+    return text
+
+
 # ---------------------------------------------------------------------------
 # Normalised result types
 # ---------------------------------------------------------------------------
@@ -249,12 +280,12 @@ class LiveWriteClient:
                 except Exception as retry_exc:
                     raise LiveClientError(
                         f"submit_order failed for token={token_id!r} side={side} "
-                        f"price={price} size={size}: {retry_exc}"
+                        f"price={price} size={size}: {clean_live_error_message(retry_exc)}"
                     ) from retry_exc
             else:
                 raise LiveClientError(
                     f"submit_order failed for token={token_id!r} side={side} "
-                    f"price={price} size={size}: {exc}"
+                    f"price={price} size={size}: {clean_live_error_message(exc)}"
                 ) from exc
 
         raw_avg = raw.get("avg_price") or raw.get("avgPrice")
@@ -316,7 +347,7 @@ class LiveWriteClient:
             return True
         except Exception as exc:
             raise LiveClientError(
-                f"cancel_order failed for order_id={order_id!r}: {exc}"
+                f"cancel_order failed for order_id={order_id!r}: {clean_live_error_message(exc)}"
             ) from exc
 
     def cancel_market_orders(self, token_id: str) -> Any:
@@ -330,7 +361,7 @@ class LiveWriteClient:
                 return self._client.cancel_market_orders(asset_id=token_id)
         except Exception as exc:
             raise LiveClientError(
-                f"cancel_market_orders failed for token_id={token_id!r}: {exc}"
+                f"cancel_market_orders failed for token_id={token_id!r}: {clean_live_error_message(exc)}"
             ) from exc
 
     def get_token_balance(self, token_id: str) -> float:
@@ -343,7 +374,7 @@ class LiveWriteClient:
             )
         except Exception as exc:
             raise LiveClientError(
-                f"get_token_balance failed for token_id={token_id!r}: {exc}"
+                f"get_token_balance failed for token_id={token_id!r}: {clean_live_error_message(exc)}"
             ) from exc
 
         raw_balance = (
@@ -367,7 +398,7 @@ class LiveWriteClient:
                 raw = self._client.get_orders(params)
         except Exception as exc:
             raise LiveClientError(
-                f"get_open_orders failed for token_id={token_id!r}: {exc}"
+                f"get_open_orders failed for token_id={token_id!r}: {clean_live_error_message(exc)}"
             ) from exc
 
         return self._normalise_open_orders(raw, fallback_token_id=token_id)
@@ -396,7 +427,7 @@ class LiveWriteClient:
                     continue
                 except Exception as exc:
                     raise LiveClientError(
-                        f"get_all_open_orders failed via {method_name}: {exc}"
+                        f"get_all_open_orders failed via {method_name}: {clean_live_error_message(exc)}"
                     ) from exc
 
         joined = "; ".join(errors) if errors else "no get_open_orders/get_orders method"
@@ -476,7 +507,7 @@ class LiveWriteClient:
             raw = self._client.get_order(order_id)
         except Exception as exc:
             raise LiveClientError(
-                f"get_order_status failed for order_id={order_id!r}: {exc}"
+                f"get_order_status failed for order_id={order_id!r}: {clean_live_error_message(exc)}"
             ) from exc
 
         try:

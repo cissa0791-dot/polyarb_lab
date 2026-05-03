@@ -155,7 +155,10 @@ class _RateLimitOrderManager(RewardOrderManager):
         super().__init__(live=True)
 
     def get_all_open_orders(self):
-        raise RuntimeError("Cloudflare error code: 1015 You are being rate limited")
+        raise RuntimeError(
+            "Cloudflare error code: 1015 You are being rate limited "
+            "<!doctype html><html><body>" + ("x" * 5000) + "</body></html>"
+        )
 
 
 def _candidate(
@@ -402,6 +405,8 @@ class RewardProfitSessionEngineTests(unittest.TestCase):
             self.assertEqual(state.halt_reason, "CLOB_RATE_LIMIT")
             self.assertEqual(state.selected_market_slugs, [])
             self.assertEqual(state.last_scan_diagnostics["live_api_guard"], "CLOB_RATE_LIMIT")
+            self.assertNotIn("<html", state.account_order_sync_error or "")
+            self.assertLess(len(state.account_order_sync_error or ""), 700)
 
     def test_reward_actual_and_estimate_are_tracked_separately(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

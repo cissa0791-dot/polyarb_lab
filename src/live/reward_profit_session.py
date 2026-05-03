@@ -12,7 +12,13 @@ from src.ingest.gamma import fetch_events, fetch_markets
 from src.intelligence.market_intelligence import build_event_market_registry
 from src.live.auth import load_live_credentials
 from src.live.broker import LiveBroker
-from src.live.client import LiveClientError, LiveOpenOrder, LiveOrderStatus, LiveWriteClient
+from src.live.client import (
+    LiveClientError,
+    LiveOpenOrder,
+    LiveOrderStatus,
+    LiveWriteClient,
+    clean_live_error_message,
+)
 from src.live.rewards import RewardClient, RewardClientError
 from src.scanner.arb_scanner import scan_arb_opportunities
 
@@ -483,7 +489,7 @@ class RewardOrderManager:
             )
             bid_report = self.broker.submit_limit_order(bid_intent)
             if bid_report.metadata.get("error"):
-                error = str(bid_report.metadata["error"])
+                error = clean_live_error_message(bid_report.metadata["error"])
                 market.last_order_error = error
                 print(f"[BROKER] bid REJECTED for {candidate.market_slug}: {error}", flush=True)
                 return None, ask_order_id
@@ -502,7 +508,7 @@ class RewardOrderManager:
             )
             ask_report = self.broker.submit_limit_order(ask_intent)
             if ask_report.metadata.get("error"):
-                error = str(ask_report.metadata["error"])
+                error = clean_live_error_message(ask_report.metadata["error"])
                 market.last_order_error = error
                 print(f"[BROKER] ask REJECTED for {candidate.market_slug}: {error}", flush=True)
                 return bid_order_id, None
@@ -2358,7 +2364,7 @@ class RewardProfitSessionEngine:
             balance = self.order_manager.get_token_balance(candidate.token_id)
             open_orders = self.order_manager.get_open_orders(candidate.token_id)
         except Exception as exc:
-            market_state.last_order_error = f"live sync failed: {exc}"
+            market_state.last_order_error = f"live sync failed: {clean_live_error_message(exc)}"
             return
 
         market_state.live_sync_ts = now.isoformat()
@@ -2557,7 +2563,9 @@ class RewardProfitSessionEngine:
         try:
             open_orders = self.order_manager.get_all_open_orders()
         except Exception as exc:
-            state.account_order_sync_error = f"account open order sync failed: {exc}"
+            state.account_order_sync_error = (
+                f"account open order sync failed: {clean_live_error_message(exc)}"
+            )
             state.last_scan_diagnostics["account_order_sync_error"] = state.account_order_sync_error
             if _is_live_rate_limit_error(state.account_order_sync_error):
                 state.halted = True
@@ -3503,7 +3511,7 @@ class RewardProfitSessionEngine:
         try:
             return self.order_manager.get_order_status(order_id)
         except Exception as exc:
-            market_state.last_order_error = str(exc)
+            market_state.last_order_error = clean_live_error_message(exc)
             return None
 
     def _apply_live_order_status(
@@ -3872,7 +3880,9 @@ class RewardProfitSessionEngine:
             summary = self.reward_client.get_rewards_summary()
         except RewardClientError as exc:
             state.actual_reward_source = "UNAVAILABLE"
-            state.actual_reward_unavailable_reason = f"REWARD_CLIENT_ERROR: {exc}"
+            state.actual_reward_unavailable_reason = (
+                f"REWARD_CLIENT_ERROR: {clean_live_error_message(exc)}"
+            )
             if self.config.live and _is_live_rate_limit_error(exc):
                 state.halted = True
                 state.halt_reason = "CLOB_RATE_LIMIT"

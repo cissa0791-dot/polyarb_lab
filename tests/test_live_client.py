@@ -16,6 +16,7 @@ from src.live.client import (
     LiveOrderResult,
     LiveOrderStatus,
     LiveWriteClient,
+    clean_live_error_message,
 )
 
 
@@ -438,6 +439,26 @@ class TestGetAllOpenOrdersLive(unittest.TestCase):
         self.assertAlmostEqual(orders[1].size_remaining, 20.0)
         self.assertEqual(fake.calls[0], ("get_open_orders", ()))
 
+    def test_rate_limit_html_body_is_sanitized(self) -> None:
+        html = "<!doctype html><html><body>" + ("x" * 5000) + "</body></html>"
+        fake = _FakeClient(
+            raises=RuntimeError(
+                "[py_clob_client_v2] request error status=429 "
+                "url=https://clob.polymarket.com/balance-allowance "
+                "body=Cloudflare error code: 1015 " + html
+            )
+        )
+        client = LiveWriteClient(fake, dry_run=False)
+
+        with self.assertRaises(LiveClientError) as ctx:
+            client.get_all_open_orders()
+
+        message = str(ctx.exception)
+        self.assertIn("HTTP 429", message)
+        self.assertIn("Cloudflare rate limit", message)
+        self.assertNotIn("<html", message)
+        self.assertLess(len(message), 700)
+
 
 # ---------------------------------------------------------------------------
 # LiveClientError contract
@@ -452,6 +473,14 @@ class TestLiveClientError(unittest.TestCase):
         with self.assertRaises(LiveClientError) as ctx:
             raise LiveClientError("something went wrong")
         self.assertIn("something went wrong", str(ctx.exception))
+
+    def test_clean_live_error_message_trims_html(self) -> None:
+        message = clean_live_error_message(
+            "status=429 body=Cloudflare error code: 1015 <!doctype html><html>long</html>"
+        )
+        self.assertIn("HTTP 429", message)
+        self.assertIn("Cloudflare rate limit", message)
+        self.assertNotIn("<html", message)
 
 
 if __name__ == "__main__":
