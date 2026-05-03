@@ -83,6 +83,56 @@ class ResearchStatusTests(unittest.TestCase):
             self.assertTrue(current["selection_pressure"]["under_selected"])
             self.assertEqual(current["selection_pressure"]["zero_size_reject_count"], 2)
 
+    def test_status_ignores_parallel_out_dir_when_picking_current_run(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            out_dir = root / "reports"
+            parallel_out = root / "reports_parallel" / "highraw"
+            main_run = out_dir / "research_runs" / "main-run"
+            parallel_run = parallel_out / "research_runs" / "parallel-run"
+            proc_root = root / "proc"
+            proc_main = proc_root / "100"
+            proc_parallel = proc_root / "200"
+            main_run.mkdir(parents=True)
+            parallel_run.mkdir(parents=True)
+            proc_main.mkdir(parents=True)
+            proc_parallel.mkdir(parents=True)
+            (main_run / "research_auto_trade_pnl_latest.json").write_text(
+                json.dumps({"summary": {"cycle_index": 11}}),
+                encoding="utf-8",
+            )
+            (parallel_run / "research_auto_trade_pnl_latest.json").write_text(
+                json.dumps({"summary": {"cycle_index": 22}}),
+                encoding="utf-8",
+            )
+            main_argv = [
+                "python",
+                "scripts/run_evidence_research_pipeline.py",
+                "--out-dir",
+                str(out_dir),
+                "--cycles",
+                "120",
+            ]
+            parallel_argv = [
+                "python",
+                "scripts/run_evidence_research_pipeline.py",
+                "--run-id",
+                "parallel-run",
+                "--out-dir",
+                str(parallel_out),
+                "--cycles",
+                "36",
+            ]
+            (proc_main / "cmdline").write_bytes(b"\0".join(part.encode("utf-8") for part in main_argv) + b"\0")
+            (proc_parallel / "cmdline").write_bytes(
+                b"\0".join(part.encode("utf-8") for part in parallel_argv) + b"\0"
+            )
+
+            status = build_status(out_dir, proc_root)
+
+            self.assertEqual(status["current_run"]["run_id"], "main-run")
+            self.assertEqual(status["current_run"]["cycle_index"], 11)
+
     def test_status_falls_back_to_latest_evidence_when_pnl_missing(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

@@ -74,6 +74,8 @@ def pick_current_run_dir(out_dir: Path, active: list[dict[str, Any]]) -> Path | 
     for process in reversed(active):
         run_id = process.get("run_id")
         process_out = Path(str(process.get("out_dir") or out_dir))
+        if not _same_path(process_out, out_dir):
+            continue
         if run_id:
             run_dir = process_out / "research_runs" / str(run_id)
             if run_dir.exists():
@@ -84,6 +86,13 @@ def pick_current_run_dir(out_dir: Path, active: list[dict[str, Any]]) -> Path | 
     if not candidates:
         return None
     return max(candidates, key=lambda path: path.stat().st_mtime)
+
+
+def _same_path(left: Path, right: Path) -> bool:
+    try:
+        return left.resolve() == right.resolve()
+    except OSError:
+        return left.absolute() == right.absolute()
 
 
 def build_status(out_dir: Path, proc_root: Path = Path("/proc")) -> dict[str, Any]:
