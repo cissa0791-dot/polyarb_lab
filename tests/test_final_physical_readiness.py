@@ -77,3 +77,19 @@ def test_probe_clock_skew_parses_chronyc_tracking() -> None:
 
     assert result["clock_skew_ms"] == 0.012
     assert result["clock_source"] == "chronyc tracking"
+
+
+def test_probe_clock_skew_falls_back_to_timedatectl_timesync_status() -> None:
+    calls: list[list[str]] = []
+
+    def runner(command: list[str], _timeout_sec: float) -> CommandResult:
+        calls.append(command)
+        if command == ["chronyc", "tracking"]:
+            return CommandResult(command=command, returncode=1, stdout="", stderr="not installed")
+        return CommandResult(command=command, returncode=0, stdout="Offset: +3.079ms\n", stderr="")
+
+    result = probe_clock_skew_ms(command_runner=runner)
+
+    assert calls == [["chronyc", "tracking"], ["timedatectl", "timesync-status"]]
+    assert result["clock_skew_ms"] == 3.079
+    assert result["clock_source"] == "timedatectl timesync-status"

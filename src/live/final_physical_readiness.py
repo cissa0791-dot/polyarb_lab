@@ -140,6 +140,7 @@ def probe_clock_skew_ms(*, command_runner: CommandRunner | None = None, timeout_
     runner = command_runner or _run_command
     attempts = [
         (["chronyc", "tracking"], _parse_chronyc_tracking, "chronyc tracking"),
+        (["timedatectl", "timesync-status"], _parse_timedatectl_timesync, "timedatectl timesync-status"),
         (["ntpdate", "-q", "pool.ntp.org"], _parse_ntpdate_query, "ntpdate -q pool.ntp.org"),
     ]
     errors: list[str] = []
@@ -184,6 +185,23 @@ def _parse_ntpdate_query(text: str) -> float | None:
     if not match:
         return None
     return float(match.group(1)) * 1000.0
+
+
+def _parse_timedatectl_timesync(text: str) -> float | None:
+    for line in text.splitlines():
+        if not line.strip().lower().startswith("offset:"):
+            continue
+        value = line.split(":", 1)[1].strip()
+        match = re.search(r"([+-]?\d+(?:\.\d+)?)\s*(us|µs|ms|s)?", value, flags=re.IGNORECASE)
+        if not match:
+            return None
+        amount = float(match.group(1))
+        unit = (match.group(2) or "s").lower()
+        if unit in {"us", "µs"}:
+            return amount / 1000.0
+        if unit == "ms":
+            return amount
+        return amount * 1000.0
 
 
 def _kill_switch_active(path: str | Path | None) -> bool:
