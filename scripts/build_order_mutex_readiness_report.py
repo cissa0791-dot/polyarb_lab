@@ -34,10 +34,12 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
     reports_dir = Path(args.reports_dir)
     health_path = reports_dir / "live_api_health_readonly_now.json"
     execution_path = reports_dir / "execution_disabled_auto_trade_system_latest.json"
+    inventory_path = reports_dir / "inventory_state_latest.json"
     shadow_path = reports_dir / "maker_engine_A_p0_exit_aware_latest.json"
     report = build_order_mutex_readiness_report(
         health=_load_json(health_path),
         execution_system=_load_json(execution_path),
+        inventory_state=_load_json(inventory_path),
         shadow_latest=_load_json(shadow_path),
         explicit_state=args.state,
     )
@@ -45,7 +47,7 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
         report,
         writer_script=Path(__file__),
         report_schema_version=REPORT_SCHEMA_VERSION,
-        input_reports_used=[health_path, execution_path, shadow_path],
+        input_reports_used=[health_path, execution_path, inventory_path, shadow_path],
         source_files=[Path(__file__), ROOT / "src" / "live" / "order_mutex_readiness.py"],
         root=ROOT,
     )

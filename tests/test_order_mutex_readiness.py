@@ -96,3 +96,26 @@ def test_cli_writes_ready_report_from_live_account_zero_orders(tmp_path: Path) -
     assert rc == 0
     assert payload["order_mutex_state"] == "NO_ORDER"
     assert payload["can_submit_order"] is False
+
+
+def test_cli_can_use_inventory_state_when_health_report_is_absent(tmp_path: Path) -> None:
+    reports = tmp_path / "reports"
+    reports.mkdir()
+    (reports / "execution_disabled_auto_trade_system_latest.json").write_text(json.dumps(_execution()), encoding="utf-8")
+    (reports / "inventory_state_latest.json").write_text(
+        json.dumps(
+            {
+                "generated_at_utc": NOW.isoformat(),
+                "status": "INVENTORY_STATE_CLEAR",
+                "open_order_count": 0,
+            }
+        ),
+        encoding="utf-8",
+    )
+    out = tmp_path / "order_mutex.json"
+
+    rc = main(["--reports-dir", str(reports), "--out", str(out)])
+
+    payload = json.loads(out.read_text(encoding="utf-8"))
+    assert rc == 0
+    assert payload["state_source"] == "LIVE_ACCOUNT_OPEN_ORDER_COUNT_ZERO"

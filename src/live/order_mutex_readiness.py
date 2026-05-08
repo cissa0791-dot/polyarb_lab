@@ -19,6 +19,7 @@ def build_order_mutex_readiness_report(
     *,
     health: dict[str, Any] | None = None,
     execution_system: dict[str, Any] | None = None,
+    inventory_state: dict[str, Any] | None = None,
     shadow_latest: dict[str, Any] | None = None,
     explicit_state: str | None = None,
     now: datetime | None = None,
@@ -33,8 +34,9 @@ def build_order_mutex_readiness_report(
     now = now or datetime.now(timezone.utc)
     health = health or {}
     execution_system = execution_system or {}
+    inventory_state = inventory_state or {}
     shadow_latest = shadow_latest or {}
-    open_order_count = _open_order_count(health)
+    open_order_count = _open_order_count(health, inventory_state)
     live_order_sent = execution_system.get("live_order_sent") is True or health.get("live_order_sent") is True
     execution_enabled = execution_system.get("execution_enabled") is True
     live_actions_enabled = execution_system.get("live_actions_enabled") is True
@@ -93,11 +95,14 @@ def build_order_mutex_readiness_report(
     }
 
 
-def _open_order_count(health: dict[str, Any]) -> int | None:
+def _open_order_count(health: dict[str, Any], inventory_state: dict[str, Any] | None = None) -> int | None:
+    inventory_state = inventory_state or {}
     checks = health.get("checks") if isinstance(health.get("checks"), dict) else {}
     account_orders = checks.get("account_open_orders") if isinstance(checks.get("account_open_orders"), dict) else {}
     target_state = checks.get("target_account_state") if isinstance(checks.get("target_account_state"), dict) else {}
     for value in (
+        inventory_state.get("open_order_count"),
+        inventory_state.get("token_open_order_count"),
         account_orders.get("open_order_count"),
         target_state.get("token_open_order_count"),
         health.get("open_order_count"),
