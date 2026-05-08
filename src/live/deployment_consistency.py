@@ -23,8 +23,6 @@ DEFAULT_CRITICAL_PATHS = [
     "scripts/build_order_mutex_readiness_report.py",
     "scripts/build_api_heartbeat_report.py",
     "scripts/build_live_auth_readiness_report.py",
-    "scripts/run_1hr_shadow_test.py",
-    "scripts/analyze_lifecycle_performance.py",
 ]
 
 
