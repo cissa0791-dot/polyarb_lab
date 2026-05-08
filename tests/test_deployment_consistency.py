@@ -143,6 +143,15 @@ def test_default_critical_paths_include_toxic_flow_report_chain() -> None:
     assert "scripts/build_toxic_flow_report.py" in DEFAULT_CRITICAL_PATHS
 
 
+def test_default_critical_paths_include_final_gate_report_chain() -> None:
+    assert "src/live/execution_isolation_readiness.py" in DEFAULT_CRITICAL_PATHS
+    assert "src/live/inventory_state_readiness.py" in DEFAULT_CRITICAL_PATHS
+    assert "src/live/final_physical_readiness.py" in DEFAULT_CRITICAL_PATHS
+    assert "scripts/build_execution_isolation_report.py" in DEFAULT_CRITICAL_PATHS
+    assert "scripts/build_inventory_state_report.py" in DEFAULT_CRITICAL_PATHS
+    assert "scripts/build_final_physical_report.py" in DEFAULT_CRITICAL_PATHS
+
+
 def test_default_critical_paths_exclude_unreleased_shadow_tools() -> None:
     assert "scripts/run_1hr_shadow_test.py" not in DEFAULT_CRITICAL_PATHS
     assert "scripts/analyze_lifecycle_performance.py" not in DEFAULT_CRITICAL_PATHS

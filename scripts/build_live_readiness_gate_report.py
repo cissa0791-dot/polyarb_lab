@@ -36,7 +36,9 @@ REPORT_FILES = {
     "order_mutex": "order_mutex_readiness_latest.json",
     "market_microstructure": "live_market_microstructure_latest.json",
     "toxic_flow": "toxic_flow_latest.json",
+    "inventory_state": "inventory_state_latest.json",
     "fee_reconciliation": "fee_reconciliation_latest.json",
+    "final_physical": "final_physical_readiness_latest.json",
     "kill_switch": "kill_switch_latest.json",
 }
 
@@ -96,7 +98,9 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
         order_mutex=loaded["order_mutex"],
         market_microstructure=loaded["market_microstructure"],
         toxic_flow=loaded["toxic_flow"],
+        inventory_state=loaded["inventory_state"],
         fee_reconciliation=loaded["fee_reconciliation"],
+        final_physical=loaded["final_physical"],
         kill_switch=loaded["kill_switch"],
         target_market_slug=args.target_market_slug,
         approved_action_scope=args.approved_action_scope,

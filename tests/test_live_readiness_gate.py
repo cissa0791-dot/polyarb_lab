@@ -46,10 +46,13 @@ def _health() -> dict:
 def _execution_system(**overrides) -> dict:
     payload = {
         "generated_at_utc": _ts(),
+        "status": "EXECUTION_ISOLATION_READY",
         "can_submit_order": False,
         "execution_enabled": False,
         "live_actions_enabled": False,
         "live_order_sent": False,
+        "single_writer_ok": True,
+        "suspicious_process_count": 0,
     }
     payload.update(overrides)
     return payload

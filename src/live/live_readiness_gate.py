@@ -43,7 +43,9 @@ def build_live_readiness_gate(
     order_mutex: dict[str, Any] | None = None,
     market_microstructure: dict[str, Any] | None = None,
     toxic_flow: dict[str, Any] | None = None,
+    inventory_state: dict[str, Any] | None = None,
     fee_reconciliation: dict[str, Any] | None = None,
+    final_physical: dict[str, Any] | None = None,
     kill_switch: dict[str, Any] | None = None,
     target_market_slug: str | None = None,
     approved_action_scope: str = "FIRST_CYCLE_BOOTSTRAP_EVIDENCE_GENERATION_ONLY",
@@ -70,7 +72,9 @@ def build_live_readiness_gate(
     network = network or {}
     order_mutex = order_mutex or {}
     toxic_flow = toxic_flow or {}
+    inventory_state = inventory_state or {}
     fee_reconciliation = fee_reconciliation or {}
+    final_physical = final_physical or {}
     kill_switch = kill_switch or {}
     market = _market_context(
         health=health,
@@ -82,7 +86,7 @@ def build_live_readiness_gate(
     target_market_slug = target_market_slug or _target_market_slug(health=health, profit_gate=profit_gate, market=market)
 
     assertions = [
-        _execution_isolation_assertion(execution_system),
+        _execution_isolation_assertion(execution_system, now=now, max_report_age_minutes=max_report_age_minutes),
         _deployment_sync_assertion(deployment, now=now, max_report_age_minutes=max_report_age_minutes),
         _auth_scope_assertion(
             approval,
@@ -105,11 +109,18 @@ def build_live_readiness_gate(
         _tick_size_price_assertion(market),
         _reward_scoring_assertion(market),
         _fill_adverse_selection_assertion(market, network),
-        _inventory_state_assertion(health=health, profit_gate=profit_gate),
+        _inventory_state_assertion(
+            health=health,
+            profit_gate=profit_gate,
+            inventory_state=inventory_state,
+            now=now,
+            max_report_age_minutes=max_report_age_minutes,
+        ),
         _fee_reconciliation_assertion(fee_reconciliation, now=now, max_report_age_minutes=max_report_age_minutes),
         _final_physical_assertion(
             health=health,
             network=network,
+            final_physical=final_physical,
             kill_switch=kill_switch,
             now=now,
             max_report_age_minutes=max_report_age_minutes,
@@ -174,7 +185,12 @@ def markdown_report(report: dict[str, Any]) -> str:
     return "\n".join(lines) + "\n"
 
 
-def _execution_isolation_assertion(execution_system: dict[str, Any]) -> dict[str, Any]:
+def _execution_isolation_assertion(
+    execution_system: dict[str, Any],
+    *,
+    now: datetime,
+    max_report_age_minutes: float,
+) -> dict[str, Any]:
     fields_false = {
         "can_submit_order": execution_system.get("can_submit_order") is False,
         "execution_enabled": execution_system.get("execution_enabled") is False,
@@ -182,15 +198,25 @@ def _execution_isolation_assertion(execution_system: dict[str, Any]) -> dict[str
         "live_order_sent": execution_system.get("live_order_sent") is False,
     }
     present = bool(execution_system)
-    passed = present and all(fields_false.values())
-    reason = "EXECUTION_SYSTEM_IS_HARD_DISABLED" if passed else "EXECUTION_SYSTEM_NOT_HARD_DISABLED"
+    fresh = _is_fresh(execution_system, now=now, max_report_age_minutes=max_report_age_minutes)
+    status_ready = execution_system.get("status") == "EXECUTION_ISOLATION_READY"
+    process_scan_clear = execution_system.get("single_writer_ok") is True
+    passed = present and all(fields_false.values()) and fresh and status_ready and process_scan_clear
+    reason = "EXECUTION_SYSTEM_IS_HARD_DISABLED_AND_ISOLATED" if passed else "EXECUTION_SYSTEM_NOT_HARD_DISABLED_OR_ISOLATED"
     return _assertion(
         assert_id="EXECUTION_ISOLATION_ASSERT",
         category="execution_isolation",
         passed=passed,
         reason=reason if present else "EXECUTION_SYSTEM_REPORT_MISSING",
         blocking_reason=None if passed else "EXECUTION_ISOLATION_NOT_PROVEN",
-        details={"required_false_fields": fields_false},
+        details={
+            "required_false_fields": fields_false,
+            "report_fresh": fresh,
+            "status_ready": status_ready,
+            "single_writer_ok": process_scan_clear,
+            "suspicious_process_count": execution_system.get("suspicious_process_count"),
+            "execution_blockers": execution_system.get("blockers") or [],
+        },
     )
 
 
@@ -474,7 +500,46 @@ def _fill_adverse_selection_assertion(market: dict[str, Any], network: dict[str,
     )
 
 
-def _inventory_state_assertion(*, health: dict[str, Any], profit_gate: dict[str, Any]) -> dict[str, Any]:
+def _inventory_state_assertion(
+    *,
+    health: dict[str, Any],
+    profit_gate: dict[str, Any],
+    inventory_state: dict[str, Any],
+    now: datetime,
+    max_report_age_minutes: float,
+) -> dict[str, Any]:
+    if inventory_state:
+        token_balance = _first_float(inventory_state.get("token_balance_shares"))
+        open_order_count = _first_float(inventory_state.get("open_order_count"), inventory_state.get("token_open_order_count"))
+        inventory_status = str(inventory_state.get("current_inventory_status") or inventory_state.get("inventory_status") or "").upper()
+        open_order_status = str(inventory_state.get("open_order_status") or "").upper()
+        checks = {
+            "inventory_report_present": True,
+            "inventory_report_ready": inventory_state.get("status") == "INVENTORY_STATE_CLEAR",
+            "report_fresh": _is_fresh(inventory_state, now=now, max_report_age_minutes=max_report_age_minutes),
+            "token_balance_flat_or_dust": token_balance is not None and abs(token_balance) <= 0.001,
+            "open_order_count_zero": open_order_count is not None and open_order_count == 0,
+            "inventory_flat": inventory_status in {"FLAT", "ECONOMICALLY_CLOSED_WITH_DUST"},
+            "open_order_clear": open_order_status == "NO_OPEN_ORDER",
+            "partial_fill_unresolved_false": inventory_state.get("partial_fill_unresolved") is not True,
+        }
+        passed = all(checks.values())
+        return _assertion(
+            assert_id="INVENTORY_STATE_ASSERT",
+            category="inventory",
+            passed=passed,
+            reason="INVENTORY_AND_OPEN_ORDERS_CLEAR" if passed else "INVENTORY_OR_OPEN_ORDER_STATE_NOT_CLEAR",
+            blocking_reason=None if passed else "INVENTORY_STATE_NOT_CLEAR",
+            details={
+                **checks,
+                "token_balance_shares": _round(token_balance),
+                "open_order_count": _round(open_order_count),
+                "current_inventory_status": inventory_status or None,
+                "open_order_status": open_order_status or None,
+                "inventory_blockers": inventory_state.get("blockers") or [],
+            },
+        )
+
     checks_payload = health.get("checks") if isinstance(health.get("checks"), dict) else {}
     target_account = checks_payload.get("target_account_state") if isinstance(checks_payload.get("target_account_state"), dict) else {}
     account_orders = checks_payload.get("account_open_orders") if isinstance(checks_payload.get("account_open_orders"), dict) else {}
@@ -538,10 +603,37 @@ def _final_physical_assertion(
     *,
     health: dict[str, Any],
     network: dict[str, Any],
+    final_physical: dict[str, Any],
     kill_switch: dict[str, Any],
     now: datetime,
     max_report_age_minutes: float,
 ) -> dict[str, Any]:
+    if final_physical:
+        physical_checks = final_physical.get("checks") if isinstance(final_physical.get("checks"), dict) else {}
+        checks = {
+            "final_physical_report_present": True,
+            "final_physical_ready": final_physical.get("status") == "FINAL_PHYSICAL_READY",
+            "report_fresh": _is_fresh(final_physical, now=now, max_report_age_minutes=max_report_age_minutes),
+            "disk_free_pct_ok": physical_checks.get("disk_free_pct_ok") is True,
+            "clock_skew_ok": physical_checks.get("clock_skew_ok") is True,
+            "latency_ok": physical_checks.get("latency_ok") is True,
+            "heartbeat_ok": physical_checks.get("heartbeat_ok") is True,
+            "kill_switch_clear": physical_checks.get("kill_switch_clear") is True,
+            "market_not_suspended": physical_checks.get("market_not_suspended") is True,
+        }
+        passed = all(checks.values())
+        return _assertion(
+            assert_id="FINAL_PHYSICAL_ASSERT",
+            category="final_physical",
+            passed=passed,
+            reason="FINAL_PHYSICAL_PRECONDITIONS_READY" if passed else "FINAL_PHYSICAL_PRECONDITIONS_NOT_PROVEN",
+            blocking_reason=None if passed else "FINAL_PHYSICAL_PRECONDITIONS_NOT_PROVEN",
+            details={
+                **checks,
+                "final_physical_blockers": final_physical.get("blockers") or [],
+            },
+        )
+
     checks = {
         "live_api_health_healthy": health.get("healthy") is True and str(health.get("status") or "").upper() == "HEALTHY",
         "health_report_fresh": _is_fresh(health, now=now, max_report_age_minutes=max_report_age_minutes),
