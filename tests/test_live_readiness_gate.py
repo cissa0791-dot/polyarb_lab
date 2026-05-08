@@ -118,9 +118,11 @@ def _order_mutex(state: str = "NO_ORDER") -> dict:
 def _fees() -> dict:
     return {
         "generated_at_utc": _ts(),
+        "status": "FEE_RECONCILIATION_READY",
         "maker_fee_model_present": True,
         "taker_fee_model_present": True,
         "projected_fee_unknown": False,
+        "can_cover_fees": True,
         "reward_payout_mismatch": False,
     }
 
@@ -207,6 +209,15 @@ def test_order_mutex_must_be_clear_before_live_readiness() -> None:
 
     assert "ORDER_MUTEX_NOT_CLEAR" in report["blockers"]
     assert report["asserts_by_id"]["ORDER_MUTEX_ASSERT"]["details"]["order_mutex_state"] == "LIVE_ORDER_OPEN"
+
+
+def test_fee_blocker_does_not_satisfy_live_readiness() -> None:
+    report = _ready_report(fee_reconciliation={**_fees(), "status": "FEE_BLOCKER", "can_cover_fees": False})
+
+    assert "FEE_RECONCILIATION_NOT_PROVEN" in report["blockers"]
+    details = report["asserts_by_id"]["FEE_RECONCILIATION_ASSERT"]["details"]
+    assert details["fee_reconciliation_ready"] is False
+    assert details["can_cover_fees"] is False
 
 
 def test_builder_writes_report_and_surfaces_missing_physical_inputs(tmp_path: Path) -> None:

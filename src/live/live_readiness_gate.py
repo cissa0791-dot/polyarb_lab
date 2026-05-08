@@ -498,9 +498,11 @@ def _fee_reconciliation_assertion(
 ) -> dict[str, Any]:
     checks = {
         "fee_report_present": bool(fee_reconciliation),
+        "fee_reconciliation_ready": fee_reconciliation.get("status") == "FEE_RECONCILIATION_READY",
         "maker_fee_model_present": fee_reconciliation.get("maker_fee_model_present") is True,
         "taker_fee_model_present": fee_reconciliation.get("taker_fee_model_present") is True,
         "projected_fee_known": fee_reconciliation.get("projected_fee_unknown") is False,
+        "can_cover_fees": fee_reconciliation.get("can_cover_fees") is True,
         "reward_payout_mismatch_clear": fee_reconciliation.get("reward_payout_mismatch") is False,
         "report_fresh": _is_fresh(fee_reconciliation, now=now, max_report_age_minutes=max_report_age_minutes),
     }

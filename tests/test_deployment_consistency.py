@@ -133,6 +133,11 @@ def test_default_critical_paths_include_auth_scope_report_chain() -> None:
     assert "scripts/build_live_auth_readiness_report.py" in DEFAULT_CRITICAL_PATHS
 
 
+def test_default_critical_paths_include_fee_reconciliation_report_chain() -> None:
+    assert "src/live/fee_auditor.py" in DEFAULT_CRITICAL_PATHS
+    assert "scripts/build_fee_reconciliation_report.py" in DEFAULT_CRITICAL_PATHS
+
+
 def test_default_critical_paths_exclude_unreleased_shadow_tools() -> None:
     assert "scripts/run_1hr_shadow_test.py" not in DEFAULT_CRITICAL_PATHS
     assert "scripts/analyze_lifecycle_performance.py" not in DEFAULT_CRITICAL_PATHS
