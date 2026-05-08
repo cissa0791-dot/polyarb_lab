@@ -22,6 +22,7 @@ DEFAULT_CRITICAL_PATHS = [
     "src/live/execution_isolation_readiness.py",
     "src/live/inventory_state_readiness.py",
     "src/live/final_physical_readiness.py",
+    "src/live/single_side_live_rehearsal.py",
     "scripts/build_live_readiness_gate_report.py",
     "scripts/build_deposit_wallet_readonly_report.py",
     "scripts/build_live_market_microstructure_report.py",
@@ -33,6 +34,7 @@ DEFAULT_CRITICAL_PATHS = [
     "scripts/build_execution_isolation_report.py",
     "scripts/build_inventory_state_report.py",
     "scripts/build_final_physical_report.py",
+    "scripts/build_single_side_live_rehearsal_report.py",
 ]
 
 
