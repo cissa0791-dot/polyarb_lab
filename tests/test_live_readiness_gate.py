@@ -115,6 +115,22 @@ def _order_mutex(state: str = "NO_ORDER") -> dict:
     return {"generated_at_utc": _ts(), "order_mutex_state": state}
 
 
+def _toxic_flow(**overrides) -> dict:
+    payload = {
+        "generated_at_utc": _ts(),
+        "status": "TOXIC_FLOW_READY",
+        "fill_probability": 0.9,
+        "maker_fill_probability": 0.9,
+        "min_fill_probability": 0.05,
+        "adverse_selection_score": 0.1,
+        "toxic_flow_detected": False,
+        "high_velocity_toxic_flow": False,
+        "volatility_lock": False,
+    }
+    payload.update(overrides)
+    return payload
+
+
 def _fees() -> dict:
     return {
         "generated_at_utc": _ts(),
@@ -141,6 +157,7 @@ def _ready_report(**overrides) -> dict:
         "deployment": _deployment(),
         "network": _network(),
         "order_mutex": _order_mutex(),
+        "toxic_flow": _toxic_flow(),
         "fee_reconciliation": _fees(),
         "kill_switch": _kill_switch(),
         "now": NOW,
@@ -218,6 +235,22 @@ def test_fee_blocker_does_not_satisfy_live_readiness() -> None:
     details = report["asserts_by_id"]["FEE_RECONCILIATION_ASSERT"]["details"]
     assert details["fee_reconciliation_ready"] is False
     assert details["can_cover_fees"] is False
+
+
+def test_toxic_flow_report_blocks_fill_adverse_selection_assertion() -> None:
+    report = _ready_report(
+        toxic_flow=_toxic_flow(
+            status="TOXIC_FLOW_BLOCKED",
+            fill_probability=0.2,
+            adverse_selection_score=0.9,
+            toxic_flow_detected=True,
+        )
+    )
+
+    assert "FILL_ADVERSE_SELECTION_NOT_PROVEN" in report["blockers"]
+    details = report["asserts_by_id"]["FILL_ADVERSE_SELECTION_ASSERT"]["details"]
+    assert details["toxic_flow_clear"] is False
+    assert details["toxic_flow_detected"] is True
 
 
 def test_builder_writes_report_and_surfaces_missing_physical_inputs(tmp_path: Path) -> None:

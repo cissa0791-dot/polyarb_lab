@@ -138,6 +138,11 @@ def test_default_critical_paths_include_fee_reconciliation_report_chain() -> Non
     assert "scripts/build_fee_reconciliation_report.py" in DEFAULT_CRITICAL_PATHS
 
 
+def test_default_critical_paths_include_toxic_flow_report_chain() -> None:
+    assert "src/live/toxic_flow_detector.py" in DEFAULT_CRITICAL_PATHS
+    assert "scripts/build_toxic_flow_report.py" in DEFAULT_CRITICAL_PATHS
+
+
 def test_default_critical_paths_exclude_unreleased_shadow_tools() -> None:
     assert "scripts/run_1hr_shadow_test.py" not in DEFAULT_CRITICAL_PATHS
     assert "scripts/analyze_lifecycle_performance.py" not in DEFAULT_CRITICAL_PATHS

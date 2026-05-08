@@ -42,6 +42,7 @@ def build_live_readiness_gate(
     network: dict[str, Any] | None = None,
     order_mutex: dict[str, Any] | None = None,
     market_microstructure: dict[str, Any] | None = None,
+    toxic_flow: dict[str, Any] | None = None,
     fee_reconciliation: dict[str, Any] | None = None,
     kill_switch: dict[str, Any] | None = None,
     target_market_slug: str | None = None,
@@ -68,9 +69,15 @@ def build_live_readiness_gate(
     deployment = deployment or {}
     network = network or {}
     order_mutex = order_mutex or {}
+    toxic_flow = toxic_flow or {}
     fee_reconciliation = fee_reconciliation or {}
     kill_switch = kill_switch or {}
-    market = _market_context(health=health, profit_gate=profit_gate, market_microstructure=market_microstructure or {})
+    market = _market_context(
+        health=health,
+        profit_gate=profit_gate,
+        market_microstructure=market_microstructure or {},
+        toxic_flow=toxic_flow,
+    )
     now = now or datetime.now(timezone.utc)
     target_market_slug = target_market_slug or _target_market_slug(health=health, profit_gate=profit_gate, market=market)
 
@@ -435,12 +442,19 @@ def _reward_scoring_assertion(market: dict[str, Any]) -> dict[str, Any]:
 def _fill_adverse_selection_assertion(market: dict[str, Any], network: dict[str, Any]) -> dict[str, Any]:
     fill_probability = _first_float(market.get("fill_probability"), market.get("maker_fill_probability"))
     min_fill_probability = _first_float(market.get("min_fill_probability"), 0.05)
+    adverse_selection_score = _first_float(market.get("adverse_selection_score"))
+    toxic_flow_detected = market.get("toxic_flow_detected") is True
+    high_velocity_toxic_flow = (
+        network.get("high_velocity_toxic_flow") is True
+        or market.get("high_velocity_toxic_flow") is True
+        or market.get("volatility_lock") is True
+    )
     checks = {
         "fill_probability_present": fill_probability is not None,
         "fill_probability_ok": fill_probability is not None and fill_probability >= min_fill_probability,
-        "toxic_flow_clear": market.get("toxic_flow_detected") is False,
-        "adverse_selection_score_present": _first_float(market.get("adverse_selection_score")) is not None,
-        "orderbook_velocity_clear": network.get("high_velocity_toxic_flow") is False,
+        "toxic_flow_clear": not toxic_flow_detected,
+        "adverse_selection_score_present": adverse_selection_score is not None,
+        "orderbook_velocity_clear": not high_velocity_toxic_flow,
     }
     passed = all(checks.values())
     return _assertion(
@@ -453,6 +467,9 @@ def _fill_adverse_selection_assertion(market: dict[str, Any], network: dict[str,
             **checks,
             "fill_probability": _round(fill_probability),
             "min_fill_probability": _round(min_fill_probability),
+            "adverse_selection_score": _round(adverse_selection_score),
+            "toxic_flow_detected": toxic_flow_detected,
+            "high_velocity_toxic_flow": high_velocity_toxic_flow,
         },
     )
 
@@ -585,12 +602,13 @@ def _market_context(
     health: dict[str, Any],
     profit_gate: dict[str, Any],
     market_microstructure: dict[str, Any],
+    toxic_flow: dict[str, Any],
 ) -> dict[str, Any]:
     target_market = health.get("target_market") if isinstance(health.get("target_market"), dict) else {}
     checks = health.get("checks") if isinstance(health.get("checks"), dict) else {}
     checked_target = checks.get("target_market") if isinstance(checks.get("target_market"), dict) else {}
     merged: dict[str, Any] = {}
-    for source in (target_market, checked_target, profit_gate.get("context") or {}, market_microstructure):
+    for source in (target_market, checked_target, profit_gate.get("context") or {}, market_microstructure, toxic_flow):
         if isinstance(source, dict):
             merged.update({key: value for key, value in source.items() if value is not None})
     return merged

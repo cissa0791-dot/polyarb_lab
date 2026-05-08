@@ -18,6 +18,7 @@ DEFAULT_CRITICAL_PATHS = [
     "src/live/api_heartbeat_probe.py",
     "src/live/auth_scope_validator.py",
     "src/live/fee_auditor.py",
+    "src/live/toxic_flow_detector.py",
     "scripts/build_live_readiness_gate_report.py",
     "scripts/build_deposit_wallet_readonly_report.py",
     "scripts/build_live_market_microstructure_report.py",
@@ -25,6 +26,7 @@ DEFAULT_CRITICAL_PATHS = [
     "scripts/build_api_heartbeat_report.py",
     "scripts/build_live_auth_readiness_report.py",
     "scripts/build_fee_reconciliation_report.py",
+    "scripts/build_toxic_flow_report.py",
 ]
 
 
