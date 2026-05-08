@@ -32,11 +32,22 @@ Usage::
 
 from __future__ import annotations
 
+import contextlib
+import io
 from dataclasses import dataclass
 from typing import Any
 
-from py_clob_client.client import ClobClient
-from py_clob_client.clob_types import OrderArgs, PartialCreateOrderOptions
+from src.live.clob_compat import (
+    AssetType,
+    BalanceAllowanceParams,
+    ClobClient,
+    CreateOrderOptions,
+    OpenOrderParams,
+    OrderArgs,
+    OrderMarketCancelParams,
+    OrderPayload,
+    PartialCreateOrderOptions,
+)
 
 from src.live.auth import LiveCredentials, build_authenticated_client
 
@@ -47,6 +58,44 @@ from src.live.auth import LiveCredentials, build_authenticated_client
 
 class LiveClientError(Exception):
     """Raised when a live CLOB write operation fails or is called incorrectly."""
+
+
+def clean_live_error_message(value: Any, *, max_len: int = 500) -> str:
+    """Return a compact live API error message without huge HTML bodies."""
+    text = str(value or "")
+    if not text:
+        return ""
+
+    lower = text.lower()
+    labels: list[str] = []
+    if "cloudflare" in lower or "error code: 1015" in lower or " 1015" in lower:
+        labels.append("Cloudflare rate limit")
+    if "status=429" in lower or "http 429" in lower or "status code 429" in lower or "too many requests" in lower:
+        labels.append("HTTP 429")
+
+    # py_clob_client_v2 can include a full Cloudflare HTML page in exception
+    # text. Keep the useful prefix and discard the body.
+    cut_at = len(text)
+    for marker in ("<!doctype", "<html", "<body", "\n<html"):
+        idx = lower.find(marker)
+        if idx >= 0:
+            cut_at = min(cut_at, idx)
+    text = text[:cut_at]
+    text = " ".join(text.replace("\r", " ").replace("\n", " ").split())
+
+    prefix = " / ".join(dict.fromkeys(labels))
+    if prefix and prefix.lower() not in text.lower():
+        text = f"{prefix}: {text}" if text else prefix
+    if len(text) > max_len:
+        text = text[: max_len - 3].rstrip() + "..."
+    return text
+
+
+def _call_clob(method: Any, *args: Any, **kwargs: Any) -> Any:
+    """Call py_clob_client while suppressing its raw HTML stderr dumps."""
+    stderr_buffer = io.StringIO()
+    with contextlib.redirect_stderr(stderr_buffer):
+        return method(*args, **kwargs)
 
 
 # ---------------------------------------------------------------------------
@@ -91,6 +140,20 @@ class LiveOrderStatus:
     size_matched: float
     size_remaining: float
     avg_price: float | None = None
+
+
+@dataclass(frozen=True)
+class LiveOpenOrder:
+    """Normalised open order returned by get_open_orders."""
+
+    order_id: str
+    side: str
+    price: float
+    size: float
+    size_matched: float
+    size_remaining: float
+    status: str
+    token_id: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -188,24 +251,51 @@ class LiveWriteClient:
         if self.dry_run:
             return _DRY_RUN_RESULT
 
-        order_args = OrderArgs(
-            token_id=token_id,
-            price=price,
-            size=size,
-            side=side,
-            fee_rate_bps=fee_rate_bps,
-        )
-        options = PartialCreateOrderOptions(
-            tick_size=tick_size,
-            neg_risk=neg_risk,
-        )
+        if tick_size is None:
+            try:
+                tick_size = _call_clob(self._client.get_tick_size, token_id)
+            except Exception:
+                tick_size = None
         try:
-            raw: dict[str, Any] = self._client.create_and_post_order(order_args, options)
+            neg_risk = bool(_call_clob(self._client.get_neg_risk, token_id))
+        except Exception:
+            neg_risk = bool(neg_risk)
+
+        order_payload: dict[str, Any] = {
+            "token_id": token_id,
+            "price": price,
+            "size": size,
+            "side": side,
+        }
+        try:
+            order_args = OrderArgs(**order_payload, fee_rate_bps=fee_rate_bps)
+        except TypeError:
+            order_args = OrderArgs(**order_payload)
+        try:
+            raw: dict[str, Any] = self._create_and_post_order(
+                order_args,
+                tick_size=tick_size,
+                neg_risk=neg_risk,
+            )
         except Exception as exc:
-            raise LiveClientError(
-                f"submit_order failed for token={token_id!r} side={side} "
-                f"price={price} size={size}: {exc}"
-            ) from exc
+            error_text = str(exc).lower()
+            if "order version mismatch" in error_text or "order_version_mismatch" in error_text:
+                try:
+                    raw = self._create_and_post_order(
+                        order_args,
+                        tick_size=tick_size,
+                        neg_risk=not neg_risk,
+                    )
+                except Exception as retry_exc:
+                    raise LiveClientError(
+                        f"submit_order failed for token={token_id!r} side={side} "
+                        f"price={price} size={size}: {clean_live_error_message(retry_exc)}"
+                    ) from retry_exc
+            else:
+                raise LiveClientError(
+                    f"submit_order failed for token={token_id!r} side={side} "
+                    f"price={price} size={size}: {clean_live_error_message(exc)}"
+                ) from exc
 
         raw_avg = raw.get("avg_price") or raw.get("avgPrice")
         return LiveOrderResult(
@@ -214,6 +304,31 @@ class LiveWriteClient:
             size_matched=float(raw.get("size_matched") or 0.0),
             avg_price=float(raw_avg) if raw_avg is not None else None,
         )
+
+    def _create_and_post_order(
+        self,
+        order_args: OrderArgs,
+        *,
+        tick_size: str | None,
+        neg_risk: bool,
+    ) -> dict[str, Any]:
+        builder = getattr(self._client, "builder", None)
+        post_order = getattr(self._client, "post_order", None)
+        if builder is not None and post_order is not None and tick_size is not None:
+            resolve_fee_rate = getattr(self._client, "_ClobClient__resolve_fee_rate", None)
+            if callable(resolve_fee_rate) and hasattr(order_args, "fee_rate_bps"):
+                order_args.fee_rate_bps = resolve_fee_rate(order_args.token_id, order_args.fee_rate_bps)
+            options = CreateOrderOptions(tick_size=tick_size, neg_risk=bool(neg_risk))
+            if hasattr(builder, "build_order"):
+                order = _call_clob(builder.build_order, order_args, options)
+            else:
+                order = _call_clob(builder.create_order, order_args, options)
+            return _call_clob(post_order, order)
+        options = PartialCreateOrderOptions(
+            tick_size=tick_size,
+            neg_risk=neg_risk,
+        )
+        return _call_clob(self._client.create_and_post_order, order_args, options)
 
     # ------------------------------------------------------------------
     # Order cancellation
@@ -234,12 +349,145 @@ class LiveWriteClient:
             return True
 
         try:
-            self._client.cancel(order_id)
+            if hasattr(self._client, "cancel_order"):
+                _call_clob(self._client.cancel_order, OrderPayload(orderID=order_id))
+            else:
+                _call_clob(self._client.cancel, order_id)
             return True
         except Exception as exc:
             raise LiveClientError(
-                f"cancel_order failed for order_id={order_id!r}: {exc}"
+                f"cancel_order failed for order_id={order_id!r}: {clean_live_error_message(exc)}"
             ) from exc
+
+    def cancel_market_orders(self, token_id: str) -> Any:
+        """Cancel all open CLOB orders for an outcome token."""
+        if self.dry_run:
+            return {"dry_run": True, "asset_id": token_id}
+        try:
+            try:
+                return _call_clob(self._client.cancel_market_orders, OrderMarketCancelParams(asset_id=token_id))
+            except TypeError:
+                return _call_clob(self._client.cancel_market_orders, asset_id=token_id)
+        except Exception as exc:
+            raise LiveClientError(
+                f"cancel_market_orders failed for token_id={token_id!r}: {clean_live_error_message(exc)}"
+            ) from exc
+
+    def get_token_balance(self, token_id: str) -> float:
+        """Return conditional-token balance in shares for the authenticated maker."""
+        if self.dry_run:
+            return 0.0
+        try:
+            raw = _call_clob(
+                self._client.get_balance_allowance,
+                BalanceAllowanceParams(asset_type=AssetType.CONDITIONAL, token_id=token_id)
+            )
+        except Exception as exc:
+            raise LiveClientError(
+                f"get_token_balance failed for token_id={token_id!r}: {clean_live_error_message(exc)}"
+            ) from exc
+
+        raw_balance = (
+            getattr(raw, "balance", None)
+            or (raw.get("balance") if isinstance(raw, dict) else None)
+            or 0
+        )
+        balance = float(raw_balance)
+        # Polymarket conditional token balances are returned in 1e6 units.
+        return round(balance / 1_000_000.0, 6)
+
+    def get_open_orders(self, token_id: str) -> list[LiveOpenOrder]:
+        """Return open CLOB orders for an outcome token."""
+        if self.dry_run:
+            return []
+        try:
+            params = OpenOrderParams(asset_id=token_id)
+            if hasattr(self._client, "get_open_orders"):
+                raw = _call_clob(self._client.get_open_orders, params)
+            else:
+                raw = _call_clob(self._client.get_orders, params)
+        except Exception as exc:
+            raise LiveClientError(
+                f"get_open_orders failed for token_id={token_id!r}: {clean_live_error_message(exc)}"
+            ) from exc
+
+        return self._normalise_open_orders(raw, fallback_token_id=token_id)
+
+    def get_all_open_orders(self) -> list[LiveOpenOrder]:
+        """Return all open CLOB orders for the authenticated maker."""
+        if self.dry_run:
+            return []
+
+        errors: list[str] = []
+        for method_name in ("get_open_orders", "get_orders"):
+            method = getattr(self._client, method_name, None)
+            if method is None:
+                continue
+            attempts: list[tuple[Any, ...]] = [()]
+            try:
+                attempts.append((OpenOrderParams(),))
+            except TypeError:
+                pass
+            for args in attempts:
+                try:
+                    raw = _call_clob(method, *args)
+                    return self._normalise_open_orders(raw)
+                except TypeError as exc:
+                    errors.append(f"{method_name}{args}: {exc}")
+                    continue
+                except Exception as exc:
+                    raise LiveClientError(
+                        f"get_all_open_orders failed via {method_name}: {clean_live_error_message(exc)}"
+                    ) from exc
+
+        joined = "; ".join(errors) if errors else "no get_open_orders/get_orders method"
+        raise LiveClientError(f"get_all_open_orders failed: {joined}")
+
+    @staticmethod
+    def _normalise_open_orders(
+        raw: Any,
+        *,
+        fallback_token_id: str | None = None,
+    ) -> list[LiveOpenOrder]:
+        rows = raw
+        if isinstance(raw, dict):
+            rows = raw.get("data") or raw.get("orders") or raw.get("results") or []
+        orders: list[LiveOpenOrder] = []
+        for row in rows or []:
+            get = row.get if isinstance(row, dict) else lambda key, default=None: getattr(row, key, default)
+            order_id = str(get("id") or get("orderID") or get("order_id") or "")
+            if not order_id:
+                continue
+            side = str(get("side") or "").upper()
+            price = float(get("price") or 0.0)
+            total_size = float(get("size") or get("original_size") or get("originalSize") or 0.0)
+            matched = float(get("size_matched") or get("sizeMatched") or get("matched_size") or 0.0)
+            remaining = float(get("size_remaining") or get("remaining_size") or get("sizeRemaining") or 0.0)
+            token_id = str(
+                get("asset_id")
+                or get("assetId")
+                or get("token_id")
+                or get("tokenID")
+                or get("makerAssetId")
+                or get("maker_asset_id")
+                or fallback_token_id
+                or ""
+            ) or None
+            if remaining <= 0.0 and total_size > 0.0:
+                remaining = max(0.0, total_size - matched)
+            orders.append(
+                LiveOpenOrder(
+                    order_id=order_id,
+                    side=side,
+                    price=price,
+                    size=total_size,
+                    size_matched=matched,
+                    size_remaining=remaining,
+                    status=str(get("status") or "open"),
+                    token_id=token_id,
+                )
+            )
+        return orders
 
     # ------------------------------------------------------------------
     # Order status polling
@@ -266,10 +514,10 @@ class LiveWriteClient:
             )
 
         try:
-            raw = self._client.get_order(order_id)
+            raw = _call_clob(self._client.get_order, order_id)
         except Exception as exc:
             raise LiveClientError(
-                f"get_order_status failed for order_id={order_id!r}: {exc}"
+                f"get_order_status failed for order_id={order_id!r}: {clean_live_error_message(exc)}"
             ) from exc
 
         try:
@@ -277,7 +525,11 @@ class LiveWriteClient:
                                  (raw.get("size_matched") if isinstance(raw, dict) else None) or
                                  0.0)
             total_size   = float(getattr(raw, "size", None) or
+                                 getattr(raw, "original_size", None) or
+                                 getattr(raw, "originalSize", None) or
                                  (raw.get("size") if isinstance(raw, dict) else None) or
+                                 (raw.get("original_size") if isinstance(raw, dict) else None) or
+                                 (raw.get("originalSize") if isinstance(raw, dict) else None) or
                                  0.0)
             size_remaining = max(0.0, total_size - size_matched)
             raw_id     = (getattr(raw, "id", None) or
@@ -304,3 +556,26 @@ class LiveWriteClient:
             size_remaining=size_remaining,
             avg_price=float(raw_avg) if raw_avg is not None else None,
         )
+
+    def get_raw_order(self, order_id: str) -> dict[str, Any]:
+        """Return raw CLOB order JSON for reconciliation-only fields."""
+        if self.dry_run:
+            return {}
+        try:
+            raw = _call_clob(self._client.get_order, order_id)
+        except Exception as exc:
+            raise LiveClientError(
+                f"get_raw_order failed for order_id={order_id!r}: {clean_live_error_message(exc)}"
+            ) from exc
+        if isinstance(raw, dict):
+            return dict(raw)
+        for method_name in ("model_dump", "dict"):
+            if hasattr(raw, method_name):
+                try:
+                    payload = getattr(raw, method_name)()
+                    return dict(payload) if isinstance(payload, dict) else {"raw": payload}
+                except Exception:
+                    continue
+        if hasattr(raw, "__dict__"):
+            return dict(raw.__dict__)
+        return {"raw": repr(raw)}
