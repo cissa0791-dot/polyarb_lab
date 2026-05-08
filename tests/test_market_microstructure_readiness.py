@@ -4,7 +4,8 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
-from scripts.build_live_market_microstructure_report import main
+import scripts.build_live_market_microstructure_report as builder
+from scripts.build_live_market_microstructure_report import main, resolve_token_id_from_gamma
 from src.live.market_microstructure_readiness import build_market_microstructure_report
 
 
@@ -100,3 +101,75 @@ def test_cli_writes_market_microstructure_report(tmp_path: Path) -> None:
     assert rc == 0
     assert payload["status"] == "MARKET_MICROSTRUCTURE_READY"
     assert payload["can_submit_order"] is False
+
+
+def test_gamma_token_resolver_selects_yes_token(monkeypatch) -> None:
+    class Response:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self):
+            return [
+                {
+                    "slug": MARKET,
+                    "outcomes": '["Yes", "No"]',
+                    "clobTokenIds": '["yes-token", "no-token"]',
+                }
+            ]
+
+    def fake_get(url, params, timeout):
+        assert params["slug"] == MARKET
+        return Response()
+
+    monkeypatch.setattr(builder.httpx, "get", fake_get)
+
+    token_id, meta = resolve_token_id_from_gamma(
+        gamma_host="https://gamma.example",
+        market_slug=MARKET,
+        outcome="YES",
+    )
+
+    assert token_id == "yes-token"
+    assert meta["token_id_source"] == "GAMMA_MARKET_SLUG"
+    assert meta["token_id_read_error"] is None
+
+
+def test_cli_resolves_token_from_gamma_when_token_id_omitted(monkeypatch, tmp_path: Path) -> None:
+    class Response:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self):
+            return [
+                {
+                    "slug": MARKET,
+                    "outcomes": '["Yes", "No"]',
+                    "clobTokenIds": '["yes-token", "no-token"]',
+                }
+            ]
+
+    monkeypatch.setattr(builder.httpx, "get", lambda *args, **kwargs: Response())
+    out = tmp_path / "market_microstructure.json"
+
+    rc = main(
+        [
+            "--market-slug",
+            MARKET,
+            "--quote-bid",
+            "0.36",
+            "--quote-ask",
+            "0.37",
+            "--quote-size",
+            "50",
+            "--tick-size",
+            "0.01",
+            "--out",
+            str(out),
+        ]
+    )
+    payload = json.loads(out.read_text(encoding="utf-8"))
+
+    assert rc == 0
+    assert payload["status"] == "MARKET_MICROSTRUCTURE_READY"
+    assert payload["token_id"] == "yes-token"
+    assert payload["token_id_source"] == "GAMMA_MARKET_SLUG"
