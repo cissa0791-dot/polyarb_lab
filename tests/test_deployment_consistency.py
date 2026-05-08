@@ -148,10 +148,13 @@ def test_default_critical_paths_include_final_gate_report_chain() -> None:
     assert "src/live/inventory_state_readiness.py" in DEFAULT_CRITICAL_PATHS
     assert "src/live/final_physical_readiness.py" in DEFAULT_CRITICAL_PATHS
     assert "src/live/single_side_live_rehearsal.py" in DEFAULT_CRITICAL_PATHS
+    assert "src/live/one_time_auth_token.py" in DEFAULT_CRITICAL_PATHS
     assert "scripts/build_execution_isolation_report.py" in DEFAULT_CRITICAL_PATHS
     assert "scripts/build_inventory_state_report.py" in DEFAULT_CRITICAL_PATHS
     assert "scripts/build_final_physical_report.py" in DEFAULT_CRITICAL_PATHS
     assert "scripts/build_single_side_live_rehearsal_report.py" in DEFAULT_CRITICAL_PATHS
+    assert "scripts/build_single_side_probe_authorization_report.py" in DEFAULT_CRITICAL_PATHS
+    assert "scripts/create_single_side_probe_authorization_token.py" in DEFAULT_CRITICAL_PATHS
 
 
 def test_default_critical_paths_exclude_unreleased_shadow_tools() -> None:

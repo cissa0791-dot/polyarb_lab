@@ -34,6 +34,7 @@ REPORT_FILES = {
     "fee_reconciliation": "fee_reconciliation_latest.json",
     "inventory_state": "inventory_state_latest.json",
     "toxic_flow": "toxic_flow_latest.json",
+    "probe_authorization": "single_side_probe_authorization_latest.json",
 }
 
 
@@ -63,6 +64,7 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
         fee_reconciliation=loaded["fee_reconciliation"],
         inventory_state=loaded["inventory_state"],
         toxic_flow=loaded["toxic_flow"],
+        probe_authorization=loaded["probe_authorization"],
         branch=_git_stdout(["branch", "--show-current"]),
         commit_sha=_git_stdout(["rev-parse", "HEAD"]),
         target_market_slug=args.target_market_slug,

@@ -280,3 +280,30 @@ def test_builder_writes_report_and_surfaces_missing_physical_inputs(tmp_path: Pa
     assert "DEPOSIT_WALLET_REPORT_MISSING" in report["blockers"]
     assert "DEPLOYMENT_SYNC_NOT_PROVEN" in report["blockers"]
     assert md_out.exists()
+
+
+def test_builder_surfaces_single_side_token_without_enabling_submit(tmp_path: Path) -> None:
+    reports = tmp_path / "reports"
+    reports.mkdir()
+    (reports / "single_side_probe_authorization_latest.json").write_text(
+        json.dumps(
+            {
+                "status": "SINGLE_SIDE_PROBE_AUTHORIZATION_READY",
+                "authorization_token_valid": True,
+                "execution_release_ready": True,
+                "blockers": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    out = tmp_path / "live_readiness.json"
+    md_out = tmp_path / "live_readiness.md"
+
+    rc = main(["--reports-dir", str(reports), "--out", str(out), "--md-out", str(md_out)])
+
+    assert rc == 0
+    report = json.loads(out.read_text(encoding="utf-8"))
+    assert report["single_side_execution_release"]["authorization_token_valid"] is True
+    assert report["single_side_execution_release"]["execution_release_ready"] is True
+    assert report["single_side_execution_release"]["can_submit_order"] is False
+    assert report["can_submit_order"] is False

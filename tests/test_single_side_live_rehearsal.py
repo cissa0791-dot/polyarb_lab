@@ -204,3 +204,23 @@ def test_cli_writes_json_and_markdown(tmp_path: Path) -> None:
     assert payload["PRELIVE_READY"] is True
     assert payload["EXECUTION_AUTHORIZED"] is False
     assert md_out.exists()
+
+
+def test_rehearsal_surfaces_valid_token_without_authorizing_execution() -> None:
+    report = build_single_side_live_rehearsal_report(
+        **_ready_inputs(
+            probe_authorization={
+                "status": "SINGLE_SIDE_PROBE_AUTHORIZATION_READY",
+                "authorization_token_valid": True,
+                "execution_release_ready": True,
+                "token_status": "ISSUED_UNUSED",
+                "ttl_remaining_seconds": 299,
+                "blockers": [],
+            }
+        )
+    )
+
+    assert report["one_time_authorization"]["token_valid"] is True
+    assert report["one_time_authorization"]["execution_release_ready"] is True
+    assert report["one_time_authorization"]["execution_authorized_here"] is False
+    assert report["CAN_SUBMIT_ORDER"] is False

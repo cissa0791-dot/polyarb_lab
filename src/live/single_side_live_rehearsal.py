@@ -27,6 +27,7 @@ def build_single_side_live_rehearsal_report(
     fee_reconciliation: dict[str, Any],
     inventory_state: dict[str, Any],
     toxic_flow: dict[str, Any],
+    probe_authorization: dict[str, Any] | None = None,
     branch: str | None = None,
     commit_sha: str | None = None,
     target_market_slug: str | None = None,
@@ -41,6 +42,7 @@ def build_single_side_live_rehearsal_report(
     """
 
     now = now or datetime.now(timezone.utc)
+    probe_authorization = probe_authorization or {}
     assertions = gate.get("assertions") if isinstance(gate.get("assertions"), list) else []
     asserts_passed = _optional_int(gate.get("asserts_passed"))
     asserts_failed = _optional_int(gate.get("asserts_failed"))
@@ -139,6 +141,17 @@ def build_single_side_live_rehearsal_report(
             "live_order_sent": live_order_sent,
             "rule": "12/12 permits final review. It does not authorize execution.",
         },
+        "one_time_authorization": {
+            "report_present": bool(probe_authorization),
+            "status": probe_authorization.get("status"),
+            "token_valid": probe_authorization.get("authorization_token_valid") is True,
+            "execution_release_ready": probe_authorization.get("execution_release_ready") is True,
+            "token_status": probe_authorization.get("token_status"),
+            "ttl_remaining_seconds": probe_authorization.get("ttl_remaining_seconds"),
+            "blockers": probe_authorization.get("blockers") or ["AUTHORIZATION_REPORT_NOT_PROVIDED"],
+            "execution_authorized_here": False,
+            "can_submit_order_here": False,
+        },
         "final_decision": {
             "recommended_next_mode": RECOMMENDED_NEXT_MODE,
             "rejected_next_mode": REJECTED_NEXT_MODE,
@@ -208,6 +221,11 @@ def markdown_report(report: dict[str, Any]) -> str:
         f"- Recommended: {(report.get('final_decision') or {}).get('recommended_next_mode')}",
         f"- Rejected: {(report.get('final_decision') or {}).get('rejected_next_mode')}",
         f"- Reason: {(report.get('final_decision') or {}).get('reason')}",
+        "",
+        "## One-Time Authorization",
+        f"- Status: {(report.get('one_time_authorization') or {}).get('status')}",
+        f"- Token valid: {(report.get('one_time_authorization') or {}).get('token_valid')}",
+        f"- Execution authorized here: {(report.get('one_time_authorization') or {}).get('execution_authorized_here')}",
         "",
         "## Blockers",
     ]

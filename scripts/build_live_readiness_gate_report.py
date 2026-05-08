@@ -39,6 +39,7 @@ REPORT_FILES = {
     "inventory_state": "inventory_state_latest.json",
     "fee_reconciliation": "fee_reconciliation_latest.json",
     "final_physical": "final_physical_readiness_latest.json",
+    "probe_authorization": "single_side_probe_authorization_latest.json",
     "kill_switch": "kill_switch_latest.json",
 }
 
@@ -111,6 +112,7 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
         {
             "source_reports": {key: str(reports_dir / filename) for key, filename in REPORT_FILES.items()},
             "source_report_warnings": warnings,
+            "single_side_execution_release": _execution_release_summary(loaded["probe_authorization"]),
         }
     )
     attach_writer_metadata(
@@ -122,6 +124,20 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
         root=ROOT,
     )
     return report
+
+
+def _execution_release_summary(probe_authorization: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "authorization_report_present": bool(probe_authorization),
+        "authorization_status": probe_authorization.get("status"),
+        "authorization_token_valid": probe_authorization.get("authorization_token_valid") is True,
+        "execution_release_ready": probe_authorization.get("execution_release_ready") is True,
+        "execution_authorized_by_live_gate": False,
+        "can_submit_order": False,
+        "live_order_sent": False,
+        "blockers": probe_authorization.get("blockers") or ["AUTHORIZATION_REPORT_NOT_PROVIDED"],
+        "rule": "Token validation is necessary for a future execution runner, but this gate remains read-only.",
+    }
 
 
 def main(argv: list[str] | None = None) -> int:
