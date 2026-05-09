@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 
-from scripts.analyze_reward_adjusted_ev_lifecycle_log import main
+from scripts.build_reward_adjusted_ev_lifecycle_logger_report import main
 from src.live.reward_adjusted_ev_lifecycle_logger import (
     append_lifecycle_event,
     build_lifecycle_event,

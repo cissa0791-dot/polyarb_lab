@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 
-from scripts.analyze_fill_lifecycle_log import main
+from scripts.build_fill_lifecycle_logger_report import main
 from src.live.fill_lifecycle_logger import (
     append_fill_lifecycle_event,
     build_fill_lifecycle_event,
