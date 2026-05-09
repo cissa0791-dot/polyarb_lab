@@ -231,3 +231,160 @@ def test_create_token_rejects_explicit_params_that_do_not_match_planner(tmp_path
 
     assert rc == 2
     assert not token_path.exists()
+
+
+def test_cli_create_token_from_b_stability_token_issuance_review(tmp_path: Path) -> None:
+    token_path = tmp_path / "token.json"
+    review_path = tmp_path / "review.json"
+    review_path.write_text(
+        json.dumps(
+            {
+                "status": "B_STABILITY_TOKEN_ISSUANCE_REVIEW_READY",
+                "token_issuance_review_ready": True,
+                "token_created": False,
+                "execution_authorized": False,
+                "can_submit_order": False,
+                "live_order_sent": False,
+                "blockers": [],
+                "planner_evidence": {
+                    "planner_snapshot_ts": NOW.isoformat(),
+                    "planner_expires_at": (NOW + timedelta(minutes=2)).isoformat(),
+                },
+                "token_binding_fields": {
+                    "market_slug": MARKET,
+                    "selected_side": "BID_ONLY",
+                    "quote_price": 0.38,
+                    "quote_size": 50.0,
+                    "max_live_risk_usdc": 296.67,
+                    "hold_seconds": 300,
+                    "token_ttl_seconds": 600,
+                    "planner_hash": PLANNER_HASH,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    rc = create_token_main(
+        [
+            "--token-issuance-review-report",
+            str(review_path),
+            "--market-slug",
+            MARKET,
+            "--max-live-risk-usdc",
+            "296.67",
+            "--quote-price",
+            "0.38",
+            "--quote-size",
+            "50",
+            "--hold-seconds",
+            "300",
+            "--ttl-seconds",
+            "600",
+            "--out",
+            str(token_path),
+            "--confirm-create-token",
+        ]
+    )
+    token = json.loads(token_path.read_text(encoding="utf-8"))
+
+    assert rc == 0
+    assert token["status"] == "ISSUED_UNUSED"
+    assert token["quote_price"] == 0.38
+    assert token["quote_size"] == 50.0
+    assert token["hold_seconds"] == 300.0
+    assert token["ttl_seconds"] == 600
+    assert token["planner_hash"] == PLANNER_HASH
+    assert token["can_submit_order"] is False
+    assert token["live_order_sent"] is False
+
+
+def test_cli_create_token_from_review_rejects_mismatched_ttl_or_price(tmp_path: Path) -> None:
+    token_path = tmp_path / "token.json"
+    review_path = tmp_path / "review.json"
+    review_path.write_text(
+        json.dumps(
+            {
+                "status": "B_STABILITY_TOKEN_ISSUANCE_REVIEW_READY",
+                "token_issuance_review_ready": True,
+                "token_created": False,
+                "execution_authorized": False,
+                "can_submit_order": False,
+                "live_order_sent": False,
+                "blockers": [],
+                "token_binding_fields": {
+                    "market_slug": MARKET,
+                    "quote_price": 0.38,
+                    "quote_size": 50.0,
+                    "max_live_risk_usdc": 296.67,
+                    "hold_seconds": 300,
+                    "token_ttl_seconds": 600,
+                    "planner_hash": PLANNER_HASH,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    price_rc = create_token_main(
+        [
+            "--token-issuance-review-report",
+            str(review_path),
+            "--quote-price",
+            "0.39",
+            "--out",
+            str(token_path),
+            "--confirm-create-token",
+        ]
+    )
+    ttl_rc = create_token_main(
+        [
+            "--token-issuance-review-report",
+            str(review_path),
+            "--ttl-seconds",
+            "300",
+            "--out",
+            str(token_path),
+            "--confirm-create-token",
+        ]
+    )
+
+    assert price_rc == 2
+    assert ttl_rc == 2
+    assert not token_path.exists()
+
+
+def test_cli_create_token_from_review_rejects_non_ready_review(tmp_path: Path) -> None:
+    token_path = tmp_path / "token.json"
+    review_path = tmp_path / "review.json"
+    review_path.write_text(
+        json.dumps(
+            {
+                "status": "B_STABILITY_TOKEN_ISSUANCE_REVIEW_BLOCKED",
+                "token_issuance_review_ready": False,
+                "token_binding_fields": {
+                    "market_slug": MARKET,
+                    "quote_price": 0.38,
+                    "quote_size": 50.0,
+                    "max_live_risk_usdc": 296.67,
+                    "hold_seconds": 300,
+                    "token_ttl_seconds": 600,
+                    "planner_hash": PLANNER_HASH,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    rc = create_token_main(
+        [
+            "--token-issuance-review-report",
+            str(review_path),
+            "--out",
+            str(token_path),
+            "--confirm-create-token",
+        ]
+    )
+
+    assert rc == 2
+    assert not token_path.exists()
