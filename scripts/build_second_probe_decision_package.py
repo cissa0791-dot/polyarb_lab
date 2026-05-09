@@ -1,0 +1,84 @@
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from src.live.report_metadata import attach_writer_metadata  # noqa: E402
+from src.live.second_probe_decision_package import (  # noqa: E402
+    READY_STATUS,
+    REPORT_SCHEMA_VERSION,
+    build_second_probe_decision_package,
+    load_json_report,
+    markdown_report,
+)
+
+
+DEFAULT_REPORTS_DIR = ROOT / "data" / "reports"
+DEFAULT_OUT = DEFAULT_REPORTS_DIR / "second_probe_decision_package_latest.json"
+DEFAULT_MD_OUT = DEFAULT_REPORTS_DIR / "second_probe_decision_package_latest.md"
+
+
+REPORT_FILES = {
+    "post_live_audit": "post_live_probe_audit_001_latest.json",
+    "gate": "live_readiness_gate_latest.json",
+    "inventory_state": "inventory_state_latest.json",
+    "order_mutex": "order_mutex_readiness_latest.json",
+    "heartbeat": "live_network_readiness_latest.json",
+    "market_microstructure": "live_market_microstructure_latest.json",
+}
+
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Build SECOND_PROBE_DECISION_PACKAGE.")
+    parser.add_argument("--reports-dir", default=str(DEFAULT_REPORTS_DIR))
+    parser.add_argument("--out", default=str(DEFAULT_OUT))
+    parser.add_argument("--md-out", default=str(DEFAULT_MD_OUT))
+    parser.add_argument("--suggested-hold-seconds", type=int, default=300)
+    parser.add_argument("--pretty", action="store_true")
+    return parser.parse_args(argv)
+
+
+def build_report(args: argparse.Namespace) -> dict:
+    reports_dir = Path(args.reports_dir)
+    loaded = {key: load_json_report(reports_dir / filename) for key, filename in REPORT_FILES.items()}
+    report = build_second_probe_decision_package(
+        post_live_audit=loaded["post_live_audit"],
+        gate=loaded["gate"],
+        inventory_state=loaded["inventory_state"],
+        order_mutex=loaded["order_mutex"],
+        heartbeat=loaded["heartbeat"],
+        market_microstructure=loaded["market_microstructure"],
+        suggested_hold_seconds=args.suggested_hold_seconds,
+    )
+    attach_writer_metadata(
+        report,
+        writer_script=Path(__file__),
+        report_schema_version=REPORT_SCHEMA_VERSION,
+        input_reports_used=[reports_dir / filename for filename in REPORT_FILES.values()],
+        source_files=[Path(__file__), ROOT / "src" / "live" / "second_probe_decision_package.py"],
+        root=ROOT,
+    )
+    return report
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
+    report = build_report(args)
+    out = Path(args.out)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    md_out = Path(args.md_out)
+    md_out.parent.mkdir(parents=True, exist_ok=True)
+    md_out.write_text(markdown_report(report), encoding="utf-8")
+    print(json.dumps(report, ensure_ascii=False, indent=2 if args.pretty else None, sort_keys=True))
+    return 0 if report.get("status") == READY_STATUS else 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
