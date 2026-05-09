@@ -38,6 +38,7 @@ def _probe(**overrides) -> dict:
         "cancel_result": {
             "order_id": ORDER_ID,
             "latency_ms": 22.853087,
+            "cancel_response_at_utc": NOW.isoformat(),
             "cancel_request_accepted": True,
             "cancel_confirmed_not_open": True,
         },
@@ -75,6 +76,7 @@ def _authorization(**overrides) -> dict:
 def _inventory(**overrides) -> dict:
     payload = {
         "status": "INVENTORY_STATE_CLEAR",
+        "generated_at_utc": NOW.isoformat(),
         "open_order_count": 0,
         "token_open_order_count": 0,
         "token_balance_shares": 0,
@@ -89,6 +91,7 @@ def _inventory(**overrides) -> dict:
 def _mutex(**overrides) -> dict:
     payload = {
         "status": "ORDER_MUTEX_READY",
+        "generated_at_utc": NOW.isoformat(),
         "order_mutex_state": "NO_ORDER",
         "can_submit_order": False,
         "live_order_sent": False,
@@ -100,6 +103,8 @@ def _mutex(**overrides) -> dict:
 def _gate(**overrides) -> dict:
     payload = {
         "status": "LIVE_READY_APPROVED",
+        "generated_at_utc": NOW.isoformat(),
+        "target_market_slug": MARKET,
         "asserts_passed": 12,
         "asserts_failed": 0,
         "blockers": [],
@@ -113,6 +118,7 @@ def _gate(**overrides) -> dict:
 def _deposit(**overrides) -> dict:
     payload = {
         "status": "DEPOSIT_WALLET_READY",
+        "generated_at_utc": NOW.isoformat(),
         "deposit_wallet_address": "0xwallet",
         "available_usdc": 306.678811,
         "balance_source": "CLOB_GET_BALANCE_ALLOWANCE_COLLATERAL",
@@ -123,12 +129,13 @@ def _deposit(**overrides) -> dict:
 
 
 def _heartbeat() -> dict:
-    return {"status": "API_HEARTBEAT_READY", "latency_ms": 67.793432}
+    return {"status": "API_HEARTBEAT_READY", "generated_at_utc": NOW.isoformat(), "latency_ms": 67.793432}
 
 
 def _order_reconciliation(**overrides) -> dict:
     payload = {
         "status": "ORDER_STATUS_RECONCILIATION_READY",
+        "generated_at_utc": NOW.isoformat(),
         "read_only": True,
         "order_id": ORDER_ID,
         "raw_order_status": "CANCELED",
@@ -138,6 +145,61 @@ def _order_reconciliation(**overrides) -> dict:
         "can_submit_order": False,
         "live_order_sent": False,
         "blockers": [],
+    }
+    payload.update(overrides)
+    return payload
+
+
+def _market_microstructure(**overrides) -> dict:
+    payload = {
+        "status": "MARKET_MICROSTRUCTURE_READY",
+        "generated_at_utc": NOW.isoformat(),
+        "market_slug": MARKET,
+        "quote_bid": 0.36,
+        "quote_ask": 0.37,
+        "quote_size": 50,
+        "rewards_min_size": 50,
+        "rewards_max_spread_cents": 4.5,
+        "can_submit_order": False,
+        "live_order_sent": False,
+    }
+    payload.update(overrides)
+    return payload
+
+
+def _planner(**overrides) -> dict:
+    payload = {
+        "status": "LIVE_PROBE_PLAN_READY",
+        "planner_snapshot_ts": NOW.isoformat(),
+        "recommended_plan": {"market_slug": MARKET, "quote_price": 0.36, "quote_size": 50},
+        "can_submit_order": False,
+        "live_order_sent": False,
+    }
+    payload.update(overrides)
+    return payload
+
+
+def _fee(**overrides) -> dict:
+    payload = {
+        "status": "FEE_RECONCILIATION_READY",
+        "generated_at_utc": NOW.isoformat(),
+        "market_slug": MARKET,
+        "can_cover_fees": True,
+        "can_submit_order": False,
+        "live_order_sent": False,
+    }
+    payload.update(overrides)
+    return payload
+
+
+def _toxic(**overrides) -> dict:
+    payload = {
+        "status": "TOXIC_FLOW_READY",
+        "generated_at_utc": NOW.isoformat(),
+        "market_slug": MARKET,
+        "blockers": [],
+        "can_submit_order": False,
+        "live_order_sent": False,
     }
     payload.update(overrides)
     return payload
@@ -153,6 +215,11 @@ def _report(**overrides) -> dict:
         "gate": _gate(),
         "deposit_wallet": _deposit(),
         "heartbeat": _heartbeat(),
+        "market_microstructure": _market_microstructure(),
+        "planner": _planner(),
+        "fee_reconciliation": _fee(),
+        "toxic_flow": _toxic(),
+        "order_reconciliation": _order_reconciliation(),
         "now": NOW,
     }
     payload.update(overrides)
@@ -164,6 +231,8 @@ def test_zero_fill_probe_audit_freezes_successful_chain_without_profit_claim() -
 
     assert report["status"] == READY_STATUS
     assert report["classification"] == "ZERO_FILL_EXECUTION_CHAIN_PROVEN"
+    assert report["lineage_guard"]["status"] == "POST_PROBE_REPORT_LINEAGE_READY"
+    assert report["matched_order_id"] == ORDER_ID
     assert report["order_id"] == ORDER_ID
     assert report["submit_latency_ms"] == 65.49368
     assert report["cancel_latency_ms"] == 22.853087
@@ -297,6 +366,36 @@ def test_gate_submit_flags_must_return_to_disabled() -> None:
     assert "LIVE_ORDER_SENT_NOT_RESET_IN_GATE" in report["blockers"]
 
 
+def test_lineage_guard_blocks_stale_reconciliation_order_id() -> None:
+    report = _report(order_reconciliation=_order_reconciliation(order_id="0xold"))
+
+    assert report["status"] == BLOCKED_STATUS
+    assert report["lineage_guard"]["status"] == "POST_PROBE_REPORT_LINEAGE_BLOCKED"
+    assert "LINEAGE_ORDER_ID_MISMATCH" in report["blockers"]
+
+
+def test_lineage_guard_blocks_wrong_market() -> None:
+    report = _report(market_microstructure=_market_microstructure(market_slug="different-market"))
+
+    assert report["status"] == BLOCKED_STATUS
+    assert "LINEAGE_MARKET_MICROSTRUCTURE_MARKET_MISMATCH" in report["blockers"]
+
+
+def test_lineage_guard_blocks_old_fee_report() -> None:
+    old_ts = datetime(2026, 5, 9, 7, 20, tzinfo=timezone.utc).isoformat()
+    report = _report(fee_reconciliation=_fee(generated_at_utc=old_ts))
+
+    assert report["status"] == BLOCKED_STATUS
+    assert "LINEAGE_FEE_RECONCILIATION_STALE_BEFORE_PROBE_COMPLETION" in report["blockers"]
+
+
+def test_lineage_guard_blocks_missing_microstructure_report() -> None:
+    report = _report(market_microstructure={})
+
+    assert report["status"] == BLOCKED_STATUS
+    assert "LINEAGE_MARKET_MICROSTRUCTURE_REPORT_MISSING" in report["blockers"]
+
+
 def test_cli_writes_json_and_markdown(tmp_path: Path) -> None:
     reports = tmp_path / "reports"
     reports.mkdir()
@@ -308,6 +407,11 @@ def test_cli_writes_json_and_markdown(tmp_path: Path) -> None:
         "live_readiness_gate_latest.json": _gate(),
         "deposit_wallet_readonly_latest.json": _deposit(),
         "live_network_readiness_latest.json": _heartbeat(),
+        "order_status_reconciliation_latest.json": _order_reconciliation(),
+        "live_market_microstructure_latest.json": _market_microstructure(),
+        "live_probe_planner_latest.json": _planner(),
+        "fee_reconciliation_latest.json": _fee(),
+        "toxic_flow_latest.json": _toxic(),
     }
     for filename, payload in files.items():
         (reports / filename).write_text(json.dumps(payload), encoding="utf-8")
@@ -326,6 +430,8 @@ def test_cli_writes_json_and_markdown(tmp_path: Path) -> None:
             str(out),
             "--md-out",
             str(md_out),
+            "--max-report-age-minutes",
+            "1000",
         ]
     )
     payload = json.loads(out.read_text(encoding="utf-8"))
