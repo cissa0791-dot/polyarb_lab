@@ -128,6 +128,8 @@ def test_ready_plan_is_read_only_and_token_bound() -> None:
     assert report["token_binding_required"] is True
     assert "planner_hash" in report["token_binding_fields"]
     assert isinstance(report["planner_hash"], str) and len(report["planner_hash"]) == 64
+    assert report["hold_seconds"] == 300
+    assert report["token_ttl_seconds"] == 600
     assert report["execution_authorized"] is False
     assert report["can_submit_order"] is False
     assert report["live_order_sent"] is False

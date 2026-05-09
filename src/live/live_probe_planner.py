@@ -200,6 +200,8 @@ def build_live_probe_plan(
             "fill_probability": _round(toxic_flow.get("fill_probability")),
         },
         "max_live_risk_usdc": _round(max_live_risk),
+        "hold_seconds": hold_seconds,
+        "token_ttl_seconds": token_ttl_seconds,
         "capital_buffer_usdc": (
             _round((max_live_risk or 0.0) - (recommended_plan.get("capital_required_usdc") or 0.0))
             if recommended_plan and max_live_risk is not None
