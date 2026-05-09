@@ -14,6 +14,7 @@ BLOCKED_STATUS = "B_STABILITY_TOKEN_ISSUANCE_REVIEW_BLOCKED"
 REVIEW_ID = "B_STABILITY_TOKEN_ISSUANCE_REVIEW"
 PROBE_TYPE = "B_LONG_OBSERVATION_STABILITY"
 APPROVAL_READY_STATUS = "B_LOW_FILL_STABILITY_PROBE_APPROVAL_PACKAGE_READY"
+DEFAULT_EXECUTION_BUFFER_SECONDS = 60
 
 
 def build_b_stability_token_issuance_review(
@@ -50,6 +51,7 @@ def build_b_stability_token_issuance_review(
     stability_max_fill_probability = _first_float(approval_package.get("stability_max_fill_probability"))
     token_ttl_seconds = _first_int(planner.get("token_ttl_seconds"))
     hold_seconds = _first_int(approval_package.get("hold_seconds"), planner.get("hold_seconds"), binding.get("hold_seconds"))
+    required_ttl_seconds = _required_ttl_seconds(hold_seconds)
 
     blockers = _blockers(
         approval_package=approval_package,
@@ -62,6 +64,7 @@ def build_b_stability_token_issuance_review(
         stability_max_fill_probability=stability_max_fill_probability,
         hold_seconds=hold_seconds,
         token_ttl_seconds=token_ttl_seconds,
+        required_ttl_seconds=required_ttl_seconds,
     )
     status = READY_STATUS if not blockers else BLOCKED_STATUS
 
@@ -93,6 +96,8 @@ def build_b_stability_token_issuance_review(
         "quote_size": token_binding_fields["quote_size"],
         "hold_seconds": hold_seconds,
         "token_ttl_seconds": token_ttl_seconds,
+        "execution_buffer_seconds": DEFAULT_EXECUTION_BUFFER_SECONDS,
+        "required_ttl_seconds": required_ttl_seconds,
         "max_live_risk_usdc": token_binding_fields["max_live_risk_usdc"],
         "fill_probability_proxy": _round(fill_probability_proxy),
         "fill_probability_is_model_estimate": approval_package.get("fill_probability_is_model_estimate") is True,
@@ -135,6 +140,11 @@ def build_b_stability_token_issuance_review(
             "authorization_status": authorization_report.get("status"),
             "authorization_token_valid": authorization_report.get("authorization_token_valid"),
             "token_status": authorization_report.get("token_status"),
+            "ttl_remaining_seconds": _round(authorization_report.get("ttl_remaining_seconds")),
+            "active_token_covers_required_ttl": _active_token_covers_required_ttl(
+                authorization_report=authorization_report,
+                required_ttl_seconds=required_ttl_seconds,
+            ),
             "blockers": authorization_report.get("blockers")
             if isinstance(authorization_report.get("blockers"), list)
             else [],
@@ -213,6 +223,7 @@ def _blockers(
     stability_max_fill_probability: float | None,
     hold_seconds: int | None,
     token_ttl_seconds: int | None,
+    required_ttl_seconds: int | None,
 ) -> list[str]:
     blockers: list[str] = []
     if approval_package.get("status") != APPROVAL_READY_STATUS:
@@ -267,8 +278,8 @@ def _blockers(
         blockers.append("TOKEN_BINDING_HOLD_SECONDS_MISMATCH")
     if token_ttl_seconds is None or token_ttl_seconds <= 0:
         blockers.append("TOKEN_TTL_SECONDS_MISSING_OR_INVALID")
-    elif hold_seconds is not None and token_ttl_seconds < hold_seconds:
-        blockers.append("TOKEN_TTL_SHORTER_THAN_HOLD_WINDOW")
+    elif required_ttl_seconds is not None and token_ttl_seconds < required_ttl_seconds:
+        blockers.append("TOKEN_TTL_SHORTER_THAN_HOLD_PLUS_BUFFER")
     if fill_probability_proxy is None:
         blockers.append("FILL_PROBABILITY_PROXY_MISSING")
     elif stability_max_fill_probability is not None and fill_probability_proxy > stability_max_fill_probability:
@@ -279,9 +290,13 @@ def _blockers(
         blockers.append("PENDING_REWARD_ACCOUNTING_BOUNDARY_BROKEN")
     if approval_package.get("estimated_net_profit_counted_as_realized_cash_pnl") is not False:
         blockers.append("ESTIMATED_NET_PROFIT_ACCOUNTING_BOUNDARY_BROKEN")
-    if authorization_report.get("authorization_token_valid") is True:
+    active_token_covers_required_ttl = _active_token_covers_required_ttl(
+        authorization_report=authorization_report,
+        required_ttl_seconds=required_ttl_seconds,
+    )
+    if authorization_report.get("authorization_token_valid") is True and active_token_covers_required_ttl:
         blockers.append("ACTIVE_AUTHORIZATION_TOKEN_ALREADY_VALID")
-    if authorization_report.get("execution_release_ready") is True:
+    if authorization_report.get("execution_release_ready") is True and active_token_covers_required_ttl:
         blockers.append("ACTIVE_EXECUTION_RELEASE_ALREADY_READY")
     return _unique(blockers)
 
@@ -314,6 +329,27 @@ def _first_float(*values: Any) -> float | None:
 def _first_int(*values: Any) -> int | None:
     parsed = _first_float(*values)
     return int(parsed) if parsed is not None else None
+
+
+def _required_ttl_seconds(hold_seconds: int | None) -> int | None:
+    if hold_seconds is None:
+        return None
+    return hold_seconds + DEFAULT_EXECUTION_BUFFER_SECONDS
+
+
+def _active_token_covers_required_ttl(
+    *,
+    authorization_report: dict[str, Any],
+    required_ttl_seconds: int | None,
+) -> bool:
+    ttl_remaining = _first_float(authorization_report.get("ttl_remaining_seconds"))
+    return (
+        authorization_report.get("authorization_token_valid") is True
+        and authorization_report.get("execution_release_ready") is True
+        and ttl_remaining is not None
+        and required_ttl_seconds is not None
+        and ttl_remaining >= required_ttl_seconds
+    )
 
 
 def _round(value: Any, digits: int = 6) -> float | None:

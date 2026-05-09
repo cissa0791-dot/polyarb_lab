@@ -134,6 +134,8 @@ def test_ready_review_allows_only_future_token_creation_after_operator_approval(
     assert report["approval_boundary"]["same_token_retry_allowed"] is False
     assert report["approval_boundary"]["same_approval_retry_allowed"] is False
     assert report["fill_probability_proxy"] == 0.222222
+    assert report["execution_buffer_seconds"] == 60
+    assert report["required_ttl_seconds"] == 360
     assert report["token_binding_fields"] == {
         "market_slug": MARKET,
         "selected_side": "BID_ONLY",
@@ -170,14 +172,14 @@ def test_blocks_if_fill_probability_or_classification_is_not_b_stability() -> No
     assert "FILL_PROBABILITY_PROXY_TOO_HIGH_FOR_B_STABILITY" in report["blockers"]
 
 
-def test_blocks_if_token_ttl_is_missing_or_shorter_than_hold() -> None:
+def test_blocks_if_token_ttl_is_missing_or_shorter_than_hold_plus_buffer() -> None:
     missing = _review(planner=_planner(token_ttl_seconds=None))
-    short = _review(planner=_planner(token_ttl_seconds=100))
+    short = _review(planner=_planner(token_ttl_seconds=359))
 
     assert missing["status"] == BLOCKED_STATUS
     assert "TOKEN_TTL_SECONDS_MISSING_OR_INVALID" in missing["blockers"]
     assert short["status"] == BLOCKED_STATUS
-    assert "TOKEN_TTL_SHORTER_THAN_HOLD_WINDOW" in short["blockers"]
+    assert "TOKEN_TTL_SHORTER_THAN_HOLD_PLUS_BUFFER" in short["blockers"]
 
 
 def test_blocks_if_active_authorization_token_already_exists() -> None:
@@ -187,6 +189,7 @@ def test_blocks_if_active_authorization_token_already_exists() -> None:
             authorization_token_valid=True,
             execution_release_ready=True,
             token_status="ISSUED_UNUSED",
+            ttl_remaining_seconds=360,
             blockers=[],
         )
     )
@@ -194,6 +197,24 @@ def test_blocks_if_active_authorization_token_already_exists() -> None:
     assert report["status"] == BLOCKED_STATUS
     assert "ACTIVE_AUTHORIZATION_TOKEN_ALREADY_VALID" in report["blockers"]
     assert "ACTIVE_EXECUTION_RELEASE_ALREADY_READY" in report["blockers"]
+
+
+def test_allows_replacement_when_active_authorization_ttl_cannot_cover_required_window() -> None:
+    report = _review(
+        authorization_report=_authorization(
+            status="SINGLE_SIDE_PROBE_AUTHORIZATION_READY",
+            authorization_token_valid=True,
+            execution_release_ready=True,
+            token_status="ISSUED_UNUSED",
+            ttl_remaining_seconds=359,
+            blockers=[],
+        )
+    )
+
+    assert report["status"] == READY_STATUS
+    assert report["active_token_evidence"]["active_token_covers_required_ttl"] is False
+    assert "ACTIVE_AUTHORIZATION_TOKEN_ALREADY_VALID" not in report["blockers"]
+    assert "ACTIVE_EXECUTION_RELEASE_ALREADY_READY" not in report["blockers"]
 
 
 def test_blocks_if_any_execution_boundary_is_open() -> None:
