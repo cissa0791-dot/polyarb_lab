@@ -368,6 +368,8 @@ def _run_guarded_probe(
     *,
     fake: _FakeClient,
     guard_snapshot: dict | None = None,
+    visibility_grace_period_ms: float = 0.0,
+    hold_seconds: float = 300.0,
 ) -> dict:
     clock = _Clock()
     return run_single_side_bid_probe(
@@ -384,7 +386,7 @@ def _run_guarded_probe(
         consume_token=True,
         acknowledge_live_risk=True,
         confirm_single_side_bid_probe=True,
-        hold_seconds=300,
+        hold_seconds=hold_seconds,
         status_poll_seconds=0,
         client=fake,
         now_fn=clock.utcnow,
@@ -392,6 +394,7 @@ def _run_guarded_probe(
         sleep_fn=clock.sleep,
         enable_abort_guards=True,
         guard_snapshot_fn=(lambda: guard_snapshot or {}),
+        visibility_grace_period_ms=visibility_grace_period_ms,
     )
 
 
@@ -412,6 +415,36 @@ def test_long_observation_aborts_when_order_disappears_without_fill(tmp_path: Pa
     fake = _FakeClient(open_orders_sequence=[[], []])
 
     report = _run_guarded_probe(tmp_path, fake=fake)
+
+    assert report["status"] == ABORTED_CANCEL_CONFIRMED
+    assert report["abort_condition"] == "ORDER_DISAPPEARED_UNEXPECTEDLY"
+    assert report["cancel_result"]["cancel_confirmed_not_open"] is True
+
+
+def test_visibility_grace_period_tolerates_initial_open_order_index_lag(tmp_path: Path) -> None:
+    fake = _FakeClient(open_orders_sequence=[[], [_OpenOrder()], []])
+
+    report = _run_guarded_probe(
+        tmp_path,
+        fake=fake,
+        visibility_grace_period_ms=1500.0,
+        hold_seconds=0.3,
+    )
+
+    assert report["status"] == COMPLETED
+    assert report["hold_observation"]["aborted"] is False
+    assert report["hold_observation"]["visibility_grace_events"][0]["event_type"] == "OPEN_ORDER_VISIBILITY_GRACE"
+    assert report["cancel_result"]["cancel_confirmed_not_open"] is True
+
+
+def test_visibility_grace_period_still_aborts_after_deadline(tmp_path: Path) -> None:
+    fake = _FakeClient(open_orders_sequence=[[], []])
+
+    report = _run_guarded_probe(
+        tmp_path,
+        fake=fake,
+        visibility_grace_period_ms=50.0,
+    )
 
     assert report["status"] == ABORTED_CANCEL_CONFIRMED
     assert report["abort_condition"] == "ORDER_DISAPPEARED_UNEXPECTEDLY"

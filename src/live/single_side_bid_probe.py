@@ -29,6 +29,7 @@ ABORTED_CANCEL_CONFIRMED = "SINGLE_SIDE_BID_PROBE_ABORTED_CANCEL_CONFIRMED"
 
 DEFAULT_HOLD_SECONDS = 30.0
 DEFAULT_STATUS_POLL_SECONDS = 5.0
+DEFAULT_VISIBILITY_GRACE_PERIOD_MS = 2000.0
 
 ACTIVE_ORDER_STATUSES = {"LIVE", "OPEN", "ACTIVE", "PENDING", "PLACED"}
 TERMINAL_ORDER_STATUSES = {"CANCELED", "CANCELLED", "EXPIRED", "FILLED", "MATCHED", "DEAD"}
@@ -207,6 +208,7 @@ def run_single_side_bid_probe(
     enable_abort_guards: bool = False,
     guard_snapshot_fn: GuardSnapshotProvider | None = None,
     max_report_age_minutes: float | None = 2.0,
+    visibility_grace_period_ms: float = DEFAULT_VISIBILITY_GRACE_PERIOD_MS,
 ) -> dict[str, Any]:
     now_fn = now_fn or (lambda: datetime.now(timezone.utc))
     monotonic_fn = monotonic_fn or time.monotonic
@@ -363,6 +365,7 @@ def run_single_side_bid_probe(
             event_log=event_log,
             enable_abort_guards=enable_abort_guards,
             guard_snapshot_fn=guard_snapshot_fn,
+            visibility_grace_period_ms=visibility_grace_period_ms,
         )
         report["hold_observation"] = {
             "target_hold_seconds": _round(hold_seconds),
@@ -370,6 +373,8 @@ def run_single_side_bid_probe(
             "aborted": observation.get("aborted") is True,
             "abort_condition": observation.get("abort_condition"),
             "abort_snapshot": observation.get("abort_snapshot"),
+            "visibility_grace_period_ms": observation.get("visibility_grace_period_ms"),
+            "visibility_grace_events": observation.get("visibility_grace_events") or [],
             "status_polls": status_rows,
         }
 
@@ -498,10 +503,13 @@ def _observe_order(
     event_log: list[dict[str, Any]],
     enable_abort_guards: bool = False,
     guard_snapshot_fn: GuardSnapshotProvider | None = None,
+    visibility_grace_period_ms: float = DEFAULT_VISIBILITY_GRACE_PERIOD_MS,
 ) -> dict[str, Any]:
     start = monotonic_fn()
     deadline = start + max(0.0, float(hold_seconds))
     poll_interval = max(0.0, float(poll_seconds))
+    visibility_grace_seconds = max(0.0, float(visibility_grace_period_ms)) / 1000.0
+    visibility_grace_events: list[dict[str, Any]] = []
     while True:
         row: dict[str, Any] = {}
         try:
@@ -533,7 +541,15 @@ def _observe_order(
                     row=row,
                     now_fn=now_fn,
                 )
-                abort = _abort_from_open_order_snapshot(open_order_snapshot)
+                abort = _abort_from_open_order_snapshot(
+                    open_order_snapshot,
+                    elapsed_seconds=max(0.0, monotonic_fn() - start),
+                    visibility_grace_seconds=visibility_grace_seconds,
+                    event_log=event_log,
+                    visibility_grace_events=visibility_grace_events,
+                    now_fn=now_fn,
+                    order_id=order_id,
+                )
             guard_snapshot = guard_snapshot_fn() if guard_snapshot_fn is not None and abort is None else {}
             if guard_snapshot:
                 row["guard_snapshot"] = _compact_guard_snapshot(guard_snapshot)
@@ -560,6 +576,8 @@ def _observe_order(
                 "aborted": False,
                 "abort_condition": None,
                 "abort_snapshot": None,
+                "visibility_grace_period_ms": round(visibility_grace_seconds * 1000.0, 6),
+                "visibility_grace_events": visibility_grace_events,
             }
         sleep_for = min(poll_interval, max(0.0, deadline - now_mono))
         if sleep_for > 0:
@@ -622,12 +640,35 @@ def _open_order_guard_snapshot(
         }
 
 
-def _abort_from_open_order_snapshot(snapshot: dict[str, Any] | None) -> str | None:
+def _abort_from_open_order_snapshot(
+    snapshot: dict[str, Any] | None,
+    *,
+    elapsed_seconds: float,
+    visibility_grace_seconds: float,
+    event_log: list[dict[str, Any]],
+    visibility_grace_events: list[dict[str, Any]],
+    now_fn: Callable[[], datetime],
+    order_id: str,
+) -> str | None:
     if not snapshot:
         return None
     if snapshot.get("error"):
         return "OPEN_ORDER_READ_FAILED"
     if _optional_float(snapshot.get("matching_order_count")) == 0:
+        if elapsed_seconds < visibility_grace_seconds:
+            event = _event(
+                "OPEN_ORDER_VISIBILITY_GRACE",
+                now_fn(),
+                order_id=order_id,
+                elapsed_seconds=round(elapsed_seconds, 6),
+                visibility_grace_period_ms=round(visibility_grace_seconds * 1000.0, 6),
+            )
+            event_log.append(event)
+            visibility_grace_events.append(event)
+            snapshot["visibility_grace_active"] = True
+            snapshot["elapsed_seconds"] = round(elapsed_seconds, 6)
+            snapshot["visibility_grace_period_ms"] = round(visibility_grace_seconds * 1000.0, 6)
+            return None
         return "ORDER_DISAPPEARED_UNEXPECTEDLY"
     return None
 

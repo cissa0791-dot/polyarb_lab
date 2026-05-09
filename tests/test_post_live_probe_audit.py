@@ -126,6 +126,23 @@ def _heartbeat() -> dict:
     return {"status": "API_HEARTBEAT_READY", "latency_ms": 67.793432}
 
 
+def _order_reconciliation(**overrides) -> dict:
+    payload = {
+        "status": "ORDER_STATUS_RECONCILIATION_READY",
+        "read_only": True,
+        "order_id": ORDER_ID,
+        "raw_order_status": "CANCELED",
+        "size_matched": 0.0,
+        "original_size": 50.0,
+        "raw_order_cancelled_zero_fill": True,
+        "can_submit_order": False,
+        "live_order_sent": False,
+        "blockers": [],
+    }
+    payload.update(overrides)
+    return payload
+
+
 def _report(**overrides) -> dict:
     payload = {
         "probe": _probe(),
@@ -153,6 +170,81 @@ def test_zero_fill_probe_audit_freezes_successful_chain_without_profit_claim() -
     assert report["tri_party_consistency"]["consistent"] is True
     assert report["pnl_accounting"]["profitability_claimed"] is False
     assert report["pnl_accounting"]["realized_cash_pnl_usdc"] == 0.0
+
+
+def test_visibility_drift_abort_is_confirmed_as_safe_zero_fill_closeout() -> None:
+    probe = _probe(
+        status="SINGLE_SIDE_BID_PROBE_ABORTED_CANCEL_CONFIRMED",
+        blockers=["ORDER_DISAPPEARED_UNEXPECTEDLY"],
+        abort_condition="ORDER_DISAPPEARED_UNEXPECTEDLY",
+        hold_observation={
+            "observed_seconds": 0.049948,
+            "aborted": True,
+            "abort_condition": "ORDER_DISAPPEARED_UNEXPECTEDLY",
+            "status_polls": [
+                {"order_id": ORDER_ID, "status": "unknown", "size_matched": 0.0, "size_remaining": 0.0}
+            ],
+            "abort_snapshot": {
+                "open_order_guard": {
+                    "open_order_count": 0,
+                    "matching_order_count": 0,
+                    "order_id": ORDER_ID,
+                }
+            },
+        },
+        cancel_result={
+            "order_id": ORDER_ID,
+            "latency_ms": 23.933679,
+            "cancel_request_accepted": True,
+            "cancel_confirmed_not_open": True,
+        },
+    )
+    report = _report(probe=probe, order_reconciliation=_order_reconciliation())
+
+    assert report["status"] == READY_STATUS
+    assert report["classification"] == "OPEN_ORDER_VISIBILITY_DRIFT_ABORT_CONFIRMED"
+    assert report["blockers"] == []
+    assert report["local_ledger"]["visibility_drift_abort_confirmed"] is True
+    assert report["tri_party_consistency"]["local_ledger_cancel_confirmed_zero_fill"] is True
+    assert report["tri_party_consistency"]["open_order_visibility_drift_abort_confirmed"] is True
+    assert report["tri_party_consistency"]["consistent"] is True
+    assert report["pnl_accounting"]["profitability_claimed"] is False
+    assert report["pnl_accounting"]["realized_cash_pnl_usdc"] == 0.0
+
+
+def test_visibility_drift_abort_requires_cancel_confirmation() -> None:
+    probe = _probe(
+        status="SINGLE_SIDE_BID_PROBE_ABORTED_CANCEL_CONFIRMED",
+        blockers=["ORDER_DISAPPEARED_UNEXPECTEDLY"],
+        abort_condition="ORDER_DISAPPEARED_UNEXPECTEDLY",
+        cancel_result={
+            "order_id": ORDER_ID,
+            "latency_ms": 23.933679,
+            "cancel_request_accepted": True,
+            "cancel_confirmed_not_open": False,
+        },
+    )
+    report = _report(probe=probe, order_reconciliation=_order_reconciliation())
+
+    assert report["status"] == BLOCKED_STATUS
+    assert report["classification"] == "POST_LIVE_PROBE_AUDIT_INCOMPLETE"
+    assert report["local_ledger"]["visibility_drift_abort_confirmed"] is False
+    assert "LOCAL_LEDGER_CANCEL_NOT_CONFIRMED" in report["blockers"]
+
+
+def test_visibility_drift_abort_requires_raw_order_cancelled_zero_fill() -> None:
+    probe = _probe(
+        status="SINGLE_SIDE_BID_PROBE_ABORTED_CANCEL_CONFIRMED",
+        blockers=["ORDER_DISAPPEARED_UNEXPECTEDLY"],
+        abort_condition="ORDER_DISAPPEARED_UNEXPECTEDLY",
+    )
+    report = _report(probe=probe, order_reconciliation=_order_reconciliation(raw_order_status="LIVE"))
+
+    assert report["status"] == BLOCKED_STATUS
+    assert report["classification"] == "POST_LIVE_PROBE_AUDIT_INCOMPLETE"
+    assert report["raw_order_audit"]["raw_order_cancelled_zero_fill"] is False
+    assert report["local_ledger"]["visibility_drift_abort_confirmed"] is False
+    assert "TRI_PARTY_CONSISTENCY_NOT_PROVEN" in report["blockers"]
 
 
 def test_expended_token_is_required_and_not_reusable() -> None:

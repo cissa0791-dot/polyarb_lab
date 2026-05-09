@@ -25,6 +25,7 @@ from src.live.report_metadata import attach_writer_metadata  # noqa: E402
 from src.live.single_side_bid_probe import (  # noqa: E402
     DEFAULT_HOLD_SECONDS,
     DEFAULT_STATUS_POLL_SECONDS,
+    DEFAULT_VISIBILITY_GRACE_PERIOD_MS,
     REPORT_SCHEMA_VERSION,
     load_json_report,
     run_single_side_bid_probe,
@@ -65,6 +66,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--quote-size", type=float, required=True)
     parser.add_argument("--hold-seconds", type=float, default=DEFAULT_HOLD_SECONDS)
     parser.add_argument("--status-poll-seconds", type=float, default=DEFAULT_STATUS_POLL_SECONDS)
+    parser.add_argument("--visibility-grace-period-ms", type=float, default=DEFAULT_VISIBILITY_GRACE_PERIOD_MS)
     parser.add_argument("--max-report-age-minutes", type=float, default=2.0)
     parser.add_argument(
         "--enable-long-observation-guards",
@@ -145,6 +147,7 @@ def main(argv: list[str] | None = None) -> int:
             guard_snapshot_fn=_guard_snapshot_provider(args, reports_dir)
             if args.enable_long_observation_guards
             else None,
+            visibility_grace_period_ms=args.visibility_grace_period_ms,
         )
     except Exception as exc:
         report = {

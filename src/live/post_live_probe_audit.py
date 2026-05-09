@@ -31,6 +31,7 @@ def build_post_live_probe_audit(
     probe: dict[str, Any] | None = None,
     authorization: dict[str, Any] | None = None,
     token: dict[str, Any] | None = None,
+    order_reconciliation: dict[str, Any] | None = None,
     inventory_state: dict[str, Any] | None = None,
     order_mutex: dict[str, Any] | None = None,
     gate: dict[str, Any] | None = None,
@@ -44,6 +45,7 @@ def build_post_live_probe_audit(
     probe = probe or {}
     authorization = authorization or {}
     token = token or {}
+    order_reconciliation = order_reconciliation or {}
     inventory_state = inventory_state or {}
     order_mutex = order_mutex or {}
     gate = gate or {}
@@ -63,6 +65,8 @@ def build_post_live_probe_audit(
 
     local_ledger = {
         "probe_status": probe.get("status"),
+        "probe_blockers": probe.get("blockers") if isinstance(probe.get("blockers"), list) else [],
+        "probe_abort_condition": probe.get("abort_condition") or hold.get("abort_condition"),
         "order_id": order_id,
         "live_order_sent": probe.get("live_order_sent") is True,
         "top_level_can_submit_order": probe.get("can_submit_order"),
@@ -74,6 +78,20 @@ def build_post_live_probe_audit(
         "zero_fill_observed": _same_float(local_fill, 0.0),
         "hold_observed_seconds": _round(hold.get("observed_seconds")),
     }
+    raw_order_audit = {
+        "order_reconciliation_status": order_reconciliation.get("status"),
+        "order_id": order_reconciliation.get("order_id"),
+        "raw_order_status": order_reconciliation.get("raw_order_status"),
+        "raw_order_cancelled_zero_fill": _raw_order_cancelled_zero_fill(order_reconciliation, order_id),
+        "raw_order_read_only": order_reconciliation.get("read_only") is True,
+        "raw_order_blockers": order_reconciliation.get("blockers")
+        if isinstance(order_reconciliation.get("blockers"), list)
+        else [],
+    }
+    local_ledger["visibility_drift_abort_confirmed"] = _visibility_drift_abort_confirmed(
+        local_ledger,
+        raw_order_audit=raw_order_audit,
+    )
     token_audit = {
         "token_file": str(token_file) if token_file is not None else None,
         "token_status": token_status,
@@ -122,11 +140,15 @@ def build_post_live_probe_audit(
     }
     tri_party_consistency = {
         "local_ledger_cancel_confirmed_zero_fill": (
-            probe.get("status") == "SINGLE_SIDE_BID_PROBE_COMPLETED"
+            (
+                probe.get("status") == "SINGLE_SIDE_BID_PROBE_COMPLETED"
+                or local_ledger["visibility_drift_abort_confirmed"]
+            )
             and local_ledger["live_order_sent"]
             and local_ledger["cancel_confirmed_not_open"]
             and local_ledger["zero_fill_observed"]
         ),
+        "open_order_visibility_drift_abort_confirmed": local_ledger["visibility_drift_abort_confirmed"],
         "api_reports_show_no_open_order_or_inventory": bool(api_state["open_order_clear"] and api_state["inventory_clear"]),
         "onchain_or_deposit_wallet_readiness_available": onchain_state["deposit_wallet_ready"],
         "final_gate_returned_to_disabled_readiness": bool(
@@ -135,7 +157,14 @@ def build_post_live_probe_audit(
             and gate.get("live_order_sent") is False
         ),
     }
-    tri_party_consistency["consistent"] = all(tri_party_consistency.values())
+    tri_party_consistency["consistent"] = all(
+        [
+            tri_party_consistency["local_ledger_cancel_confirmed_zero_fill"],
+            tri_party_consistency["api_reports_show_no_open_order_or_inventory"],
+            tri_party_consistency["onchain_or_deposit_wallet_readiness_available"],
+            tri_party_consistency["final_gate_returned_to_disabled_readiness"],
+        ]
+    )
 
     blockers = _blockers(
         local_ledger=local_ledger,
@@ -146,7 +175,12 @@ def build_post_live_probe_audit(
         tri_party_consistency=tri_party_consistency,
     )
     status = READY_STATUS if not blockers else BLOCKED_STATUS
-    classification = "ZERO_FILL_EXECUTION_CHAIN_PROVEN" if status == READY_STATUS else "POST_LIVE_PROBE_AUDIT_INCOMPLETE"
+    if status == READY_STATUS and local_ledger["visibility_drift_abort_confirmed"]:
+        classification = "OPEN_ORDER_VISIBILITY_DRIFT_ABORT_CONFIRMED"
+    elif status == READY_STATUS:
+        classification = "ZERO_FILL_EXECUTION_CHAIN_PROVEN"
+    else:
+        classification = "POST_LIVE_PROBE_AUDIT_INCOMPLETE"
 
     return {
         "report_type": REPORT_TYPE,
@@ -171,6 +205,7 @@ def build_post_live_probe_audit(
             "profitability_validation_allowed": False,
         },
         "local_ledger": local_ledger,
+        "raw_order_audit": raw_order_audit,
         "token_audit": token_audit,
         "api_state": api_state,
         "onchain_state": onchain_state,
@@ -182,7 +217,7 @@ def build_post_live_probe_audit(
             "confirmed_reward_usdc": 0.0,
             "pending_reward_counted_as_confirmed_reward": False,
             "profitability_claimed": False,
-            "reason": "No fill was observed, so this is execution-chain evidence only.",
+            "reason": _pnl_reason(classification),
         },
         "next_probe_requirements": {
             "new_operator_approval_required": True,
@@ -289,6 +324,46 @@ def _token_cannot_be_reused(token_status: Any, authorization: dict[str, Any]) ->
         and authorization.get("execution_release_ready") is False
         and ("AUTH_TOKEN_ALREADY_EXPENDED" in blockers or authorization.get("token_status") == "EXPENDED")
     )
+
+
+def _visibility_drift_abort_confirmed(
+    local_ledger: dict[str, Any],
+    *,
+    raw_order_audit: dict[str, Any],
+) -> bool:
+    blockers = local_ledger.get("probe_blockers") if isinstance(local_ledger.get("probe_blockers"), list) else []
+    abort_condition = str(local_ledger.get("probe_abort_condition") or "")
+    return (
+        local_ledger.get("probe_status") == "SINGLE_SIDE_BID_PROBE_ABORTED_CANCEL_CONFIRMED"
+        and (
+            abort_condition == "ORDER_DISAPPEARED_UNEXPECTEDLY"
+            or "ORDER_DISAPPEARED_UNEXPECTEDLY" in blockers
+        )
+        and local_ledger.get("live_order_sent") is True
+        and local_ledger.get("cancel_confirmed_not_open") is True
+        and local_ledger.get("zero_fill_observed") is True
+        and raw_order_audit.get("raw_order_cancelled_zero_fill") is True
+    )
+
+
+def _raw_order_cancelled_zero_fill(order_reconciliation: dict[str, Any], order_id: Any) -> bool:
+    status = str(order_reconciliation.get("raw_order_status") or "").strip().upper()
+    return (
+        order_reconciliation.get("status") == "ORDER_STATUS_RECONCILIATION_READY"
+        and order_reconciliation.get("read_only") is True
+        and str(order_reconciliation.get("order_id") or "") == str(order_id or "")
+        and status in {"CANCELED", "CANCELLED"}
+        and _same_float(order_reconciliation.get("size_matched"), 0.0)
+    )
+
+
+def _pnl_reason(classification: str) -> str:
+    if classification == "OPEN_ORDER_VISIBILITY_DRIFT_ABORT_CONFIRMED":
+        return (
+            "No fill was observed. The order was cancelled after an open-order "
+            "visibility drift abort, so this is safety/consistency evidence only."
+        )
+    return "No fill was observed, so this is execution-chain evidence only."
 
 
 def _max_size_matched(submit: dict[str, Any], polls: list[Any]) -> float | None:

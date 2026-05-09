@@ -29,6 +29,7 @@ DEFAULT_MD_OUT = DEFAULT_REPORTS_DIR / "post_live_probe_audit_001_latest.md"
 REPORT_FILES = {
     "probe": "single_side_bid_probe_latest.json",
     "authorization": "single_side_probe_authorization_latest.json",
+    "order_reconciliation": "order_status_reconciliation_latest.json",
     "inventory_state": "inventory_state_latest.json",
     "order_mutex": "order_mutex_readiness_latest.json",
     "gate": "live_readiness_gate_latest.json",
@@ -56,6 +57,7 @@ def build_report(args: argparse.Namespace) -> dict:
         probe=loaded["probe"],
         authorization=loaded["authorization"],
         token=token,
+        order_reconciliation=loaded["order_reconciliation"],
         inventory_state=loaded["inventory_state"],
         order_mutex=loaded["order_mutex"],
         gate=loaded["gate"],
