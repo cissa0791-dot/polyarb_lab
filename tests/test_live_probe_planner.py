@@ -211,6 +211,33 @@ def test_toxic_unsafe_rejects_candidate() -> None:
     assert "TOXIC_FLOW_NOT_CLEAR" in report["rejected_plans"][0]["blockers"]
 
 
+def test_high_fill_probability_reclassifies_stability_probe_candidate() -> None:
+    report = _plan(toxic_flow=_toxic(fill_probability=0.964083), stability_max_fill_probability=0.3)
+
+    assert report["status"] == "LIVE_PROBE_PLAN_NO_SAFE_CANDIDATE_FOR_STABILITY"
+    assert report["recommended_plan"] is None
+    assert "NO_SAFE_CANDIDATE_FOR_STABILITY" in report["blockers"]
+    assert report["reclassified_candidates"] == [MARKET]
+    rejected = report["rejected_plans"][0]
+    assert rejected["plan_classification"] == "PLAN_RECLASSIFIED_TO_FILL_LIKELIHOOD"
+    assert rejected["reclassified_probe_intent"] == "C_FILL_LIKELIHOOD_RECONCILIATION"
+    assert rejected["fill_probability"] == 0.964083
+    assert rejected["stability_max_fill_probability"] == 0.3
+    assert "FILL_PROBABILITY_TOO_HIGH_FOR_STABILITY_PROBE" in rejected["blockers"]
+    assert rejected["checks"]["stability_fill_probability_check"] is False
+    assert report["can_submit_order"] is False
+    assert report["live_order_sent"] is False
+
+
+def test_missing_fill_probability_blocks_stability_classification() -> None:
+    toxic = _toxic()
+    toxic.pop("fill_probability")
+    report = _plan(toxic_flow=toxic)
+
+    assert report["status"] == "LIVE_PROBE_PLAN_NO_SAFE_CANDIDATE"
+    assert "FILL_PROBABILITY_MISSING_FOR_STABILITY_PROBE" in report["rejected_plans"][0]["blockers"]
+
+
 def test_fee_unsafe_rejects_candidate() -> None:
     report = _plan(fee_reconciliation=_fee(status="FEE_BLOCKER", can_cover_fees=False))
 

@@ -13,16 +13,22 @@ REPORT_TYPE = "live_probe_planner"
 PLAN_READY_STATUS = "LIVE_PROBE_PLAN_READY"
 PLAN_BLOCKED_STATUS = "LIVE_PROBE_PLAN_BLOCKED"
 NO_SAFE_CANDIDATE_STATUS = "LIVE_PROBE_PLAN_NO_SAFE_CANDIDATE"
+NO_SAFE_CANDIDATE_FOR_STABILITY_STATUS = "LIVE_PROBE_PLAN_NO_SAFE_CANDIDATE_FOR_STABILITY"
 
 PLANNER_NAME = "NEXT_LIVE_PROBE_PLANNER"
 RECOMMENDED_MODE = "B_LONG_OBSERVATION_BID_ONLY_STABILITY_PROBE"
 REJECTED_MODE = "MAKER_BOTH_SIDES_LIVE"
+PROBE_INTENT_STABILITY = "B_LONG_OBSERVATION_STABILITY"
+PROBE_INTENT_FILL_LIKELIHOOD = "C_FILL_LIKELIHOOD_RECONCILIATION"
+PLAN_CLASSIFICATION_STABILITY = "B_LONG_OBSERVATION_STABILITY"
+PLAN_RECLASSIFIED_TO_FILL_LIKELIHOOD = "PLAN_RECLASSIFIED_TO_FILL_LIKELIHOOD"
 DEFAULT_SELECTED_SIDE = "BID_ONLY"
 DEFAULT_HOLD_SECONDS = 300
 DEFAULT_TOKEN_TTL_SECONDS = 600
 DEFAULT_PLANNER_VALID_SECONDS = 120
 DEFAULT_VISIBILITY_GRACE_PERIOD_MS = 2000.0
 DEFAULT_MIN_PROBE_SIZE = 50.0
+DEFAULT_STABILITY_MAX_FILL_PROBABILITY = 0.30
 
 
 def build_live_probe_plan(
@@ -43,6 +49,8 @@ def build_live_probe_plan(
     token_ttl_seconds: int = DEFAULT_TOKEN_TTL_SECONDS,
     planner_valid_seconds: int = DEFAULT_PLANNER_VALID_SECONDS,
     visibility_grace_period_ms: float = DEFAULT_VISIBILITY_GRACE_PERIOD_MS,
+    probe_intent: str = PROBE_INTENT_STABILITY,
+    stability_max_fill_probability: float = DEFAULT_STABILITY_MAX_FILL_PROBABILITY,
     now: datetime | None = None,
 ) -> dict[str, Any]:
     """Build a read-only plan for the next single-side live probe.
@@ -75,19 +83,28 @@ def build_live_probe_plan(
             max_live_risk=max_live_risk,
             min_probe_size=min_probe_size,
             target_market_slug=target_market_slug,
+            probe_intent=probe_intent,
+            stability_max_fill_probability=stability_max_fill_probability,
         )
         for candidate in candidates
     ]
     safe_candidates = [item for item in evaluated if not item["blockers"]]
     recommended_plan = _choose_recommended_plan(safe_candidates)
     rejected_plans = [item for item in evaluated if item["blockers"]]
+    reclassified_candidates = [
+        item for item in rejected_plans if item.get("plan_classification") == PLAN_RECLASSIFIED_TO_FILL_LIKELIHOOD
+    ]
     selected_side = DEFAULT_SELECTED_SIDE
 
     status = PLAN_BLOCKED_STATUS
     blockers = list(global_blockers)
     if not global_blockers and recommended_plan is None:
-        status = NO_SAFE_CANDIDATE_STATUS
-        blockers.append("NO_SAFE_CANDIDATE")
+        if probe_intent == PROBE_INTENT_STABILITY and reclassified_candidates:
+            status = NO_SAFE_CANDIDATE_FOR_STABILITY_STATUS
+            blockers.append("NO_SAFE_CANDIDATE_FOR_STABILITY")
+        else:
+            status = NO_SAFE_CANDIDATE_STATUS
+            blockers.append("NO_SAFE_CANDIDATE")
     elif not global_blockers and recommended_plan is not None:
         status = PLAN_READY_STATUS
     for item in rejected_plans:
@@ -106,6 +123,8 @@ def build_live_probe_plan(
         "hold_seconds": hold_seconds,
         "token_ttl_seconds": token_ttl_seconds,
         "visibility_grace_period_ms": _round(visibility_grace_period_ms),
+        "probe_intent": probe_intent,
+        "stability_max_fill_probability": _round(stability_max_fill_probability),
     }
     planner_hash = _stable_hash(core)
 
@@ -125,6 +144,22 @@ def build_live_probe_plan(
             "Planner evaluates refreshed local candidate reports only. It does not scan every Polymarket market, "
             "so the recommendation is not a global optimum claim."
         ),
+        "requested_probe_intent": probe_intent,
+        "stability_max_fill_probability": _round(stability_max_fill_probability),
+        "plan_classification": recommended_plan.get("plan_classification") if recommended_plan else None,
+        "classification_audit": [
+            {
+                "candidate_id": item.get("candidate_id"),
+                "market_slug": item.get("market_slug"),
+                "plan_classification": item.get("plan_classification"),
+                "reclassified_probe_intent": item.get("reclassified_probe_intent"),
+                "fill_probability": item.get("fill_probability"),
+                "stability_max_fill_probability": item.get("stability_max_fill_probability"),
+                "blockers": item.get("blockers") or [],
+            }
+            for item in evaluated
+        ],
+        "reclassified_candidates": [item.get("market_slug") or item.get("candidate_id") for item in reclassified_candidates],
         "recommended_next_mode": RECOMMENDED_MODE,
         "rejected_next_mode": REJECTED_MODE,
         "rejected_next_mode_reason": (
@@ -221,6 +256,9 @@ def build_live_probe_plan(
             "toxic_flow_check": recommended_plan.get("checks", {}).get("toxic_flow_check") if recommended_plan else False,
             "tick_size_check": recommended_plan.get("checks", {}).get("tick_size_check") if recommended_plan else False,
             "reward_min_size_check": recommended_plan.get("checks", {}).get("reward_min_size_check") if recommended_plan else False,
+            "stability_fill_probability_check": (
+                recommended_plan.get("checks", {}).get("stability_fill_probability_check") if recommended_plan else False
+            ),
             "capital_required_within_allowed_risk": (
                 recommended_plan.get("checks", {}).get("capital_required_within_allowed_risk") if recommended_plan else False
             ),
@@ -245,9 +283,12 @@ def markdown_report(report: dict[str, Any]) -> str:
         f"- Live order sent: {report.get('live_order_sent')}",
         f"- Requires new approval: {report.get('requires_new_approval')}",
         f"- Requires new token: {report.get('requires_new_token')}",
+        f"- Requested probe intent: {report.get('requested_probe_intent')}",
+        f"- Stability max fill probability: {report.get('stability_max_fill_probability')}",
         "",
         "## Recommended Plan",
         f"- Mode: {report.get('recommended_next_mode')}",
+        f"- Plan classification: {recommended.get('plan_classification')}",
         f"- Side: {report.get('selected_side')}",
         f"- Market: {recommended.get('market_slug')}",
         f"- Quote price: {recommended.get('quote_price')}",
@@ -307,6 +348,8 @@ def _evaluate_candidate(
     max_live_risk: float | None,
     min_probe_size: float,
     target_market_slug: str | None,
+    probe_intent: str,
+    stability_max_fill_probability: float,
 ) -> dict[str, Any]:
     market_slug = _first_text(candidate.get("market_slug"))
     quote_bid = _first_float(candidate.get("quote_bid"), candidate.get("best_bid"))
@@ -320,6 +363,10 @@ def _evaluate_candidate(
     expected_max_loss = capital_required
     fee_quote_bid = _first_float(fee_reconciliation.get("quote_bid"))
     fee_quote_size = _first_float(fee_reconciliation.get("quote_size"))
+    fill_probability = _first_float(toxic_flow.get("fill_probability"))
+    plan_classification = PLAN_CLASSIFICATION_STABILITY if probe_intent == PROBE_INTENT_STABILITY else probe_intent
+    reclassified_probe_intent: str | None = None
+    stability_fill_probability_check = True
     blockers: list[str] = []
 
     if target_market_slug and market_slug != target_market_slug:
@@ -362,6 +409,15 @@ def _evaluate_candidate(
         blockers.append("TOXIC_FLOW_NOT_CLEAR")
     if toxic_flow.get("fill_probability_ok") is False:
         blockers.append("FILL_PROBABILITY_BELOW_MINIMUM")
+    if probe_intent == PROBE_INTENT_STABILITY:
+        if fill_probability is None:
+            blockers.append("FILL_PROBABILITY_MISSING_FOR_STABILITY_PROBE")
+            stability_fill_probability_check = False
+        elif fill_probability > stability_max_fill_probability:
+            blockers.append("FILL_PROBABILITY_TOO_HIGH_FOR_STABILITY_PROBE")
+            plan_classification = PLAN_RECLASSIFIED_TO_FILL_LIKELIHOOD
+            reclassified_probe_intent = PROBE_INTENT_FILL_LIKELIHOOD
+            stability_fill_probability_check = False
     if fee_reconciliation.get("market_slug") and market_slug and fee_reconciliation.get("market_slug") != market_slug:
         blockers.append("FEE_REPORT_NOT_BOUND_TO_CANDIDATE")
     if fee_reconciliation.get("status") != "FEE_RECONCILIATION_READY" or fee_reconciliation.get("can_cover_fees") is not True:
@@ -381,7 +437,11 @@ def _evaluate_candidate(
         and "QUOTE_PRICE_OUT_OF_BOUNDS" not in blockers
         and "QUOTE_PRICE_INVERSION" not in blockers,
         "reward_min_size_check": rewards_min_size is not None and quote_size is not None and quote_size >= rewards_min_size,
-        "toxic_flow_check": "TOXIC_FLOW_NOT_CLEAR" not in blockers and "FILL_PROBABILITY_BELOW_MINIMUM" not in blockers,
+        "toxic_flow_check": "TOXIC_FLOW_NOT_CLEAR" not in blockers
+        and "FILL_PROBABILITY_BELOW_MINIMUM" not in blockers
+        and "FILL_PROBABILITY_MISSING_FOR_STABILITY_PROBE" not in blockers
+        and "FILL_PROBABILITY_TOO_HIGH_FOR_STABILITY_PROBE" not in blockers,
+        "stability_fill_probability_check": stability_fill_probability_check,
         "fee_check": "FEE_RECONCILIATION_NOT_READY" not in blockers and "FEE_REPORT_NOT_BOUND_TO_PLAN_PRICE_SIZE" not in blockers,
         "capital_required_within_allowed_risk": max_live_risk is not None
         and capital_required is not None
@@ -391,6 +451,9 @@ def _evaluate_candidate(
         "candidate_id": _candidate_id(market_slug, quote_price, quote_size),
         "market_slug": market_slug,
         "selected_side": DEFAULT_SELECTED_SIDE,
+        "requested_probe_intent": probe_intent,
+        "plan_classification": plan_classification,
+        "reclassified_probe_intent": reclassified_probe_intent,
         "quote_price": _round(quote_price),
         "quote_bid": _round(quote_bid),
         "quote_ask": _round(quote_ask),
@@ -404,6 +467,8 @@ def _evaluate_candidate(
         "reward_min_size": _round(rewards_min_size),
         "reward_max_spread_cents": _round(candidate.get("rewards_max_spread_cents")),
         "estimated_net_profit_usdc": _round(fee_reconciliation.get("estimated_net_profit_usdc")),
+        "fill_probability": _round(fill_probability),
+        "stability_max_fill_probability": _round(stability_max_fill_probability),
         "toxic_flow_status": toxic_flow.get("status"),
         "fee_reconciliation_status": fee_reconciliation.get("status"),
         "checks": checks,
@@ -621,6 +686,11 @@ def _unique(items: list[str]) -> list[str]:
 def _one_line_verdict(status: str, blockers: list[str]) -> str:
     if status == PLAN_READY_STATUS:
         return "LIVE_PROBE_PLAN_READY: next-probe plan is ready for review only; execution remains unauthorized."
+    if status == NO_SAFE_CANDIDATE_FOR_STABILITY_STATUS:
+        return (
+            "LIVE_PROBE_PLAN_NO_SAFE_CANDIDATE_FOR_STABILITY: candidate fill probability is too high for a "
+            "stability probe; reclassify or wait for a lower-fill setup. No token or live order authorized."
+        )
     if status == NO_SAFE_CANDIDATE_STATUS:
         return "LIVE_PROBE_PLAN_NO_SAFE_CANDIDATE: no candidate passed the read-only planner checks; no token or live order authorized."
     return f"LIVE_PROBE_PLAN_BLOCKED: {', '.join(blockers) or 'UNKNOWN'}; no token or live order authorized."

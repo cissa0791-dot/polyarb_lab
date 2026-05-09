@@ -11,6 +11,9 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from src.live.live_probe_planner import (  # noqa: E402
+    DEFAULT_STABILITY_MAX_FILL_PROBABILITY,
+    PROBE_INTENT_FILL_LIKELIHOOD,
+    PROBE_INTENT_STABILITY,
     REPORT_SCHEMA_VERSION,
     build_live_probe_plan,
     markdown_report,
@@ -47,6 +50,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--planner-valid-seconds", type=int, default=120)
     parser.add_argument("--visibility-grace-period-ms", type=float, default=2000.0)
     parser.add_argument(
+        "--probe-intent",
+        choices=[PROBE_INTENT_STABILITY, PROBE_INTENT_FILL_LIKELIHOOD],
+        default=PROBE_INTENT_STABILITY,
+        help="Read-only experiment class the planner is allowed to recommend.",
+    )
+    parser.add_argument(
+        "--stability-max-fill-probability",
+        type=float,
+        default=DEFAULT_STABILITY_MAX_FILL_PROBABILITY,
+        help="Maximum allowed fill probability for a long-observation stability probe.",
+    )
+    parser.add_argument(
         "--candidate-market-report",
         action="append",
         default=[],
@@ -78,6 +93,8 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
         token_ttl_seconds=args.token_ttl_seconds,
         planner_valid_seconds=args.planner_valid_seconds,
         visibility_grace_period_ms=args.visibility_grace_period_ms,
+        probe_intent=args.probe_intent,
+        stability_max_fill_probability=args.stability_max_fill_probability,
     )
     input_paths = [reports_dir / filename for filename in REPORT_FILES.values()] + candidate_paths
     report["source_reports"] = {key: str(reports_dir / filename) for key, filename in REPORT_FILES.items()}
