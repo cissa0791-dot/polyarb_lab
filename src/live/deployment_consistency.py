@@ -24,6 +24,7 @@ DEFAULT_CRITICAL_PATHS = [
     "src/live/final_physical_readiness.py",
     "src/live/single_side_live_rehearsal.py",
     "src/live/one_time_auth_token.py",
+    "src/live/b_stability_token_issuance_review.py",
     "scripts/build_live_readiness_gate_report.py",
     "scripts/build_deposit_wallet_readonly_report.py",
     "scripts/build_live_market_microstructure_report.py",
@@ -38,6 +39,7 @@ DEFAULT_CRITICAL_PATHS = [
     "scripts/build_single_side_live_rehearsal_report.py",
     "scripts/build_single_side_probe_authorization_report.py",
     "scripts/create_single_side_probe_authorization_token.py",
+    "scripts/build_b_stability_token_issuance_review.py",
 ]
 
 
