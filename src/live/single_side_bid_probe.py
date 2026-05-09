@@ -119,13 +119,16 @@ def build_probe_preflight(
     *,
     gate: dict[str, Any],
     rehearsal: dict[str, Any],
+    planner: dict[str, Any] | None = None,
     token_report: dict[str, Any],
     target: dict[str, Any],
     max_live_risk_usdc: float,
+    hold_seconds: float | None = None,
     now: datetime | None = None,
     max_report_age_minutes: float | None = 2.0,
 ) -> dict[str, Any]:
     now = now or datetime.now(timezone.utc)
+    planner = planner or {}
     blockers: list[str] = []
 
     gate_checks = {
@@ -158,6 +161,22 @@ def build_probe_preflight(
     }
     _append_failed(blockers, token_checks, "TOKEN")
 
+    plan = planner.get("recommended_plan") if isinstance(planner.get("recommended_plan"), dict) else {}
+    planner_checks = {
+        "planner_ready": planner.get("status") == "LIVE_PROBE_PLAN_READY",
+        "planner_hash_present": bool(planner.get("planner_hash")),
+        "planner_requires_new_token": planner.get("requires_new_token") is True,
+        "planner_does_not_authorize_execution": planner.get("execution_authorized") is False,
+        "planner_can_submit_order_false": planner.get("can_submit_order") is False,
+        "planner_live_order_sent_false": planner.get("live_order_sent") is False,
+        "planner_market_matches_target": bool(plan.get("market_slug")) and plan.get("market_slug") == target.get("market_slug"),
+        "planner_price_matches_target": _same_float(plan.get("quote_price"), target.get("quote_price")),
+        "planner_size_matches_target": _same_float(plan.get("quote_size"), target.get("quote_size")),
+        "planner_hold_matches_target": hold_seconds is None or _same_float(planner.get("hold_seconds"), hold_seconds),
+        "planner_token_binding_required": planner.get("token_binding_required") is True,
+    }
+    _append_failed(blockers, planner_checks, "PLANNER")
+
     target_checks = {
         "target_market_matches_gate": bool(target.get("market_slug")) and target.get("market_slug") == gate.get("target_market_slug"),
         "target_risk_matches_gate": _same_float(max_live_risk_usdc, gate.get("max_live_risk_usdc")),
@@ -177,6 +196,7 @@ def build_probe_preflight(
         "checks": {
             "gate": gate_checks,
             "rehearsal": rehearsal_checks,
+            "planner": planner_checks,
             "token": token_checks,
             "target": target_checks,
         },
@@ -189,6 +209,7 @@ def run_single_side_bid_probe(
     gate: dict[str, Any],
     rehearsal: dict[str, Any],
     token_report: dict[str, Any],
+    planner: dict[str, Any] | None = None,
     health: dict[str, Any] | None,
     market_microstructure: dict[str, Any] | None,
     max_live_risk_usdc: float,
@@ -214,6 +235,7 @@ def run_single_side_bid_probe(
     monotonic_fn = monotonic_fn or time.monotonic
     sleep_fn = sleep_fn or time.sleep
     now = now_fn()
+    planner = planner or {}
 
     token, token_load_error = load_authorization_token(token_file)
     live_token_report = build_authorization_report(
@@ -223,6 +245,8 @@ def run_single_side_bid_probe(
         expected_max_live_risk_usdc=max_live_risk_usdc,
         expected_quote_price=quote_price,
         expected_quote_size=quote_size,
+        expected_hold_seconds=hold_seconds,
+        expected_planner_hash=planner.get("planner_hash"),
         now=now,
         load_error=token_load_error,
     )
@@ -244,9 +268,11 @@ def run_single_side_bid_probe(
     preflight = build_probe_preflight(
         gate=gate,
         rehearsal=rehearsal,
+        planner=planner,
         token_report=live_token_report,
         target=target,
         max_live_risk_usdc=max_live_risk_usdc,
+        hold_seconds=hold_seconds,
         now=now,
         max_report_age_minutes=max_report_age_minutes,
     )

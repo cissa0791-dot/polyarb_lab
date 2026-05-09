@@ -41,6 +41,7 @@ DEFAULT_CLOB_HOST = "https://clob.polymarket.com"
 REPORT_FILES = {
     "gate": "live_readiness_gate_latest.json",
     "rehearsal": "single_side_live_rehearsal_latest.json",
+    "planner": "live_probe_planner_latest.json",
     "token_report": "single_side_probe_authorization_latest.json",
     "health": "live_api_health_readonly_now.json",
     "market_microstructure": "live_market_microstructure_latest.json",
@@ -128,6 +129,7 @@ def main(argv: list[str] | None = None) -> int:
         report = run_single_side_bid_probe(
             gate=loaded["gate"],
             rehearsal=loaded["rehearsal"],
+            planner=loaded["planner"],
             token_report=loaded["token_report"],
             health=loaded["health"],
             market_microstructure=loaded["market_microstructure"],

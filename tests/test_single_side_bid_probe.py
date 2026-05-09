@@ -21,6 +21,7 @@ from src.live.single_side_bid_probe import (
 NOW = datetime(2026, 5, 8, 3, 0, tzinfo=timezone.utc)
 MARKET = "will-ivan-cepeda-castro-win-the-2026-colombian-presidential-election"
 TOKEN_ID = "token-ivan"
+PLANNER_HASH = "a" * 64
 
 
 @dataclass
@@ -162,12 +163,35 @@ def _micro() -> dict:
     }
 
 
-def _token_file(tmp_path: Path) -> Path:
+def _planner(*, hold_seconds: float = 30.0, **overrides) -> dict:
+    payload = {
+        "status": "LIVE_PROBE_PLAN_READY",
+        "planner_hash": PLANNER_HASH,
+        "requires_new_token": True,
+        "execution_authorized": False,
+        "can_submit_order": False,
+        "live_order_sent": False,
+        "token_binding_required": True,
+        "hold_seconds": hold_seconds,
+        "recommended_plan": {
+            "market_slug": MARKET,
+            "selected_side": "BID_ONLY",
+            "quote_price": 0.36,
+            "quote_size": 50,
+        },
+    }
+    payload.update(overrides)
+    return payload
+
+
+def _token_file(tmp_path: Path, *, hold_seconds: float = 30.0) -> Path:
     token = create_authorization_token(
         market_slug=MARKET,
         max_live_risk_usdc=296.67,
         quote_price=0.36,
         quote_size=50,
+        hold_seconds=hold_seconds,
+        planner_hash=PLANNER_HASH,
         now=NOW,
         nonce="fixednonce",
     )
@@ -183,6 +207,7 @@ def test_dry_run_ready_does_not_call_client_or_consume_token(tmp_path: Path) -> 
     report = run_single_side_bid_probe(
         gate=_gate(),
         rehearsal=_rehearsal(),
+        planner=_planner(),
         token_report={},
         health=_health(),
         market_microstructure=_micro(),
@@ -211,6 +236,7 @@ def test_live_request_without_all_confirmations_blocks_before_client(tmp_path: P
     report = run_single_side_bid_probe(
         gate=_gate(),
         rehearsal=_rehearsal(),
+        planner=_planner(),
         token_report={},
         health=_health(),
         market_microstructure=_micro(),
@@ -233,13 +259,14 @@ def test_live_request_without_all_confirmations_blocks_before_client(tmp_path: P
 
 
 def test_live_path_expends_token_submits_once_and_cancels_exact_order(tmp_path: Path) -> None:
-    token_file = _token_file(tmp_path)
+    token_file = _token_file(tmp_path, hold_seconds=0)
     fake = _FakeClient()
     clock = _Clock()
 
     report = run_single_side_bid_probe(
         gate=_gate(),
         rehearsal=_rehearsal(),
+        planner=_planner(hold_seconds=0),
         token_report={},
         health=_health(),
         market_microstructure=_micro(),
@@ -272,13 +299,14 @@ def test_live_path_expends_token_submits_once_and_cancels_exact_order(tmp_path: 
 
 
 def test_unconfirmed_cancel_forces_emergency_review(tmp_path: Path) -> None:
-    token_file = _token_file(tmp_path)
+    token_file = _token_file(tmp_path, hold_seconds=0)
     fake = _FakeClient(still_open_after_cancel=True)
     clock = _Clock()
 
     report = run_single_side_bid_probe(
         gate=_gate(),
         rehearsal=_rehearsal(),
+        planner=_planner(hold_seconds=0),
         token_report={},
         health=_health(),
         market_microstructure=_micro(),
@@ -308,6 +336,7 @@ def test_preflight_blocks_when_rehearsal_authorizes_execution() -> None:
     preflight = build_probe_preflight(
         gate=_gate(),
         rehearsal=_rehearsal(EXECUTION_AUTHORIZED=True),
+        planner=_planner(),
         token_report={
             "status": "SINGLE_SIDE_PROBE_AUTHORIZATION_READY",
             "authorization_token_valid": True,
@@ -318,6 +347,7 @@ def test_preflight_blocks_when_rehearsal_authorizes_execution() -> None:
         },
         target={"market_slug": MARKET, "token_id": TOKEN_ID, "quote_price": 0.36, "quote_size": 50, "order_side_selected": "BID_ONLY", "side": "BUY"},
         max_live_risk_usdc=296.67,
+        hold_seconds=30,
         now=NOW,
     )
 
@@ -331,6 +361,7 @@ def test_cli_default_writes_blocked_without_live_execution(tmp_path: Path) -> No
     files = {
         "live_readiness_gate_latest.json": _gate(),
         "single_side_live_rehearsal_latest.json": _rehearsal(),
+        "live_probe_planner_latest.json": _planner(),
         "single_side_probe_authorization_latest.json": {},
         "live_api_health_readonly_now.json": _health(),
         "live_market_microstructure_latest.json": _micro(),
@@ -375,13 +406,14 @@ def _run_guarded_probe(
     return run_single_side_bid_probe(
         gate=_gate(),
         rehearsal=_rehearsal(),
+        planner=_planner(hold_seconds=hold_seconds),
         token_report={},
         health=_health(),
         market_microstructure=_micro(),
         max_live_risk_usdc=296.67,
         quote_price=0.36,
         quote_size=50,
-        token_file=_token_file(tmp_path),
+        token_file=_token_file(tmp_path, hold_seconds=hold_seconds),
         execute_live_probe=True,
         consume_token=True,
         acknowledge_live_risk=True,
