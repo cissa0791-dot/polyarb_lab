@@ -189,6 +189,8 @@ def test_preflight_ready_keeps_execution_locked() -> None:
     assert report["quote_price"] == 0.38
     assert report["quote_size"] == 50.0
     assert report["hold_seconds"] == 300
+    assert report["execution_buffer_seconds"] == 60
+    assert report["required_ttl_remaining_seconds"] == 360
     assert report["planner_hash"] == HASH
     assert report["execution_authorized"] is False
     assert report["can_submit_order"] is False
@@ -208,11 +210,12 @@ def test_preflight_blocks_expired_or_expended_token() -> None:
     assert "TOKEN_TOKEN_UNUSED_FAILED" in expended["blockers"]
 
 
-def test_preflight_blocks_token_ttl_shorter_than_hold_window() -> None:
-    report = build_b_stability_probe_execution_preflight(**_payload(authorization=_auth(ttl_remaining_seconds=299)))
+def test_preflight_blocks_token_ttl_shorter_than_hold_plus_buffer() -> None:
+    report = build_b_stability_probe_execution_preflight(**_payload(authorization=_auth(ttl_remaining_seconds=359)))
 
     assert report["status"] == BLOCKED_STATUS
-    assert "TOKEN_TOKEN_TTL_COVERS_HOLD_WINDOW_FAILED" in report["blockers"]
+    assert report["required_ttl_remaining_seconds"] == 360
+    assert "TOKEN_TOKEN_TTL_COVERS_HOLD_PLUS_BUFFER_FAILED" in report["blockers"]
 
 
 def test_preflight_blocks_if_12_of_12_or_execution_isolation_not_ready() -> None:

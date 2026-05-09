@@ -13,6 +13,7 @@ BLOCKED_STATUS = "B_STABILITY_PROBE_EXECUTION_PREFLIGHT_BLOCKED"
 
 PREFLIGHT_ID = "B_STABILITY_PROBE_EXECUTION_PREFLIGHT"
 PROBE_TYPE = "B_LONG_OBSERVATION_STABILITY"
+DEFAULT_EXECUTION_BUFFER_SECONDS = 60
 
 
 def build_b_stability_probe_execution_preflight(
@@ -92,6 +93,8 @@ def build_b_stability_probe_execution_preflight(
         "quote_size": _round(binding.get("quote_size")),
         "hold_seconds": _first_int(binding.get("hold_seconds")),
         "token_ttl_seconds": _first_int(binding.get("token_ttl_seconds")),
+        "execution_buffer_seconds": DEFAULT_EXECUTION_BUFFER_SECONDS,
+        "required_ttl_remaining_seconds": _required_ttl_remaining_seconds(binding),
         "planner_hash": binding.get("planner_hash"),
         "token_status": authorization.get("token_status"),
         "authorization_token_valid": authorization.get("authorization_token_valid") is True,
@@ -173,16 +176,16 @@ def markdown_report(report: dict[str, Any]) -> str:
 
 def _token_checks(authorization: dict[str, Any], *, binding: dict[str, Any]) -> dict[str, bool]:
     ttl_remaining = _first_float(authorization.get("ttl_remaining_seconds"))
-    hold_seconds = _first_float(binding.get("hold_seconds"))
+    required_ttl_remaining = _required_ttl_remaining_seconds(binding)
     return {
         "authorization_ready": authorization.get("status") == "SINGLE_SIDE_PROBE_AUTHORIZATION_READY",
         "token_valid": authorization.get("authorization_token_valid") is True,
         "execution_release_ready": authorization.get("execution_release_ready") is True,
         "token_unused": authorization.get("token_status") == "ISSUED_UNUSED",
         "token_not_expired": ttl_remaining is not None and ttl_remaining > 0,
-        "token_ttl_covers_hold_window": ttl_remaining is not None
-        and hold_seconds is not None
-        and ttl_remaining >= hold_seconds,
+        "token_ttl_covers_hold_plus_buffer": ttl_remaining is not None
+        and required_ttl_remaining is not None
+        and ttl_remaining >= required_ttl_remaining,
         "authorization_does_not_enable_submit": authorization.get("can_submit_order") is False
         and authorization.get("live_order_sent") is False
         and authorization.get("execution_authorized") is False,
@@ -345,6 +348,13 @@ def _first_float(*values: Any) -> float | None:
 def _first_int(*values: Any) -> int | None:
     parsed = _first_float(*values)
     return int(parsed) if parsed is not None else None
+
+
+def _required_ttl_remaining_seconds(binding: dict[str, Any]) -> int | None:
+    hold_seconds = _first_int(binding.get("hold_seconds"))
+    if hold_seconds is None:
+        return None
+    return hold_seconds + DEFAULT_EXECUTION_BUFFER_SECONDS
 
 
 def _same_float(left: Any, right: Any, *, tolerance: float = 1e-9) -> bool:
