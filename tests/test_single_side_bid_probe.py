@@ -8,6 +8,7 @@ from pathlib import Path
 from scripts.run_single_side_bid_probe import main as run_probe_main
 from src.live.one_time_auth_token import create_authorization_token, load_authorization_token, write_authorization_token
 from src.live.single_side_bid_probe import (
+    ABORTED_CANCEL_CONFIRMED,
     BLOCKED,
     COMPLETED,
     DRY_RUN_READY,
@@ -52,9 +53,17 @@ class _OpenOrder:
 
 
 class _FakeClient:
-    def __init__(self, *, still_open_after_cancel: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        still_open_after_cancel: bool = False,
+        order_statuses: list[_OrderStatus] | None = None,
+        open_orders_sequence: list[list[_OpenOrder]] | None = None,
+    ) -> None:
         self.calls: list[tuple] = []
         self.still_open_after_cancel = still_open_after_cancel
+        self.order_statuses = list(order_statuses or [])
+        self.open_orders_sequence = list(open_orders_sequence or [])
 
     def submit_order(self, token_id, side, price, size, *, neg_risk=False, tick_size=None, fee_rate_bps=0):
         self.calls.append(("submit_order", token_id, side, price, size, neg_risk, tick_size, fee_rate_bps))
@@ -62,6 +71,8 @@ class _FakeClient:
 
     def get_order_status(self, order_id):
         self.calls.append(("get_order_status", order_id))
+        if self.order_statuses:
+            return self.order_statuses.pop(0)
         return _OrderStatus(order_id=order_id)
 
     def cancel_order(self, order_id):
@@ -70,6 +81,8 @@ class _FakeClient:
 
     def get_open_orders(self, token_id):
         self.calls.append(("get_open_orders", token_id))
+        if self.open_orders_sequence:
+            return self.open_orders_sequence.pop(0)
         if self.still_open_after_cancel:
             return [_OpenOrder()]
         return []
@@ -348,3 +361,118 @@ def test_cli_default_writes_blocked_without_live_execution(tmp_path: Path) -> No
     assert payload["status"] == BLOCKED
     assert payload["can_submit_order"] is False
     assert payload["live_order_sent"] is False
+
+
+def _run_guarded_probe(
+    tmp_path: Path,
+    *,
+    fake: _FakeClient,
+    guard_snapshot: dict | None = None,
+) -> dict:
+    clock = _Clock()
+    return run_single_side_bid_probe(
+        gate=_gate(),
+        rehearsal=_rehearsal(),
+        token_report={},
+        health=_health(),
+        market_microstructure=_micro(),
+        max_live_risk_usdc=296.67,
+        quote_price=0.36,
+        quote_size=50,
+        token_file=_token_file(tmp_path),
+        execute_live_probe=True,
+        consume_token=True,
+        acknowledge_live_risk=True,
+        confirm_single_side_bid_probe=True,
+        hold_seconds=300,
+        status_poll_seconds=0,
+        client=fake,
+        now_fn=clock.utcnow,
+        monotonic_fn=clock.monotonic,
+        sleep_fn=clock.sleep,
+        enable_abort_guards=True,
+        guard_snapshot_fn=(lambda: guard_snapshot or {}),
+    )
+
+
+def test_long_observation_aborts_on_unexpected_fill_and_cancels(tmp_path: Path) -> None:
+    fake = _FakeClient(order_statuses=[_OrderStatus(size_matched=10.0, size_remaining=40.0)])
+
+    report = _run_guarded_probe(tmp_path, fake=fake)
+
+    assert report["status"] == ABORTED_CANCEL_CONFIRMED
+    assert report["abort_condition"] == "UNEXPECTED_FILL_DETECTED"
+    assert report["hold_observation"]["aborted"] is True
+    assert report["cancel_result"]["cancel_confirmed_not_open"] is True
+    assert ("cancel_order", "order-1") in fake.calls
+    assert report["can_submit_order"] is False
+
+
+def test_long_observation_aborts_when_order_disappears_without_fill(tmp_path: Path) -> None:
+    fake = _FakeClient(open_orders_sequence=[[], []])
+
+    report = _run_guarded_probe(tmp_path, fake=fake)
+
+    assert report["status"] == ABORTED_CANCEL_CONFIRMED
+    assert report["abort_condition"] == "ORDER_DISAPPEARED_UNEXPECTEDLY"
+    assert report["cancel_result"]["cancel_confirmed_not_open"] is True
+
+
+def test_long_observation_aborts_on_critical_heartbeat(tmp_path: Path) -> None:
+    fake = _FakeClient(open_orders_sequence=[[_OpenOrder()], []])
+    guard = {"heartbeat": {"status": "API_HEARTBEAT_BLOCKED", "api_health_status": "CRITICAL_LATENCY"}}
+
+    report = _run_guarded_probe(tmp_path, fake=fake, guard_snapshot=guard)
+
+    assert report["status"] == ABORTED_CANCEL_CONFIRMED
+    assert report["abort_condition"] == "HEARTBEAT_CRITICAL_LATENCY"
+
+
+def test_long_observation_aborts_on_disconnected_heartbeat(tmp_path: Path) -> None:
+    fake = _FakeClient(open_orders_sequence=[[_OpenOrder()], []])
+    guard = {"heartbeat": {"status": "API_HEARTBEAT_BLOCKED", "api_health_status": "DISCONNECTED"}}
+
+    report = _run_guarded_probe(tmp_path, fake=fake, guard_snapshot=guard)
+
+    assert report["status"] == ABORTED_CANCEL_CONFIRMED
+    assert report["abort_condition"] == "HEARTBEAT_DISCONNECTED"
+
+
+def test_long_observation_aborts_on_toxic_flow(tmp_path: Path) -> None:
+    fake = _FakeClient(open_orders_sequence=[[_OpenOrder()], []])
+    guard = {"toxic_flow": {"status": "TOXIC_FLOW_BLOCKED", "blockers": ["ADVERSE_SELECTION_RISK"]}}
+
+    report = _run_guarded_probe(tmp_path, fake=fake, guard_snapshot=guard)
+
+    assert report["status"] == ABORTED_CANCEL_CONFIRMED
+    assert report["abort_condition"] == "TOXIC_FLOW_BLOCKED"
+
+
+def test_long_observation_aborts_on_fee_blocker(tmp_path: Path) -> None:
+    fake = _FakeClient(open_orders_sequence=[[_OpenOrder()], []])
+    guard = {"fee_reconciliation": {"status": "FEE_BLOCKER", "can_cover_fees": False}}
+
+    report = _run_guarded_probe(tmp_path, fake=fake, guard_snapshot=guard)
+
+    assert report["status"] == ABORTED_CANCEL_CONFIRMED
+    assert report["abort_condition"] == "FEE_RECONCILIATION_FLIPS_NEGATIVE"
+
+
+def test_long_observation_aborts_on_inventory_balance_mismatch(tmp_path: Path) -> None:
+    fake = _FakeClient(open_orders_sequence=[[_OpenOrder()], []])
+    guard = {"inventory_state": {"status": "INVENTORY_STATE_CLEAR", "token_balance_shares": 5.0}}
+
+    report = _run_guarded_probe(tmp_path, fake=fake, guard_snapshot=guard)
+
+    assert report["status"] == ABORTED_CANCEL_CONFIRMED
+    assert report["abort_condition"] == "INVENTORY_BALANCE_MISMATCH"
+
+
+def test_long_observation_aborts_on_mutex_state_drift(tmp_path: Path) -> None:
+    fake = _FakeClient(open_orders_sequence=[[_OpenOrder()], []])
+    guard = {"order_mutex": {"status": "ORDER_MUTEX_READY", "order_mutex_state": "NO_ORDER"}}
+
+    report = _run_guarded_probe(tmp_path, fake=fake, guard_snapshot=guard)
+
+    assert report["status"] == ABORTED_CANCEL_CONFIRMED
+    assert report["abort_condition"] == "MUTEX_STATE_DRIFT"

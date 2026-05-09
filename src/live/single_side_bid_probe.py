@@ -25,9 +25,15 @@ DRY_RUN_READY = "SINGLE_SIDE_BID_PROBE_DRY_RUN_READY"
 BLOCKED = "SINGLE_SIDE_BID_PROBE_BLOCKED"
 COMPLETED = "SINGLE_SIDE_BID_PROBE_COMPLETED"
 EMERGENCY_REVIEW = "SINGLE_SIDE_BID_PROBE_EMERGENCY_REVIEW_REQUIRED"
+ABORTED_CANCEL_CONFIRMED = "SINGLE_SIDE_BID_PROBE_ABORTED_CANCEL_CONFIRMED"
 
 DEFAULT_HOLD_SECONDS = 30.0
 DEFAULT_STATUS_POLL_SECONDS = 5.0
+
+ACTIVE_ORDER_STATUSES = {"LIVE", "OPEN", "ACTIVE", "PENDING", "PLACED"}
+TERMINAL_ORDER_STATUSES = {"CANCELED", "CANCELLED", "EXPIRED", "FILLED", "MATCHED", "DEAD"}
+
+GuardSnapshotProvider = Callable[[], dict[str, Any]]
 
 
 class SingleSideProbeClient(Protocol):
@@ -198,6 +204,8 @@ def run_single_side_bid_probe(
     now_fn: Callable[[], datetime] | None = None,
     monotonic_fn: Callable[[], float] | None = None,
     sleep_fn: Callable[[float], None] | None = None,
+    enable_abort_guards: bool = False,
+    guard_snapshot_fn: GuardSnapshotProvider | None = None,
     max_report_age_minutes: float | None = 2.0,
 ) -> dict[str, Any]:
     now_fn = now_fn or (lambda: datetime.now(timezone.utc))
@@ -342,8 +350,9 @@ def run_single_side_bid_probe(
         if not order_id:
             raise RuntimeError("LIVE_SUBMIT_RETURNED_NO_ORDER_ID")
 
-        observed_until = _observe_order(
+        observation = _observe_order(
             client=client,
+            token_id=str(target["token_id"]),
             order_id=order_id,
             hold_seconds=hold_seconds,
             poll_seconds=status_poll_seconds,
@@ -352,10 +361,15 @@ def run_single_side_bid_probe(
             sleep_fn=sleep_fn,
             status_rows=status_rows,
             event_log=event_log,
+            enable_abort_guards=enable_abort_guards,
+            guard_snapshot_fn=guard_snapshot_fn,
         )
         report["hold_observation"] = {
             "target_hold_seconds": _round(hold_seconds),
-            "observed_seconds": _round(observed_until),
+            "observed_seconds": _round(observation.get("observed_seconds")),
+            "aborted": observation.get("aborted") is True,
+            "abort_condition": observation.get("abort_condition"),
+            "abort_snapshot": observation.get("abort_snapshot"),
             "status_polls": status_rows,
         }
 
@@ -383,11 +397,20 @@ def run_single_side_bid_probe(
             "cancel_confirmed_not_open": bool(cancel_confirmed),
         }
 
-        final_status = COMPLETED if cancel_ok and cancel_confirmed else EMERGENCY_REVIEW
-        blockers = [] if final_status == COMPLETED else ["CANCEL_NOT_CONFIRMED_ORDER_RECONCILIATION_REQUIRED"]
+        abort_condition = observation.get("abort_condition")
+        if cancel_ok and cancel_confirmed and abort_condition:
+            final_status = ABORTED_CANCEL_CONFIRMED
+            blockers = [str(abort_condition)]
+        elif cancel_ok and cancel_confirmed:
+            final_status = COMPLETED
+            blockers = []
+        else:
+            final_status = EMERGENCY_REVIEW
+            blockers = ["CANCEL_NOT_CONFIRMED_ORDER_RECONCILIATION_REQUIRED"]
         report.update(
             {
                 "status": final_status,
+                "abort_condition": abort_condition,
                 "blockers": blockers,
                 "can_submit_order": False,
                 "execution_window": {
@@ -464,6 +487,7 @@ def run_single_side_bid_probe(
 def _observe_order(
     *,
     client: SingleSideProbeClient,
+    token_id: str,
     order_id: str,
     hold_seconds: float,
     poll_seconds: float,
@@ -472,23 +496,204 @@ def _observe_order(
     sleep_fn: Callable[[float], None],
     status_rows: list[dict[str, Any]],
     event_log: list[dict[str, Any]],
-) -> float:
+    enable_abort_guards: bool = False,
+    guard_snapshot_fn: GuardSnapshotProvider | None = None,
+) -> dict[str, Any]:
     start = monotonic_fn()
     deadline = start + max(0.0, float(hold_seconds))
     poll_interval = max(0.0, float(poll_seconds))
     while True:
+        row: dict[str, Any] = {}
         try:
             status = client.get_order_status(order_id)
-            status_rows.append(_status_row(status, observed_at=now_fn()))
+            row = _status_row(status, observed_at=now_fn())
+            status_rows.append(row)
             event_log.append(_event("ORDER_STATUS_POLLED", now_fn(), order_id=order_id))
         except LiveClientError as exc:
-            status_rows.append({"observed_at_utc": now_fn().isoformat(), "error": clean_live_error_message(exc)})
+            row = {"observed_at_utc": now_fn().isoformat(), "error": clean_live_error_message(exc)}
+            status_rows.append(row)
+            if enable_abort_guards:
+                return _abort_observation(
+                    start=start,
+                    monotonic_fn=monotonic_fn,
+                    event_log=event_log,
+                    now_fn=now_fn,
+                    condition="ORDER_STATUS_READ_FAILED",
+                    snapshot=row,
+                    order_id=order_id,
+                )
+        if enable_abort_guards:
+            abort = _abort_from_order_status(row)
+            open_order_snapshot: dict[str, Any] | None = None
+            if abort is None:
+                open_order_snapshot = _open_order_guard_snapshot(
+                    client=client,
+                    token_id=token_id,
+                    order_id=order_id,
+                    row=row,
+                    now_fn=now_fn,
+                )
+                abort = _abort_from_open_order_snapshot(open_order_snapshot)
+            guard_snapshot = guard_snapshot_fn() if guard_snapshot_fn is not None and abort is None else {}
+            if guard_snapshot:
+                row["guard_snapshot"] = _compact_guard_snapshot(guard_snapshot)
+                abort = _abort_from_guard_snapshot(guard_snapshot, row)
+            if abort is not None:
+                snapshot = {
+                    "status_row": row,
+                    "open_order_guard": open_order_snapshot,
+                    "guard_snapshot": _compact_guard_snapshot(guard_snapshot),
+                }
+                return _abort_observation(
+                    start=start,
+                    monotonic_fn=monotonic_fn,
+                    event_log=event_log,
+                    now_fn=now_fn,
+                    condition=abort,
+                    snapshot=snapshot,
+                    order_id=order_id,
+                )
         now_mono = monotonic_fn()
         if now_mono >= deadline:
-            return round(max(0.0, now_mono - start), 6)
+            return {
+                "observed_seconds": round(max(0.0, now_mono - start), 6),
+                "aborted": False,
+                "abort_condition": None,
+                "abort_snapshot": None,
+            }
         sleep_for = min(poll_interval, max(0.0, deadline - now_mono))
         if sleep_for > 0:
             sleep_fn(sleep_for)
+
+
+def _abort_observation(
+    *,
+    start: float,
+    monotonic_fn: Callable[[], float],
+    event_log: list[dict[str, Any]],
+    now_fn: Callable[[], datetime],
+    condition: str,
+    snapshot: dict[str, Any],
+    order_id: str,
+) -> dict[str, Any]:
+    observed_seconds = round(max(0.0, monotonic_fn() - start), 6)
+    event_log.append(_event("LONG_OBSERVATION_ABORT_TRIGGERED", now_fn(), order_id=order_id, abort_condition=condition))
+    return {
+        "observed_seconds": observed_seconds,
+        "aborted": True,
+        "abort_condition": condition,
+        "abort_snapshot": snapshot,
+    }
+
+
+def _abort_from_order_status(row: dict[str, Any]) -> str | None:
+    size_matched = _optional_float(row.get("size_matched"))
+    if size_matched is not None and size_matched > 0:
+        return "UNEXPECTED_FILL_DETECTED"
+    status = _status_text(row)
+    if status in TERMINAL_ORDER_STATUSES:
+        return "ORDER_DISAPPEARED_UNEXPECTEDLY"
+    return None
+
+
+def _open_order_guard_snapshot(
+    *,
+    client: SingleSideProbeClient,
+    token_id: str,
+    order_id: str,
+    row: dict[str, Any],
+    now_fn: Callable[[], datetime],
+) -> dict[str, Any]:
+    try:
+        open_orders = client.get_open_orders(token_id)
+        matching = [order for order in open_orders if _raw_field(order, "order_id", "id", "orderID") == order_id]
+        return {
+            "observed_at_utc": now_fn().isoformat(),
+            "open_order_count": len(open_orders),
+            "matching_order_count": len(matching),
+            "order_id": order_id,
+        }
+    except LiveClientError as exc:
+        return {
+            "observed_at_utc": now_fn().isoformat(),
+            "order_id": order_id,
+            "error": clean_live_error_message(exc),
+            "status_row": row,
+        }
+
+
+def _abort_from_open_order_snapshot(snapshot: dict[str, Any] | None) -> str | None:
+    if not snapshot:
+        return None
+    if snapshot.get("error"):
+        return "OPEN_ORDER_READ_FAILED"
+    if _optional_float(snapshot.get("matching_order_count")) == 0:
+        return "ORDER_DISAPPEARED_UNEXPECTEDLY"
+    return None
+
+
+def _abort_from_guard_snapshot(snapshot: dict[str, Any], row: dict[str, Any]) -> str | None:
+    heartbeat = _nested(snapshot, "heartbeat", "network", "api_heartbeat") or {}
+    api_status = str(heartbeat.get("api_health_status") or "").upper()
+    heartbeat_status = str(heartbeat.get("status") or "").upper()
+    if api_status == "DISCONNECTED" or heartbeat.get("disconnected") is True:
+        return "HEARTBEAT_DISCONNECTED"
+    if api_status == "CRITICAL_LATENCY" or heartbeat.get("critical_latency") is True:
+        return "HEARTBEAT_CRITICAL_LATENCY"
+    if heartbeat_status == "API_HEARTBEAT_BLOCKED":
+        blockers = heartbeat.get("blockers") if isinstance(heartbeat.get("blockers"), list) else []
+        if "API_HEARTBEAT_DISCONNECTED" in blockers:
+            return "HEARTBEAT_DISCONNECTED"
+        if "LATENCY_TOO_HIGH_FOR_LIVE_TRADING" in blockers:
+            return "HEARTBEAT_CRITICAL_LATENCY"
+
+    toxic = _nested(snapshot, "toxic_flow") or {}
+    toxic_blockers = toxic.get("blockers") if isinstance(toxic.get("blockers"), list) else []
+    if toxic.get("status") == "TOXIC_FLOW_BLOCKED" or any(
+        item in toxic_blockers for item in {"ADVERSE_SELECTION_RISK", "VOLATILITY_LOCK"}
+    ):
+        return "TOXIC_FLOW_BLOCKED"
+
+    fee = _nested(snapshot, "fee_reconciliation", "fee") or {}
+    if fee.get("status") == "FEE_BLOCKER" or fee.get("can_cover_fees") is False:
+        return "FEE_RECONCILIATION_FLIPS_NEGATIVE"
+
+    inventory = _nested(snapshot, "inventory_state", "inventory") or {}
+    matched = _optional_float(row.get("size_matched")) or 0.0
+    balance = _optional_float(inventory.get("token_balance_shares")) or 0.0
+    if matched > 0 and balance <= 0:
+        return "INVENTORY_BALANCE_MISMATCH"
+    if matched <= 0 and balance > 0:
+        return "INVENTORY_BALANCE_MISMATCH"
+
+    mutex = _nested(snapshot, "order_mutex", "mutex") or {}
+    mutex_state = str(mutex.get("order_mutex_state") or mutex.get("live_order_status") or "").upper()
+    if mutex_state and mutex_state not in {"LIVE_ORDER_OPEN", "PLACE_IN_FLIGHT", "CANCEL_IN_FLIGHT"}:
+        return "MUTEX_STATE_DRIFT"
+    return None
+
+
+def _compact_guard_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
+    compact: dict[str, Any] = {}
+    for key in ("heartbeat", "network", "api_heartbeat", "toxic_flow", "fee_reconciliation", "fee", "inventory_state", "inventory", "order_mutex", "mutex"):
+        value = snapshot.get(key)
+        if isinstance(value, dict):
+            compact[key] = {
+                item_key: value.get(item_key)
+                for item_key in (
+                    "status",
+                    "api_health_status",
+                    "latency_ms",
+                    "blockers",
+                    "can_cover_fees",
+                    "token_balance_shares",
+                    "open_order_count",
+                    "order_mutex_state",
+                    "live_order_status",
+                )
+                if item_key in value
+            }
+    return compact
 
 
 def _confirm_order_not_open(
@@ -581,11 +786,11 @@ def _base_report(
 def _status_row(status: Any, *, observed_at: datetime) -> dict[str, Any]:
     return {
         "observed_at_utc": observed_at.isoformat(),
-        "order_id": getattr(status, "order_id", None),
-        "status": getattr(status, "status", None),
-        "size_matched": _round(getattr(status, "size_matched", None)),
-        "size_remaining": _round(getattr(status, "size_remaining", None)),
-        "avg_price": _round(getattr(status, "avg_price", None)),
+        "order_id": _raw_field(status, "order_id", "id", "orderID"),
+        "status": _raw_field(status, "status"),
+        "size_matched": _round(_raw_field(status, "size_matched", "sizeMatched", "matched_size")),
+        "size_remaining": _round(_raw_field(status, "size_remaining", "sizeRemaining", "remaining_size")),
+        "avg_price": _round(_raw_field(status, "avg_price", "avgPrice")),
     }
 
 
@@ -642,6 +847,31 @@ def _optional_float(value: Any) -> float | None:
         return None
 
 
+def _raw_field(obj: Any, *keys: str) -> Any:
+    for key in keys:
+        if isinstance(obj, dict) and key in obj:
+            return obj.get(key)
+        value = getattr(obj, key, None)
+        if value is not None:
+            return value
+    return None
+
+
+def _status_text(row: dict[str, Any]) -> str:
+    value = row.get("status")
+    if value in {None, ""}:
+        return ""
+    return str(value).strip().upper()
+
+
+def _nested(snapshot: dict[str, Any], *keys: str) -> dict[str, Any] | None:
+    for key in keys:
+        value = snapshot.get(key)
+        if isinstance(value, dict):
+            return value
+    return None
+
+
 def _round(value: Any, digits: int = 6) -> float | None:
     parsed = _optional_float(value)
     if parsed is None:
@@ -670,6 +900,8 @@ def _one_line_verdict(status: str, blockers: list[str]) -> str:
         return "SINGLE_SIDE_BID_PROBE_DRY_RUN_READY: preflight is valid, but no live order path was entered."
     if status == COMPLETED:
         return "SINGLE_SIDE_BID_PROBE_COMPLETED: one BID probe was submitted and exact order-id cancel was confirmed."
+    if status == ABORTED_CANCEL_CONFIRMED:
+        return f"SINGLE_SIDE_BID_PROBE_ABORTED_CANCEL_CONFIRMED: exact cancel confirmed after {', '.join(_unique(blockers)) or 'abort'}."
     if status == EMERGENCY_REVIEW:
         return f"SINGLE_SIDE_BID_PROBE_EMERGENCY_REVIEW_REQUIRED: {', '.join(_unique(blockers)) or 'UNKNOWN'}."
     return f"SINGLE_SIDE_BID_PROBE_BLOCKED: {', '.join(_unique(blockers)) or 'UNKNOWN'}."
