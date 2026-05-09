@@ -56,7 +56,7 @@ def build_b_stability_probe_execution_preflight(
     gate_asserts = gate.get("asserts_by_id") if isinstance(gate.get("asserts_by_id"), dict) else {}
 
     checks = {
-        "token": _token_checks(authorization),
+        "token": _token_checks(authorization, binding=binding),
         "gate": _gate_checks(gate, gate_asserts),
         "approval": _approval_checks(approval_package, token_issuance_review),
         "order_mutex": _order_mutex_checks(order_mutex),
@@ -171,14 +171,18 @@ def markdown_report(report: dict[str, Any]) -> str:
     return "\n".join(lines) + "\n"
 
 
-def _token_checks(authorization: dict[str, Any]) -> dict[str, bool]:
+def _token_checks(authorization: dict[str, Any], *, binding: dict[str, Any]) -> dict[str, bool]:
+    ttl_remaining = _first_float(authorization.get("ttl_remaining_seconds"))
+    hold_seconds = _first_float(binding.get("hold_seconds"))
     return {
         "authorization_ready": authorization.get("status") == "SINGLE_SIDE_PROBE_AUTHORIZATION_READY",
         "token_valid": authorization.get("authorization_token_valid") is True,
         "execution_release_ready": authorization.get("execution_release_ready") is True,
         "token_unused": authorization.get("token_status") == "ISSUED_UNUSED",
-        "token_not_expired": _first_float(authorization.get("ttl_remaining_seconds")) is not None
-        and (_first_float(authorization.get("ttl_remaining_seconds")) or 0.0) > 0,
+        "token_not_expired": ttl_remaining is not None and ttl_remaining > 0,
+        "token_ttl_covers_hold_window": ttl_remaining is not None
+        and hold_seconds is not None
+        and ttl_remaining >= hold_seconds,
         "authorization_does_not_enable_submit": authorization.get("can_submit_order") is False
         and authorization.get("live_order_sent") is False
         and authorization.get("execution_authorized") is False,

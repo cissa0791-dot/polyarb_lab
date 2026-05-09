@@ -208,6 +208,13 @@ def test_preflight_blocks_expired_or_expended_token() -> None:
     assert "TOKEN_TOKEN_UNUSED_FAILED" in expended["blockers"]
 
 
+def test_preflight_blocks_token_ttl_shorter_than_hold_window() -> None:
+    report = build_b_stability_probe_execution_preflight(**_payload(authorization=_auth(ttl_remaining_seconds=299)))
+
+    assert report["status"] == BLOCKED_STATUS
+    assert "TOKEN_TOKEN_TTL_COVERS_HOLD_WINDOW_FAILED" in report["blockers"]
+
+
 def test_preflight_blocks_if_12_of_12_or_execution_isolation_not_ready() -> None:
     report = build_b_stability_probe_execution_preflight(
         **_payload(
