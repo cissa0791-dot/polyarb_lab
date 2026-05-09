@@ -150,6 +150,7 @@ def test_default_critical_paths_include_final_gate_report_chain() -> None:
     assert "src/live/single_side_live_rehearsal.py" in DEFAULT_CRITICAL_PATHS
     assert "src/live/one_time_auth_token.py" in DEFAULT_CRITICAL_PATHS
     assert "src/live/b_stability_token_issuance_review.py" in DEFAULT_CRITICAL_PATHS
+    assert "src/live/b_stability_probe_execution_preflight.py" in DEFAULT_CRITICAL_PATHS
     assert "scripts/build_execution_isolation_report.py" in DEFAULT_CRITICAL_PATHS
     assert "scripts/build_inventory_state_report.py" in DEFAULT_CRITICAL_PATHS
     assert "scripts/build_final_physical_report.py" in DEFAULT_CRITICAL_PATHS
@@ -157,6 +158,7 @@ def test_default_critical_paths_include_final_gate_report_chain() -> None:
     assert "scripts/build_single_side_probe_authorization_report.py" in DEFAULT_CRITICAL_PATHS
     assert "scripts/create_single_side_probe_authorization_token.py" in DEFAULT_CRITICAL_PATHS
     assert "scripts/build_b_stability_token_issuance_review.py" in DEFAULT_CRITICAL_PATHS
+    assert "scripts/build_b_stability_probe_execution_preflight.py" in DEFAULT_CRITICAL_PATHS
 
 
 def test_default_critical_paths_exclude_unreleased_shadow_tools() -> None:
