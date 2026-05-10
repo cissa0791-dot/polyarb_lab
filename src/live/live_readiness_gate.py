@@ -107,7 +107,7 @@ def build_live_readiness_gate(
         _order_mutex_assertion(order_mutex),
         _cancel_heartbeat_assertion(network, now=now, max_report_age_minutes=max_report_age_minutes),
         _tick_size_price_assertion(market),
-        _reward_scoring_assertion(market),
+        _reward_scoring_assertion(market, approved_action_scope=approved_action_scope),
         _fill_adverse_selection_assertion(market, network),
         _inventory_state_assertion(
             health=health,
@@ -434,7 +434,8 @@ def _tick_size_price_assertion(market: dict[str, Any]) -> dict[str, Any]:
     )
 
 
-def _reward_scoring_assertion(market: dict[str, Any]) -> dict[str, Any]:
+def _reward_scoring_assertion(market: dict[str, Any], *, approved_action_scope: str) -> dict[str, Any]:
+    reward_size_required = approved_action_scope != "C_FILL_LIKELIHOOD_RECONCILIATION"
     min_size = _first_float(market.get("rewards_min_size"), market.get("reward_min_size"))
     max_spread = _first_float(market.get("rewards_max_spread_cents"), market.get("reward_max_spread_cents"))
     quote_size = _first_float(market.get("quote_size"), market.get("planned_quote_size"))
@@ -445,15 +446,31 @@ def _reward_scoring_assertion(market: dict[str, Any]) -> dict[str, Any]:
         "reward_metadata_present": min_size is not None and max_spread is not None,
         "quote_size_present": quote_size is not None,
         "quote_size_meets_reward_min": quote_size is not None and min_size is not None and quote_size >= min_size,
+        "quote_size_reward_min_required_for_scope": reward_size_required,
         "spread_present": spread_cents is not None,
         "spread_inside_reward_band": spread_cents is not None and max_spread is not None and spread_cents <= max_spread,
     }
-    passed = all(checks.values())
+    passed = (
+        all(checks.values())
+        if reward_size_required
+        else (
+            checks["reward_metadata_present"]
+            and checks["quote_size_present"]
+            and checks["spread_present"]
+            and checks["spread_inside_reward_band"]
+        )
+    )
     return _assertion(
         assert_id="REWARD_SCORING_ASSERT",
         category="reward_scoring",
         passed=passed,
-        reason="REWARD_SCORING_BAND_PROVEN" if passed else "REWARD_SCORING_BAND_NOT_PROVEN",
+        reason=(
+            "REWARD_SCORING_INFORMATIONAL_FOR_C_FILL_RECONCILIATION"
+            if passed and not reward_size_required
+            else "REWARD_SCORING_BAND_PROVEN"
+            if passed
+            else "REWARD_SCORING_BAND_NOT_PROVEN"
+        ),
         blocking_reason=None if passed else "REWARD_SCORING_BAND_NOT_PROVEN",
         details={
             **checks,

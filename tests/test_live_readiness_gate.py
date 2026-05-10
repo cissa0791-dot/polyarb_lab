@@ -240,6 +240,56 @@ def test_fee_blocker_does_not_satisfy_live_readiness() -> None:
     assert details["can_cover_fees"] is False
 
 
+def test_c_fill_scope_does_not_require_reward_min_size() -> None:
+    market = {
+        "generated_at_utc": _ts(),
+        "status": "MARKET_MICROSTRUCTURE_READY",
+        "market_slug": MARKET,
+        "quote_bid": 0.36,
+        "quote_ask": 0.37,
+        "quote_size": 10.0,
+        "tick_size": 0.01,
+        "rewards_min_size": 50.0,
+        "rewards_max_spread_cents": 4.5,
+    }
+
+    report = _ready_report(
+        health=_health(),
+        market_microstructure=market,
+        approval=_approval(approved_action_scopes=["C_FILL_LIKELIHOOD_RECONCILIATION"]),
+        approved_action_scope="C_FILL_LIKELIHOOD_RECONCILIATION",
+    )
+
+    assert report["status"] == LIVE_READY_APPROVED
+    reward_assert = report["asserts_by_id"]["REWARD_SCORING_ASSERT"]
+    assert reward_assert["passed"] is True
+    assert reward_assert["reason"] == "REWARD_SCORING_INFORMATIONAL_FOR_C_FILL_RECONCILIATION"
+    assert reward_assert["details"]["quote_size_meets_reward_min"] is False
+    assert reward_assert["details"]["quote_size_reward_min_required_for_scope"] is False
+
+
+def test_default_scope_still_requires_reward_min_size() -> None:
+    market = {
+        "generated_at_utc": _ts(),
+        "status": "MARKET_MICROSTRUCTURE_READY",
+        "market_slug": MARKET,
+        "quote_bid": 0.36,
+        "quote_ask": 0.37,
+        "quote_size": 10.0,
+        "tick_size": 0.01,
+        "rewards_min_size": 50.0,
+        "rewards_max_spread_cents": 4.5,
+    }
+
+    report = _ready_report(health=_health(), market_microstructure=market)
+
+    assert report["status"] == LIVE_NOT_READY
+    assert "REWARD_SCORING_BAND_NOT_PROVEN" in report["blockers"]
+    reward_assert = report["asserts_by_id"]["REWARD_SCORING_ASSERT"]
+    assert reward_assert["details"]["quote_size_meets_reward_min"] is False
+    assert reward_assert["details"]["quote_size_reward_min_required_for_scope"] is True
+
+
 def test_toxic_flow_report_blocks_fill_adverse_selection_assertion() -> None:
     report = _ready_report(
         toxic_flow=_toxic_flow(
