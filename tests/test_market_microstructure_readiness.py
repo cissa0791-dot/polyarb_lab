@@ -254,10 +254,6 @@ def test_cli_can_fetch_orderbook_depth_for_toxic_flow(monkeypatch, tmp_path: Pat
         [
             "--market-slug",
             MARKET,
-            "--quote-bid",
-            "0.38",
-            "--quote-ask",
-            "0.39",
             "--quote-size",
             "10",
             "--tick-size",

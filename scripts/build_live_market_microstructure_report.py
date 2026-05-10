@@ -82,8 +82,8 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
     explicit = {
         "market_slug": args.market_slug,
         "token_id": token_id,
-        "quote_bid": args.quote_bid,
-        "quote_ask": args.quote_ask,
+        "quote_bid": args.quote_bid if args.quote_bid is not None else orderbook.get("best_bid"),
+        "quote_ask": args.quote_ask if args.quote_ask is not None else orderbook.get("best_ask"),
         "quote_size": args.quote_size,
         "tick_size": args.tick_size,
         "best_bid": args.best_bid if args.best_bid is not None else orderbook.get("best_bid"),
