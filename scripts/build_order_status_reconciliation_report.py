@@ -80,14 +80,39 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
         )
         return report
 
-    raw_status = str(raw.get("status") or "")
+    raw_status = str(raw.get("status") or "").strip()
     size_matched = _float_or_none(raw.get("size_matched") or raw.get("sizeMatched"))
+    size_remaining = _float_or_none(raw.get("size_remaining") or raw.get("sizeRemaining") or raw.get("remaining_size"))
     original_size = _float_or_none(raw.get("original_size") or raw.get("originalSize") or raw.get("size"))
+    field_blockers = _raw_field_blockers(
+        raw_status=raw_status,
+        size_matched=size_matched,
+        size_remaining=size_remaining,
+        original_size=original_size,
+    )
+    if field_blockers:
+        report.update(
+            {
+                "status": "ORDER_STATUS_RECONCILIATION_BLOCKED",
+                "raw_order_status": raw_status or None,
+                "size_matched": _round(size_matched),
+                "size_remaining": _round(size_remaining),
+                "original_size": _round(original_size),
+                "price": _round(raw.get("price")),
+                "side": raw.get("side"),
+                "asset_id": raw.get("asset_id") or raw.get("assetId"),
+                "market": raw.get("market"),
+                "blockers": field_blockers,
+                "one_line_verdict": f"ORDER_STATUS_RECONCILIATION_BLOCKED: {', '.join(field_blockers)}.",
+            }
+        )
+        return report
     report.update(
         {
             "status": "ORDER_STATUS_RECONCILIATION_READY",
             "raw_order_status": raw_status,
             "size_matched": _round(size_matched),
+            "size_remaining": _round(size_remaining),
             "original_size": _round(original_size),
             "price": _round(raw.get("price")),
             "side": raw.get("side"),
@@ -122,6 +147,23 @@ def _round(value: Any, digits: int = 6) -> float | None:
     if parsed is None:
         return None
     return round(parsed, digits)
+
+
+def _raw_field_blockers(
+    *,
+    raw_status: str,
+    size_matched: float | None,
+    size_remaining: float | None,
+    original_size: float | None,
+) -> list[str]:
+    blockers: list[str] = []
+    if not raw_status:
+        blockers.append("RAW_ORDER_STATUS_MISSING")
+    if size_matched is None:
+        blockers.append("SIZE_MATCHED_MISSING")
+    if size_remaining is None and original_size is None:
+        blockers.append("ORDER_SIZE_FIELDS_MISSING")
+    return blockers
 
 
 def _same_float(left: Any, right: Any, tolerance: float = 1e-9) -> bool:

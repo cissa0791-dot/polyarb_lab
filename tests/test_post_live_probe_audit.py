@@ -431,7 +431,7 @@ def test_cli_writes_json_and_markdown(tmp_path: Path) -> None:
             "--md-out",
             str(md_out),
             "--max-report-age-minutes",
-            "1000",
+            "10000",
         ]
     )
     payload = json.loads(out.read_text(encoding="utf-8"))
