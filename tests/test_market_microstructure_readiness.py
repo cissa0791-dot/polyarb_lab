@@ -41,6 +41,28 @@ def test_tick_aligned_quote_is_ready_and_report_only() -> None:
     assert report["can_submit_order"] is False
 
 
+def test_best_bid_and_ask_sizes_are_preserved_for_toxic_flow() -> None:
+    report = build_market_microstructure_report(
+        explicit={
+            "market_slug": MARKET,
+            "token_id": "123",
+            "quote_bid": 0.36,
+            "quote_ask": 0.37,
+            "quote_size": 10.0,
+            "best_bid": 0.36,
+            "best_ask": 0.37,
+            "best_bid_size": 123.45,
+            "best_ask_size": 67.89,
+            "tick_size": 0.01,
+        },
+        now=NOW,
+    )
+
+    assert report["status"] == "MARKET_MICROSTRUCTURE_READY"
+    assert report["best_bid_size"] == 123.45
+    assert report["best_ask_size"] == 67.89
+
+
 def test_missing_tick_size_blocks() -> None:
     report = build_market_microstructure_report(health_report=_health(tick_size=None), now=NOW)
 

@@ -41,6 +41,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--tick-size", type=float)
     parser.add_argument("--best-bid", type=float)
     parser.add_argument("--best-ask", type=float)
+    parser.add_argument("--best-bid-size", type=float)
+    parser.add_argument("--best-ask-size", type=float)
     parser.add_argument("--rewards-min-size", type=float)
     parser.add_argument("--rewards-max-spread-cents", type=float)
     parser.add_argument("--clob-host", default=DEFAULT_CLOB_HOST)
@@ -80,6 +82,8 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
         "tick_size": args.tick_size,
         "best_bid": args.best_bid,
         "best_ask": args.best_ask,
+        "best_bid_size": args.best_bid_size,
+        "best_ask_size": args.best_ask_size,
         "rewards_min_size": args.rewards_min_size,
         "rewards_max_spread_cents": args.rewards_max_spread_cents,
     }

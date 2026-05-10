@@ -44,7 +44,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--md-out", default=str(DEFAULT_MD_OUT))
     parser.add_argument("--target-market-slug")
     parser.add_argument("--max-live-risk-usdc", type=float)
-    parser.add_argument("--min-probe-size", type=float, default=50.0)
+    parser.add_argument(
+        "--min-probe-size",
+        type=float,
+        default=None,
+        help="Minimum probe size. Defaults to 50 for B stability probes and 10 for C fill-reconciliation probes.",
+    )
     parser.add_argument("--hold-seconds", type=int, default=300)
     parser.add_argument("--token-ttl-seconds", type=int, default=600)
     parser.add_argument("--planner-valid-seconds", type=int, default=120)
@@ -88,7 +93,7 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
         network=loaded["network"],
         target_market_slug=args.target_market_slug,
         max_live_risk_usdc=args.max_live_risk_usdc,
-        min_probe_size=args.min_probe_size,
+        min_probe_size=_default_min_probe_size(args),
         hold_seconds=args.hold_seconds,
         token_ttl_seconds=args.token_ttl_seconds,
         planner_valid_seconds=args.planner_valid_seconds,
@@ -119,6 +124,14 @@ def _load_json(path: Path) -> dict[str, Any]:
     except json.JSONDecodeError:
         return {}
     return payload if isinstance(payload, dict) else {}
+
+
+def _default_min_probe_size(args: argparse.Namespace) -> float:
+    if args.min_probe_size is not None:
+        return float(args.min_probe_size)
+    if args.probe_intent == PROBE_INTENT_FILL_LIKELIHOOD:
+        return 10.0
+    return 50.0
 
 
 def main(argv: list[str] | None = None) -> int:

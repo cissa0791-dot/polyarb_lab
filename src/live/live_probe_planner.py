@@ -28,6 +28,7 @@ DEFAULT_TOKEN_TTL_SECONDS = 600
 DEFAULT_PLANNER_VALID_SECONDS = 120
 DEFAULT_VISIBILITY_GRACE_PERIOD_MS = 2000.0
 DEFAULT_MIN_PROBE_SIZE = 50.0
+DEFAULT_C_FILL_MIN_PROBE_SIZE = 10.0
 DEFAULT_STABILITY_MAX_FILL_PROBABILITY = 0.30
 
 
@@ -359,7 +360,11 @@ def _evaluate_candidate(
     best_bid = _first_float(candidate.get("best_bid"), quote_bid)
     best_ask = _first_float(candidate.get("best_ask"), quote_ask)
     rewards_min_size = _first_float(candidate.get("rewards_min_size"))
-    quote_size = _recommended_size(rewards_min_size=rewards_min_size, min_probe_size=min_probe_size)
+    quote_size = _recommended_size(
+        rewards_min_size=rewards_min_size,
+        min_probe_size=min_probe_size,
+        probe_intent=probe_intent,
+    )
     quote_price = quote_bid
     capital_required = _capital_required(quote_price, quote_size)
     expected_max_loss = capital_required
@@ -389,11 +394,12 @@ def _evaluate_candidate(
         blockers.append("QUOTE_ASK_TICK_MISALIGNED")
     if candidate.get("checks") and not _candidate_check(candidate, "price_bounds_ok"):
         blockers.append("QUOTE_PRICE_OUT_OF_BOUNDS")
-    if rewards_min_size is None:
+    reward_required_for_intent = probe_intent != PROBE_INTENT_FILL_LIKELIHOOD
+    if rewards_min_size is None and reward_required_for_intent:
         blockers.append("REWARD_MIN_SIZE_MISSING")
     if quote_size is None:
         blockers.append("QUOTE_SIZE_MISSING")
-    elif rewards_min_size is not None and quote_size < rewards_min_size:
+    elif reward_required_for_intent and rewards_min_size is not None and quote_size < rewards_min_size:
         blockers.append("QUOTE_SIZE_BELOW_REWARD_MIN_SIZE")
     if capital_required is None:
         blockers.append("CAPITAL_REQUIRED_UNKNOWN")
@@ -438,7 +444,10 @@ def _evaluate_candidate(
         and "QUOTE_ASK_TICK_MISALIGNED" not in blockers
         and "QUOTE_PRICE_OUT_OF_BOUNDS" not in blockers
         and "QUOTE_PRICE_INVERSION" not in blockers,
-        "reward_min_size_check": rewards_min_size is not None and quote_size is not None and quote_size >= rewards_min_size,
+        "reward_min_size_check": (
+            rewards_min_size is not None and quote_size is not None and quote_size >= rewards_min_size
+        ),
+        "reward_min_size_required_for_probe": reward_required_for_intent,
         "toxic_flow_check": "TOXIC_FLOW_NOT_CLEAR" not in blockers
         and "FILL_PROBABILITY_BELOW_MINIMUM" not in blockers
         and "FILL_PROBABILITY_MISSING_FOR_STABILITY_PROBE" not in blockers
@@ -465,7 +474,11 @@ def _evaluate_candidate(
         "capital_required_usdc": _round(capital_required),
         "capital_buffer_usdc": _round((max_live_risk or 0.0) - (capital_required or 0.0)) if max_live_risk is not None else None,
         "expected_max_loss_if_filled": _round(expected_max_loss),
-        "sizing_reason": _sizing_reason(rewards_min_size, min_probe_size),
+        "sizing_reason": _sizing_reason(
+            rewards_min_size=rewards_min_size,
+            min_probe_size=min_probe_size,
+            probe_intent=probe_intent,
+        ),
         "reward_min_size": _round(rewards_min_size),
         "reward_max_spread_cents": _round(candidate.get("rewards_max_spread_cents")),
         "estimated_net_profit_usdc": _round(fee_reconciliation.get("estimated_net_profit_usdc")),
@@ -589,12 +602,18 @@ def _candidate_check(candidate: dict[str, Any], key: str) -> bool:
     return checks.get(key) is True
 
 
-def _recommended_size(*, rewards_min_size: float | None, min_probe_size: float) -> float | None:
+def _recommended_size(*, rewards_min_size: float | None, min_probe_size: float, probe_intent: str) -> float | None:
+    if probe_intent == PROBE_INTENT_FILL_LIKELIHOOD:
+        return min_probe_size if min_probe_size is not None and min_probe_size > 0.0 else None
     candidates = [value for value in (rewards_min_size, min_probe_size) if value is not None and value > 0.0]
     return max(candidates) if candidates else None
 
 
-def _sizing_reason(rewards_min_size: float | None, min_probe_size: float) -> str:
+def _sizing_reason(*, rewards_min_size: float | None, min_probe_size: float, probe_intent: str) -> str:
+    if probe_intent == PROBE_INTENT_FILL_LIKELIHOOD:
+        if rewards_min_size is not None and min_probe_size < rewards_min_size:
+            return "C_FILL_RECONCILIATION_TINY_SIZE_NOT_REWARD_ELIGIBLE"
+        return "C_FILL_RECONCILIATION_TINY_SIZE"
     if rewards_min_size is None:
         return "BLOCKED_REWARD_MIN_SIZE_UNKNOWN"
     if rewards_min_size >= min_probe_size:

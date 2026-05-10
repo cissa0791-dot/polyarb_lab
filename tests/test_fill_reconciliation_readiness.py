@@ -135,8 +135,32 @@ def test_missing_order_status_source_blocks() -> None:
 
     assert report["status"] == BLOCKED_STATUS
     assert "ORDER_STATUS_SOURCE_MISSING" in report["blockers"]
-    assert "FILL_DETECTION_FIELDS_MISSING" in report["blockers"]
-    assert "PARTIAL_FILL_DETECTION_FIELDS_MISSING" in report["blockers"]
+    assert "FILL_DETECTION_SOURCE_MISSING" in report["blockers"]
+    assert "PARTIAL_FILL_DETECTION_SOURCE_MISSING" in report["blockers"]
+
+
+def test_pre_c_readiness_does_not_require_current_fill_fields() -> None:
+    report = _report(
+        order_status={
+            "status": "ORDER_STATUS_RECONCILIATION_BLOCKED",
+            "order_id": ORDER_ID,
+            "blockers": [
+                "RAW_ORDER_STATUS_MISSING",
+                "SIZE_MATCHED_MISSING",
+                "ORDER_SIZE_FIELDS_MISSING",
+            ],
+        },
+        inventory_state=_inventory(status="INVENTORY_STATE_CLEAR", token_balance_shares=0.0),
+        order_mutex=_mutex(order_mutex_state="NO_ORDER"),
+    )
+
+    assert report["status"] == READY_STATUS
+    assert report["fill_detectable"] is True
+    assert report["partial_fill_detectable"] is True
+    assert report["checks"]["current_order_fill_fields_present"] is False
+    assert report["checks"]["current_order_partial_fields_present"] is False
+    assert report["remaining_order_cancel_required"] is False
+    assert report["can_submit_order"] is False
 
 
 def test_fee_report_must_explicitly_cover_fees() -> None:

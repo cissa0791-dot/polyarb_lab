@@ -34,6 +34,22 @@ def build_market_microstructure_report(
     quote_size = _first_float(explicit.get("quote_size"), candidate.get("quote_size"), health_target.get("quote_size"))
     best_bid = _first_float(explicit.get("best_bid"), candidate.get("best_bid"), health_target.get("best_bid"))
     best_ask = _first_float(explicit.get("best_ask"), candidate.get("best_ask"), health_target.get("best_ask"))
+    best_bid_size = _first_float(
+        explicit.get("best_bid_size"),
+        explicit.get("bid_size"),
+        candidate.get("best_bid_size"),
+        candidate.get("bid_size"),
+        health_target.get("best_bid_size"),
+        health_target.get("bid_size"),
+    )
+    best_ask_size = _first_float(
+        explicit.get("best_ask_size"),
+        explicit.get("ask_size"),
+        candidate.get("best_ask_size"),
+        candidate.get("ask_size"),
+        health_target.get("best_ask_size"),
+        health_target.get("ask_size"),
+    )
     tick_size, tick_source, tick_error = _resolve_tick_size(
         explicit=explicit,
         candidate=candidate,
@@ -86,6 +102,8 @@ def build_market_microstructure_report(
         "token_id": token_id,
         "best_bid": _round(best_bid),
         "best_ask": _round(best_ask),
+        "best_bid_size": _round(best_bid_size),
+        "best_ask_size": _round(best_ask_size),
         "quote_bid": _round(quote_bid),
         "quote_ask": _round(quote_ask),
         "quote_size": _round(quote_size),

@@ -52,14 +52,13 @@ def build_fill_reconciliation_readiness(
     if original_size is None and size_matched is not None and size_remaining is not None:
         original_size = size_matched + size_remaining
 
-    order_status_source_ready = bool(order_status) and (
-        order_status.get("status") == "ORDER_STATUS_RECONCILIATION_READY"
-        or bool(order_status.get("raw_order_status") or order_status.get("order_status") or order_status.get("status"))
+    order_status_source_ready = _order_status_source_ready(order_status)
+    current_order_fill_fields_present = size_matched is not None
+    current_order_partial_fields_present = size_remaining is not None or (
+        original_size is not None and size_matched is not None
     )
-    fill_detectable = order_status_source_ready and size_matched is not None
-    partial_fill_detectable = fill_detectable and (
-        size_remaining is not None or (original_size is not None and size_matched is not None)
-    )
+    fill_detectable = order_status_source_ready
+    partial_fill_detectable = order_status_source_ready
     partial_fill_observed = (
         size_matched is not None
         and size_remaining is not None
@@ -93,6 +92,8 @@ def build_fill_reconciliation_readiness(
 
     checks = {
         "order_status_source_ready": order_status_source_ready,
+        "current_order_fill_fields_present": current_order_fill_fields_present,
+        "current_order_partial_fields_present": current_order_partial_fields_present,
         "fill_detectable": fill_detectable,
         "partial_fill_detectable": partial_fill_detectable,
         "inventory_update_source_ready": inventory_update_source_ready,
@@ -104,10 +105,8 @@ def build_fill_reconciliation_readiness(
     blockers: list[str] = []
     if not order_status_source_ready:
         blockers.append("ORDER_STATUS_SOURCE_MISSING")
-    if not fill_detectable:
-        blockers.append("FILL_DETECTION_FIELDS_MISSING")
-    if not partial_fill_detectable:
-        blockers.append("PARTIAL_FILL_DETECTION_FIELDS_MISSING")
+        blockers.append("FILL_DETECTION_SOURCE_MISSING")
+        blockers.append("PARTIAL_FILL_DETECTION_SOURCE_MISSING")
     if not inventory_update_source_ready:
         blockers.append("INVENTORY_UPDATE_SOURCE_MISSING")
     if not cash_delta_source_ready:
@@ -155,6 +154,23 @@ def build_fill_reconciliation_readiness(
 
 def _raw_status(payload: dict[str, Any]) -> str:
     return str(payload.get("raw_order_status") or payload.get("order_status") or payload.get("status") or "").upper()
+
+
+def _order_status_source_ready(payload: dict[str, Any]) -> bool:
+    if not payload:
+        return False
+    status = str(payload.get("status") or "").upper()
+    if status == "ORDER_STATUS_RECONCILIATION_READY":
+        return True
+    blockers = payload.get("blockers") if isinstance(payload.get("blockers"), list) else []
+    field_only_blockers = {
+        "RAW_ORDER_STATUS_MISSING",
+        "SIZE_MATCHED_MISSING",
+        "ORDER_SIZE_FIELDS_MISSING",
+    }
+    if status == "ORDER_STATUS_RECONCILIATION_BLOCKED" and blockers and set(map(str, blockers)).issubset(field_only_blockers):
+        return True
+    return bool(payload.get("raw_order_status") or payload.get("order_status") or payload.get("order_id"))
 
 
 def _first_float(*values: Any) -> float | None:

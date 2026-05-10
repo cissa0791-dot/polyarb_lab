@@ -206,6 +206,44 @@ def test_reward_min_size_missing_rejects_candidate() -> None:
     assert "REWARD_MIN_SIZE_MISSING" in report["rejected_plans"][0]["blockers"]
 
 
+def test_c_fill_probe_uses_tiny_size_without_reward_min_size_block() -> None:
+    market = _market(rewards_min_size=50.0, quote_size=50.0)
+    fee = _fee(quote_size=10.0)
+
+    report = _plan(
+        market_microstructure=market,
+        fee_reconciliation=fee,
+        probe_intent="C_FILL_LIKELIHOOD_RECONCILIATION",
+        min_probe_size=10.0,
+    )
+
+    assert report["status"] == "LIVE_PROBE_PLAN_READY"
+    assert report["recommended_plan"]["quote_size"] == 10.0
+    assert report["recommended_plan"]["capital_required_usdc"] == 4.1
+    assert report["recommended_plan"]["sizing_reason"] == "C_FILL_RECONCILIATION_TINY_SIZE_NOT_REWARD_ELIGIBLE"
+    assert report["recommended_plan"]["checks"]["reward_min_size_check"] is False
+    assert report["recommended_plan"]["checks"]["reward_min_size_required_for_probe"] is False
+    assert "QUOTE_SIZE_BELOW_REWARD_MIN_SIZE" not in report["recommended_plan"]["blockers"]
+    assert report["can_submit_order"] is False
+
+
+def test_c_fill_probe_does_not_require_reward_min_size_metadata() -> None:
+    market = _market()
+    market.pop("rewards_min_size")
+
+    report = _plan(
+        market_microstructure=market,
+        fee_reconciliation=_fee(quote_size=10.0),
+        probe_intent="C_FILL_LIKELIHOOD_RECONCILIATION",
+        min_probe_size=10.0,
+    )
+
+    assert report["status"] == "LIVE_PROBE_PLAN_READY"
+    assert report["recommended_plan"]["quote_size"] == 10.0
+    assert report["recommended_plan"]["reward_min_size"] is None
+    assert "REWARD_MIN_SIZE_MISSING" not in report["recommended_plan"]["blockers"]
+
+
 def test_toxic_unsafe_rejects_candidate() -> None:
     report = _plan(toxic_flow=_toxic(status="TOXIC_FLOW_BLOCKED", blockers=["ADVERSE_SELECTION_RISK"]))
 
@@ -321,3 +359,44 @@ def test_cli_writes_json_and_markdown(tmp_path: Path) -> None:
     assert payload["recommended_plan"]["quote_size"] == 50.0
     assert payload["can_submit_order"] is False
     assert md_out.exists()
+
+
+def test_cli_defaults_c_fill_probe_size_to_ten(tmp_path: Path) -> None:
+    reports = tmp_path / "reports"
+    reports.mkdir()
+    files = {
+        "live_readiness_gate_latest.json": _gate(),
+        "deposit_wallet_readonly_latest.json": {"status": "DEPOSIT_WALLET_READY", "available_usdc": 306.678811},
+        "live_market_microstructure_latest.json": _market(),
+        "toxic_flow_latest.json": _toxic(),
+        "fee_reconciliation_latest.json": _fee(quote_size=10.0),
+        "inventory_state_latest.json": {"status": "INVENTORY_STATE_CLEAR"},
+        "order_mutex_readiness_latest.json": {"status": "ORDER_MUTEX_READY", "order_mutex_state": "NO_ORDER"},
+        "live_network_readiness_latest.json": {"status": "API_HEARTBEAT_READY", "latency_ms": 98.7},
+    }
+    for filename, payload in files.items():
+        (reports / filename).write_text(json.dumps(payload), encoding="utf-8")
+    out = tmp_path / "planner.json"
+    md_out = tmp_path / "planner.md"
+
+    rc = main(
+        [
+            "--reports-dir",
+            str(reports),
+            "--out",
+            str(out),
+            "--md-out",
+            str(md_out),
+            "--target-market-slug",
+            MARKET,
+            "--max-live-risk-usdc",
+            "296.67",
+            "--probe-intent",
+            "C_FILL_LIKELIHOOD_RECONCILIATION",
+        ]
+    )
+
+    payload = json.loads(out.read_text(encoding="utf-8"))
+    assert rc == 0
+    assert payload["status"] == "LIVE_PROBE_PLAN_READY"
+    assert payload["recommended_plan"]["quote_size"] == 10.0
