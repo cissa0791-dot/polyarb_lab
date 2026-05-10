@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import scripts.build_live_market_microstructure_report as builder
-from scripts.build_live_market_microstructure_report import main, resolve_token_id_from_gamma
+from scripts.build_live_market_microstructure_report import fetch_orderbook_top, main, resolve_token_id_from_gamma
 from src.live.market_microstructure_readiness import build_market_microstructure_report
 
 
@@ -195,3 +195,86 @@ def test_cli_resolves_token_from_gamma_when_token_id_omitted(monkeypatch, tmp_pa
     assert payload["status"] == "MARKET_MICROSTRUCTURE_READY"
     assert payload["token_id"] == "yes-token"
     assert payload["token_id_source"] == "GAMMA_MARKET_SLUG"
+
+
+def test_fetch_orderbook_top_selects_best_prices_and_sizes(monkeypatch) -> None:
+    class Response:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self):
+            return {
+                "bids": [{"price": "0.38", "size": "11"}, {"price": "0.41", "size": "22"}],
+                "asks": [{"price": "0.43", "size": "33"}, {"price": "0.42", "size": "44"}],
+            }
+
+    monkeypatch.setattr(builder.httpx, "get", lambda *args, **kwargs: Response())
+
+    book = fetch_orderbook_top(clob_host="https://clob.example", token_id="yes-token")
+
+    assert book["orderbook_source"] == "CLOB_BOOK_HTTP"
+    assert book["orderbook_read_error"] is None
+    assert book["best_bid"] == 0.41
+    assert book["best_bid_size"] == 22.0
+    assert book["best_ask"] == 0.42
+    assert book["best_ask_size"] == 44.0
+
+
+def test_cli_can_fetch_orderbook_depth_for_toxic_flow(monkeypatch, tmp_path: Path) -> None:
+    class GammaResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self):
+            return [
+                {
+                    "slug": MARKET,
+                    "outcomes": '["Yes", "No"]',
+                    "clobTokenIds": '["yes-token", "no-token"]',
+                }
+            ]
+
+    class BookResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self):
+            return {
+                "bids": [{"price": "0.38", "size": "55"}],
+                "asks": [{"price": "0.39", "size": "66"}],
+            }
+
+    def fake_get(url, *args, **kwargs):
+        return GammaResponse() if "gamma" in url else BookResponse()
+
+    monkeypatch.setattr(builder.httpx, "get", fake_get)
+    out = tmp_path / "market_microstructure.json"
+
+    rc = main(
+        [
+            "--market-slug",
+            MARKET,
+            "--quote-bid",
+            "0.38",
+            "--quote-ask",
+            "0.39",
+            "--quote-size",
+            "10",
+            "--tick-size",
+            "0.01",
+            "--fetch-orderbook",
+            "--gamma-host",
+            "https://gamma.example",
+            "--out",
+            str(out),
+        ]
+    )
+    payload = json.loads(out.read_text(encoding="utf-8"))
+
+    assert rc == 0
+    assert payload["status"] == "MARKET_MICROSTRUCTURE_READY"
+    assert payload["best_bid"] == 0.38
+    assert payload["best_bid_size"] == 55.0
+    assert payload["best_ask"] == 0.39
+    assert payload["best_ask_size"] == 66.0
+    assert payload["orderbook_source"] == "CLOB_BOOK_HTTP"

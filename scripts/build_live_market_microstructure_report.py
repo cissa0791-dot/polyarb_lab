@@ -55,6 +55,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--chain-id", type=int, default=137)
     parser.add_argument("--fetch-tick-size", action="store_true")
+    parser.add_argument(
+        "--fetch-orderbook",
+        action="store_true",
+        help="Read current CLOB top-of-book for the resolved token and include best bid/ask sizes.",
+    )
     parser.add_argument("--pretty", action="store_true")
     return parser.parse_args(argv)
 
@@ -73,6 +78,7 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
             outcome=args.token_outcome,
         )
 
+    orderbook = fetch_orderbook_top(clob_host=args.clob_host, token_id=token_id) if args.fetch_orderbook and token_id else {}
     explicit = {
         "market_slug": args.market_slug,
         "token_id": token_id,
@@ -80,10 +86,10 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
         "quote_ask": args.quote_ask,
         "quote_size": args.quote_size,
         "tick_size": args.tick_size,
-        "best_bid": args.best_bid,
-        "best_ask": args.best_ask,
-        "best_bid_size": args.best_bid_size,
-        "best_ask_size": args.best_ask_size,
+        "best_bid": args.best_bid if args.best_bid is not None else orderbook.get("best_bid"),
+        "best_ask": args.best_ask if args.best_ask is not None else orderbook.get("best_ask"),
+        "best_bid_size": args.best_bid_size if args.best_bid_size is not None else orderbook.get("best_bid_size"),
+        "best_ask_size": args.best_ask_size if args.best_ask_size is not None else orderbook.get("best_ask_size"),
         "rewards_min_size": args.rewards_min_size,
         "rewards_max_spread_cents": args.rewards_max_spread_cents,
     }
@@ -95,6 +101,9 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
         tick_size_reader=tick_reader,
     )
     report.update(token_resolution)
+    if orderbook:
+        report["orderbook_source"] = orderbook.get("orderbook_source")
+        report["orderbook_read_error"] = orderbook.get("orderbook_read_error")
     attach_writer_metadata(
         report,
         writer_script=Path(__file__),
@@ -104,6 +113,52 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
         root=ROOT,
     )
     return report
+
+
+def fetch_orderbook_top(*, clob_host: str, token_id: str) -> dict[str, Any]:
+    meta: dict[str, Any] = {"orderbook_source": "CLOB_BOOK_HTTP", "orderbook_read_error": None}
+    try:
+        response = httpx.get(f"{clob_host.rstrip('/')}/book", params={"token_id": str(token_id)}, timeout=15)
+        response.raise_for_status()
+        payload = response.json()
+    except Exception as exc:
+        return {**meta, "orderbook_read_error": f"{type(exc).__name__}: {exc}"}
+    if not isinstance(payload, dict):
+        return {**meta, "orderbook_read_error": "CLOB_BOOK_RESPONSE_NOT_OBJECT"}
+    bids = _levels(payload.get("bids"))
+    asks = _levels(payload.get("asks"))
+    best_bid = max(bids, key=lambda item: item["price"]) if bids else None
+    best_ask = min(asks, key=lambda item: item["price"]) if asks else None
+    return {
+        **meta,
+        "best_bid": best_bid["price"] if best_bid else None,
+        "best_bid_size": best_bid["size"] if best_bid else None,
+        "best_ask": best_ask["price"] if best_ask else None,
+        "best_ask_size": best_ask["size"] if best_ask else None,
+    }
+
+
+def _levels(value: Any) -> list[dict[str, float]]:
+    rows = value if isinstance(value, list) else []
+    out: list[dict[str, float]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        price = _float(row.get("price"))
+        size = _float(row.get("size"))
+        if price is None or size is None:
+            continue
+        out.append({"price": price, "size": size})
+    return out
+
+
+def _float(value: Any) -> float | None:
+    if value in {None, ""}:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _load_json(path: str) -> dict[str, Any]:
